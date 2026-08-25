@@ -15,9 +15,29 @@
  * this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "src/utils/args_handler/args_handler.h"
+#include <string>
 
-int main(int argc, char** argv) {
-  Flake::Utils::ArgsHandler::PrintHelp();
-  return 0;
-}
+#ifndef SRC_UTILS_ARGS_HANDLER_ARGS_HANDLER_H_
+#define SRC_UTILS_ARGS_HANDLER_ARGS_HANDLER_H_
+
+namespace Flake {
+namespace Utils {
+
+struct StartupArgs {
+  int info_level = 0;
+  std::string process = "";
+  bool disable_wayland = false;
+  bool log_to_stdout = true;
+  bool log_to_file = true;
+  bool log_monotonic_time = false;
+};
+
+class ArgsHandler {
+ public:
+  static void PrintHelp();
+};
+
+}  // namespace Utils
+}  // namespace Flake
+
+#endif  // SRC_UTILS_ARGS_HANDLER_ARGS_HANDLER_H_

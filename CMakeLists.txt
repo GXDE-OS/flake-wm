@@ -19,8 +19,10 @@ include(cmake/wlroots.cmake)
 
 add_executable(flakewm
   src/main.cc
+  src/utils/args_handler/args_handler.h
+  src/utils/args_handler/args_handler.cc
 )
 
-target_include_directories(flakewm ./)
+target_include_directories(flakewm PRIVATE ./)
 target_compile_features(flakewm PRIVATE cxx_std_20)
 target_link_libraries(flakewm PRIVATE Wlroots::Wlroots)
