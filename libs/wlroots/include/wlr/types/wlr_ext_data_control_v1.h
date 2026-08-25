@@ -21,9 +21,7 @@ struct wlr_ext_data_control_manager_v1 {
 		struct wl_signal new_device; // wlr_ext_data_control_device_v1
 	} events;
 
-	struct {
-		struct wl_listener display_destroy;
-	} WLR_PRIVATE;
+	struct wl_listener display_destroy;
 };
 
 struct wlr_ext_data_control_device_v1 {
@@ -35,11 +33,9 @@ struct wlr_ext_data_control_device_v1 {
 	struct wl_resource *selection_offer_resource; // current selection offer
 	struct wl_resource *primary_selection_offer_resource; // current primary selection offer
 
-	struct {
-		struct wl_listener seat_destroy;
-		struct wl_listener seat_set_selection;
-		struct wl_listener seat_set_primary_selection;
-	} WLR_PRIVATE;
+	struct wl_listener seat_destroy;
+	struct wl_listener seat_set_selection;
+	struct wl_listener seat_set_primary_selection;
 };
 
 struct wlr_ext_data_control_manager_v1 *wlr_ext_data_control_manager_v1_create(

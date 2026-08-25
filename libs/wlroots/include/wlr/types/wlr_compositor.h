@@ -127,8 +127,6 @@ struct wlr_surface_output {
 	struct {
 		struct wl_listener bind;
 		struct wl_listener destroy;
-
-		bool suspended;
 	} WLR_PRIVATE;
 };
 

@@ -1,5 +1,5 @@
 executable(
 	'tinywl',
-	'tinywl.c',
+	['tinywl.c', protocols_server_header['xdg-shell']],
 	dependencies: wlroots,
 )

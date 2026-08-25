@@ -189,7 +189,7 @@ void vulkan_texture_destroy(struct wlr_vk_texture *texture) {
 	// when we recorded a command to fill this image _this_ frame,
 	// it has to be executed before the texture can be destroyed.
 	// Add it to the renderer->destroy_textures list, destroying
-	// _after_ the stage command buffer has executed
+	// _after_ the stage command buffer has exectued
 	if (texture->last_used_cb != NULL) {
 		assert(texture->destroy_link.next == NULL); // not already inserted
 		wl_list_insert(&texture->last_used_cb->destroy_textures,
@@ -269,12 +269,10 @@ static struct wlr_vk_texture *vulkan_texture_create(
 }
 
 struct wlr_vk_texture_view *vulkan_texture_get_or_create_view(struct wlr_vk_texture *texture,
-		const struct wlr_vk_pipeline_layout *pipeline_layout, bool srgb) {
-	assert(texture->using_mutable_srgb || !srgb);
-
+		const struct wlr_vk_pipeline_layout *pipeline_layout) {
 	struct wlr_vk_texture_view *view;
 	wl_list_for_each(view, &texture->views, link) {
-		if (view->layout == pipeline_layout && view->srgb == srgb) {
+		if (view->layout == pipeline_layout) {
 			return view;
 		}
 	}
@@ -285,7 +283,6 @@ struct wlr_vk_texture_view *vulkan_texture_get_or_create_view(struct wlr_vk_text
 	}
 
 	view->layout = pipeline_layout;
-	view->srgb = srgb;
 
 	VkResult res;
 	VkDevice dev = texture->renderer->dev->dev;
@@ -293,11 +290,12 @@ struct wlr_vk_texture_view *vulkan_texture_get_or_create_view(struct wlr_vk_text
 	VkImageViewCreateInfo view_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 		.viewType = VK_IMAGE_VIEW_TYPE_2D,
-		.format = srgb ? texture->format->vk_srgb : texture->format->vk,
+		.format = texture->using_mutable_srgb ? texture->format->vk_srgb
+			: texture->format->vk,
 		.components.r = VK_COMPONENT_SWIZZLE_IDENTITY,
 		.components.g = VK_COMPONENT_SWIZZLE_IDENTITY,
 		.components.b = VK_COMPONENT_SWIZZLE_IDENTITY,
-		.components.a = texture->has_alpha || vulkan_format_is_ycbcr(texture->format)
+		.components.a = texture->has_alpha || texture->format->is_ycbcr
 			? VK_COMPONENT_SWIZZLE_IDENTITY
 			: VK_COMPONENT_SWIZZLE_ONE,
 		.subresourceRange = (VkImageSubresourceRange){
@@ -311,7 +309,7 @@ struct wlr_vk_texture_view *vulkan_texture_get_or_create_view(struct wlr_vk_text
 	};
 
 	VkSamplerYcbcrConversionInfo ycbcr_conversion_info;
-	if (vulkan_format_is_ycbcr(texture->format)) {
+	if (texture->format->is_ycbcr) {
 		assert(pipeline_layout->ycbcr.conversion != VK_NULL_HANDLE);
 		ycbcr_conversion_info = (VkSamplerYcbcrConversionInfo){
 			.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
@@ -355,10 +353,10 @@ struct wlr_vk_texture_view *vulkan_texture_get_or_create_view(struct wlr_vk_text
 
 static void texture_set_format(struct wlr_vk_texture *texture,
 		const struct wlr_vk_format *format, bool has_mutable_srgb) {
-	assert(!(vulkan_format_is_ycbcr(format) && has_mutable_srgb));
-
 	texture->format = format;
 	texture->using_mutable_srgb = has_mutable_srgb;
+	texture->transform = !format->is_ycbcr && has_mutable_srgb ?
+		WLR_VK_TEXTURE_TRANSFORM_IDENTITY : WLR_VK_TEXTURE_TRANSFORM_SRGB;
 
 	const struct wlr_pixel_format_info *format_info =
 		drm_get_pixel_format_info(format->drm);
@@ -366,7 +364,7 @@ static void texture_set_format(struct wlr_vk_texture *texture,
 		texture->has_alpha = pixel_format_has_alpha(format->drm);
 	} else {
 		// We don't have format info for multi-planar formats
-		assert(vulkan_format_is_ycbcr(texture->format));
+		assert(texture->format->is_ycbcr);
 	}
 }
 
@@ -378,7 +376,7 @@ static struct wlr_texture *vulkan_texture_from_pixels(
 
 	const struct wlr_vk_format_props *fmt =
 		vulkan_format_props_from_drm(renderer->dev, drm_fmt);
-	if (fmt == NULL || vulkan_format_is_ycbcr(&fmt->format)) {
+	if (fmt == NULL || fmt->format.is_ycbcr) {
 		char *format_name = drmGetFormatName(drm_fmt);
 		wlr_log(WLR_ERROR, "Unsupported pixel format %s (0x%08"PRIX32")",
 			format_name, drm_fmt);
@@ -399,14 +397,14 @@ static struct wlr_texture *vulkan_texture_from_pixels(
 
 	texture_set_format(texture, &fmt->format, fmt->shm.has_mutable_srgb);
 
-	VkFormat view_formats[] = {
+	VkFormat view_formats[2] = {
 		fmt->format.vk,
 		fmt->format.vk_srgb,
 	};
 	VkImageFormatListCreateInfoKHR list_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO_KHR,
 		.pViewFormats = view_formats,
-		.viewFormatCount = sizeof(view_formats) / sizeof(view_formats[0]),
+		.viewFormatCount = 2,
 	};
 	VkImageCreateInfo img_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -600,14 +598,14 @@ VkImage vulkan_import_dmabuf(struct wlr_vk_renderer *renderer,
 	};
 	eimg.pNext = &mod_info;
 
-	VkFormat view_formats[] = {
+	VkFormat view_formats[2] = {
 		fmt->format.vk,
 		fmt->format.vk_srgb,
 	};
 	VkImageFormatListCreateInfoKHR list_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO_KHR,
 		.pViewFormats = view_formats,
-		.viewFormatCount = sizeof(view_formats) / sizeof(view_formats[0]),
+		.viewFormatCount = 2,
 	};
 	if (mod->has_mutable_srgb) {
 		mod_info.pNext = &list_info;

@@ -10,7 +10,7 @@
 #define WLR_TYPES_WLR_CURSOR_SHAPE_V1_H
 
 #include <wayland-server-core.h>
-#include <wayland-protocols/cursor-shape-v1-enum.h>
+#include "cursor-shape-v1-protocol.h"
 
 /**
  * Manager for the cursor-shape-v1 protocol.

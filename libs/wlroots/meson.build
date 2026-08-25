@@ -1,7 +1,7 @@
 project(
 	'wlroots',
 	'c',
-	version: '0.20.2',
+	version: '0.19.3',
 	license: 'MIT',
 	meson_version: '>=1.3',
 	default_options: [
@@ -86,7 +86,7 @@ internal_features = {
 internal_config = configuration_data()
 
 wayland_kwargs = {
-	'version': '>=1.24.0',
+	'version': '>=1.23.1',
 	'fallback': 'wayland',
 	'default_options': [
 		'tests=false',
@@ -98,15 +98,15 @@ wayland_server = dependency('wayland-server',
 )
 
 drm = dependency('libdrm',
-	version: '>=2.4.129',
+	version: '>=2.4.122',
 	fallback: 'libdrm',
 	default_options: [
 		'auto_features=disabled',
 		'tests=false',
 	],
 )
-xkbcommon = dependency('xkbcommon',
-	version: '>=1.8.0',
+xkbcommon = dependency(
+	'xkbcommon',
 	fallback: 'libxkbcommon',
 	default_options: [
 		'enable-tools=false',

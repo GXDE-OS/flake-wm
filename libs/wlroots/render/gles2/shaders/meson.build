@@ -1,4 +1,3 @@
-check = find_program('./check.sh', native: true)
 embed = find_program('./embed.sh', native: true)
 
 shaders = [
@@ -14,8 +13,7 @@ foreach name : shaders
 		'gles2-' + name,
 		input: name,
 		output: name + '_check',
-		command: [check, glslang, '@INPUT@'],
-		capture: true,
+		command: [glslang, '@INPUT@'],
 		build_by_default: true,
 	)
 
