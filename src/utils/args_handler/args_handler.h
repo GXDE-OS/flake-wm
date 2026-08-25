@@ -30,6 +30,7 @@ struct StartupArgs {
   bool log_to_stdout = true;
   bool log_to_file = true;
   bool log_monotonic_time = false;
+  bool nested = false;
   bool exit_flag = false;
 };
 

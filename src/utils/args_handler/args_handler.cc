@@ -137,6 +137,11 @@ ArgsHandler::ArgsHandler(char** argv) {
       args_.info_level = 1;
       continue;
     }
+
+    if (cur == "-n" || cur == "--nested") {
+      args_.nested = true;
+      continue;
+    }
   }
 }
 
@@ -156,6 +161,8 @@ void ArgsHandler::PrintHelp() {
   std::cout << "  -s, --session <process>  Run session on startup\n";
   std::cout << "  -v, --version            Show the version number & quit.\n";
   std::cout << "  -V, --verbose            Enables more verbose logging.\n";
+  std::cout << "  -n, --nested             "
+    << "Run this compositor in nested mode.\n";
   std::cout << "-----------------------------------------------------------\n";
   std::cout << "Debug options:\n";
   std::cout << "  -Dnoxwayland    Disable XWayland support\n";
