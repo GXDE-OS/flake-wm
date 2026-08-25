@@ -23,3 +23,11 @@
 * **提交日期**: Fri May 29 10:49:42 2026 +0200
 * **拉取日期**: Tue Aug 25 12:55:05 +0800
 * **许可证**: MIT License
+
+## Pixman
+* **上游**: https://gitlab.freedesktop.org/pixman/pixman
+* **标签**: `pixman-0.46.4`
+* **提交ID**: `9cc163c9da0fb4da430641715313d95a6ec466d9`
+* **提交日期**: Sun Jul 20 12:14:02 2025 -0400
+* **拉取日期**: Tue Aug 25 13:02:40 +0800
+* **许可证**: MIT License

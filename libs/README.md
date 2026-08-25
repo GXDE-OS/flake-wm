@@ -23,3 +23,11 @@
 * **Commit date**: Fri May 29 10:49:42 2026 +0200
 * **Clone date**: Tue Aug 25 12:55:05 +0800
 * **License**: MIT License
+
+## Pixman
+* **Upstream**: https://gitlab.freedesktop.org/pixman/pixman
+* **Tag**: `pixman-0.46.4`
+* **Commit ID**: `9cc163c9da0fb4da430641715313d95a6ec466d9`
+* **Commit date**: Sun Jul 20 12:14:02 2025 -0400
+* **Clone date**: Tue Aug 25 13:02:40 +0800
+* **License**: MIT License
