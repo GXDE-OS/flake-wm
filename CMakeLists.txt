@@ -6,6 +6,7 @@ find_program(MESON_EXECUTABLE meson REQUIRED)
 set(WLROOTS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/wlroots")
 set(WLROOTS_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/wlroots-build")
 set(WAYLAND_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/wayland")
+set(LIBDRM_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/libdrm")
 set(VENDOR_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/vendor-install")
 set(WAYLAND_SERVER_LIBRARY
     "${VENDOR_INSTALL_DIR}/lib/libwayland-server.so"
@@ -13,6 +14,7 @@ set(WAYLAND_SERVER_LIBRARY
 set(WAYLAND_CLIENT_LIBRARY
     "${VENDOR_INSTALL_DIR}/lib/libwayland-client.so"
 )
+set(LIBDRM_LIBRARY "${VENDOR_INSTALL_DIR}/lib/libdrm.so")
 set(WLROOTS_LIBRARY
     "${VENDOR_INSTALL_DIR}/lib/libwlroots-0.20.so"
 )
@@ -39,6 +41,25 @@ ExternalProject_Add(wayland_external
         "${WAYLAND_CLIENT_LIBRARY}"
 )
 
+ExternalProject_Add(libdrm_external
+    SOURCE_DIR "${LIBDRM_SOURCE_DIR}"
+    BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/libdrm-build"
+    CONFIGURE_COMMAND
+        "${MESON_EXECUTABLE}" setup
+        "<BINARY_DIR>"
+        "<SOURCE_DIR>"
+        "--prefix=${VENDOR_INSTALL_DIR}"
+        "--libdir=lib"
+        "--buildtype=debugoptimized"
+        "-Dauto_features=disabled"
+        "-Dtests=false"
+    BUILD_COMMAND
+        "${MESON_EXECUTABLE}" compile -C "<BINARY_DIR>"
+    INSTALL_COMMAND
+        "${MESON_EXECUTABLE}" install -C "<BINARY_DIR>"
+    BUILD_BYPRODUCTS "${LIBDRM_LIBRARY}"
+)
+
 ExternalProject_Add(wlroots_external
     SOURCE_DIR "${WLROOTS_SOURCE_DIR}"
     BINARY_DIR "${WLROOTS_BUILD_DIR}"
@@ -61,7 +82,9 @@ ExternalProject_Add(wlroots_external
         "${MESON_EXECUTABLE}" install -C "<BINARY_DIR>"
     BUILD_ALWAYS TRUE
     BUILD_BYPRODUCTS "${WLROOTS_LIBRARY}"
-    DEPENDS wayland_external
+    DEPENDS
+        wayland_external
+        libdrm_external
 )
 
 # The directory is populated when wlroots is installed. It must exist during
@@ -88,6 +111,12 @@ set_target_properties(wayland_client PROPERTIES
 )
 add_dependencies(wayland_client wayland_external)
 
+add_library(libdrm SHARED IMPORTED GLOBAL)
+set_target_properties(libdrm PROPERTIES
+    IMPORTED_LOCATION "${LIBDRM_LIBRARY}"
+)
+add_dependencies(libdrm libdrm_external)
+
 add_executable(flakewm main.cc)
 target_compile_features(flakewm PRIVATE cxx_std_20)
 target_compile_definitions(flakewm PRIVATE WLR_USE_UNSTABLE)
@@ -95,6 +124,7 @@ target_link_libraries(flakewm PRIVATE
     wlroots
     wayland_server
     wayland_client
+    libdrm
 )
 
 # main.cc is intentionally empty of wlroots calls. Keep the shared library in

@@ -15,3 +15,11 @@
 * **Clone date**: Tue Aug 25 12:32:11 +0800
 * **License**: MIT License
 * **Note**: This library provides `libwayland-server` 1.24+ for Wlroots. GXDE OS 25 (Trixie-based)'s `libwayland-server` is NOT new enough so we have to vendor it.
+
+## Mesa/libdrm
+* **Upstream**: https://gitlab.freedesktop.org/mesa/libdrm
+* **Tag**: `libdrm-2.4.134`
+* **Commit ID**: `e984d448b8b17aab853369e6c203e53719f46de1`
+* **Commit date**: Fri May 29 10:49:42 2026 +0200
+* **Clone date**: Tue Aug 25 12:55:05 +0800
+* **License**: MIT License
