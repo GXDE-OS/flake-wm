@@ -267,6 +267,7 @@ flycheck_*.el
 .nfs*
 
 # ---> CMake
+/build/
 CMakeLists.txt.user
 CMakeCache.txt
 CMakeFiles
