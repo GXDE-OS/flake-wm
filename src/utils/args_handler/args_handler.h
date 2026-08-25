@@ -17,6 +17,8 @@
 
 #include <string>
 
+#include "src/utils/log/log.h"
+
 #ifndef SRC_UTILS_ARGS_HANDLER_ARGS_HANDLER_H_
 #define SRC_UTILS_ARGS_HANDLER_ARGS_HANDLER_H_
 
@@ -24,7 +26,7 @@ namespace Flake {
 namespace Utils {
 
 struct StartupArgs {
-  int info_level = 0;
+  LogLevel info_level = LogLevel::kError;
   std::string process = "";
   bool disable_wayland = false;
   bool log_to_stdout = true;

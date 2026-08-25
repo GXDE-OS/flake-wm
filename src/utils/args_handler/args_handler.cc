@@ -61,7 +61,7 @@ ArgsHandler::ArgsHandler(char** argv) {
     }
 
     if (cur == "-d" || cur == "-D" || cur == "--debug") {
-      args_.info_level = 2;
+      args_.info_level = LogLevel::kWarning;
       for (int j = i + 1; argv[j] != nullptr; ++j) {
         std::string cur_option = argv[j];
         if (kValidDebugOptions.find(cur_option) != kValidDebugOptions.end()) {
@@ -134,7 +134,7 @@ ArgsHandler::ArgsHandler(char** argv) {
     }
 
     if (cur == "-V" || cur == "--verbose") {
-      args_.info_level = 1;
+      args_.info_level = LogLevel::kInfo;
       continue;
     }
 
