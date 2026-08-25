@@ -14,7 +14,7 @@
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
 cmake_minimum_required(VERSION 3.24)
-project(flakewm LANGUAGES CXX)
+project(flakewm VERSION 0.1.0 LANGUAGES CXX)
 include(cmake/wlroots.cmake)
 
 add_executable(flakewm
@@ -24,5 +24,8 @@ add_executable(flakewm
 )
 
 target_include_directories(flakewm PRIVATE ./)
+target_compile_definitions(flakewm PRIVATE
+  FLAKEWM_VERSION="${PROJECT_VERSION}"
+)
 target_compile_features(flakewm PRIVATE cxx_std_20)
 target_link_libraries(flakewm PRIVATE Wlroots::Wlroots)

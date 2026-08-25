@@ -167,7 +167,7 @@ void ArgsHandler::PrintHelp() {
 
 // Prints the version number of FlakeWM.
 void ArgsHandler::PrintVersion() {
-  std::cout << "FlakeWM version 0.1.0\n";
+  std::cout << "FlakeWM version " << FLAKEWM_VERSION << '\n';
 }
 
 }  // namespace Utils
