@@ -30,11 +30,20 @@ struct StartupArgs {
   bool log_to_stdout = true;
   bool log_to_file = true;
   bool log_monotonic_time = false;
+  bool exit_flag = false;
 };
 
 class ArgsHandler {
  public:
+  explicit ArgsHandler(char** argv);
+  ~ArgsHandler() = default;
+
   static void PrintHelp();
+  static void PrintVersion();
+  StartupArgs GetArgs();
+
+ private:
+  StartupArgs args_;
 };
 
 }  // namespace Utils

@@ -15,9 +15,20 @@
  * this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <stdlib.h>
+
 #include "src/utils/args_handler/args_handler.h"
 
 int main(int argc, char** argv) {
-  Flake::Utils::ArgsHandler::PrintHelp();
-  return 0;
+  // Parse command line arguments to basic configurations.
+  Flake::Utils::ArgsHandler* args_helper = new Flake::Utils::ArgsHandler(argv);
+  Flake::Utils::StartupArgs configs = args_helper->GetArgs();
+
+  // If the exit flag is set, just exit.
+  if (configs.exit_flag) {
+    delete args_helper;
+    return EXIT_SUCCESS;
+  }
+
+  return EXIT_SUCCESS;
 }
