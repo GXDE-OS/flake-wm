@@ -21,6 +21,9 @@ add_executable(flakewm
   src/main.cc
   src/utils/args_handler/args_handler.h
   src/utils/args_handler/args_handler.cc
+  src/utils/log/ansi_escape_code_defs.h
+  src/utils/log/log.h
+  src/utils/log/log.cc
 )
 
 target_include_directories(flakewm PRIVATE ./)
