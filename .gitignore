@@ -284,3 +284,6 @@ CMakeUserPresets.json
 .ninja_deps
 .ninja_log
 
+# ---> Dependencies
+# Wlroots
+!/libs/wlroots/tinywl/Makefile
