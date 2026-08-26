@@ -17,6 +17,7 @@
 
 #include "src/utils/log/log.h"
 
+#include <atomic>
 #include <iostream>
 #include <ostream>
 #include <string>
@@ -26,6 +27,29 @@
 namespace Flake {
 namespace Utils {
 namespace {
+
+std::atomic<LogLevel>& MinimumLogLevel() {
+  static std::atomic<LogLevel> level{LogLevel::kError};
+  return level;
+}
+
+constexpr int LogPriority(LogLevel level) {
+  switch (level) {
+    case LogLevel::kInfo:
+    case LogLevel::kOk:
+      return 0;
+    case LogLevel::kWarning:
+      return 1;
+    case LogLevel::kError:
+      return 2;
+  }
+
+  return 0;
+}
+
+bool ShouldLog(LogLevel level) {
+  return LogPriority(level) >= LogPriority(GetMinimumLogLevel());
+}
 
 /**
  * @brief Print the colored log level to stdout/stderr.
@@ -64,6 +88,14 @@ void PrintLevelPrefix(LogLevel level) {
 
 }  // namespace
 
+void SetMinimumLogLevel(LogLevel level) {
+  MinimumLogLevel().store(level, std::memory_order_relaxed);
+}
+
+LogLevel GetMinimumLogLevel() {
+  return MinimumLogLevel().load(std::memory_order_relaxed);
+}
+
 /**
  * @brief Print the log content to stdout/stderr.
  *
@@ -78,6 +110,10 @@ void PrintLevelPrefix(LogLevel level) {
  * @param content The log message.
  */
 void WriteLog(LogLevel level, const std::string& content) {
+  if (!ShouldLog(level)) {
+    return;
+  }
+
   PrintLevelPrefix(level);
   LogStream(level) << content << '\n';
 }
@@ -101,6 +137,10 @@ void WriteLog(LogLevel level, const std::string& content) {
  */
 void WriteLogWithTitle(LogLevel level, const std::string& title,
     const std::string& content) {
+  if (!ShouldLog(level)) {
+    return;
+  }
+
   PrintLevelPrefix(level);
   LogStream(level) << BOLD_FORMAT << title << RESET_FORMAT << ": " << content
     << '\n';
@@ -126,6 +166,10 @@ void WriteLogWithTitle(LogLevel level, const std::string& title,
  */
 void WriteLogWithTag(LogLevel level, const std::string& tag,
     const std::string& title, const std::string& content) {
+  if (!ShouldLog(level)) {
+    return;
+  }
+
   PrintLevelPrefix(level);
   LogStream(level) << BOLD_UNDERLINE_FORMAT << tag << " - " << title
     << RESET_FORMAT << ": " << content << '\n';

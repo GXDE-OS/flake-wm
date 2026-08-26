@@ -22,7 +22,6 @@
 #define BOLD_GREEN_FORMAT "\x1b[1;32;49m"
 #define BOLD_YELLOW_FORMAT "\x1b[1;33;49m"
 #define BOLD_RED_FORMAT "\x1b[1;31;49m"
-#define BOLD_CYAN_FORMAT "\x1b[1;36;49m"
 
 #define BOLD_FORMAT "\x1b[1;39;49m"
 #define BOLD_UNDERLINE_FORMAT "\x1b[1;4;39;49m"

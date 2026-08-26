@@ -34,6 +34,18 @@ enum class LogLevel {
 };
 
 /**
+ * @brief Set the minimum log level printed by all logging functions.
+ *
+ * @param level The minimum log level.
+ */
+void SetMinimumLogLevel(LogLevel level);
+
+/**
+ * @brief Return the process-wide minimum log level.
+ */
+LogLevel GetMinimumLogLevel();
+
+/**
  * @brief Print the log content to stdout/stderr.
  *
  * This function outputs the log message with the appropriate header. e.g.

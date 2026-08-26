@@ -6,3 +6,12 @@
 * **提交日期**: Thu Mar 19 20:13:09 2026 +0100
 * **拉取日期**: Tue Aug 25 09:34:26 +0800
 * **许可证**: [MIT License](./wlroots/LICENSE)
+
+## Waylib
+* **上游**: https://github.com/linuxdeepin/treeland
+* **标签**: N/A, pulling from main
+* **提交ID**: `2031e780f5c770a11843bc81b3cef5271e477dd0`
+* **提交日期**: Tue Aug 25 15:24:14 2026 +0800
+* **拉取日期**: Wed Aug 26 14:58:32 +0800
+* **许可证**: 代码以[GPL-3.0-only](https://github.com/linuxdeepin/treeland/blob/master/waylib/.reuse/dep5)协议获得许可，请参阅他们的[treeland/waylib/.reuse/dep5](https://github.com/linuxdeepin/treeland/blob/master/waylib/.reuse/dep5)文件
+**备注**: 上游源自Treeland内置Waylib而非独立的Waylib库

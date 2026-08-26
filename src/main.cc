@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
   // Parse command line arguments to basic configurations.
   Flake::Utils::ArgsHandler* args_helper = new Flake::Utils::ArgsHandler(argv);
   Flake::Utils::StartupArgs configs = args_helper->GetArgs();
+  Flake::Utils::SetMinimumLogLevel(configs.info_level);
 
   // If the exit flag is set, just exit.
   if (configs.exit_flag) {
