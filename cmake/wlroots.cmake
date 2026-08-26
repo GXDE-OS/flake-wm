@@ -24,15 +24,14 @@ find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 
 pkg_check_modules(WLROOTS_SYSTEM_DEPS REQUIRED IMPORTED_TARGET
-  wayland-server>=1.23.1
-  wayland-client>=1.23.1
-  libdrm>=2.4.122
-  xkbcommon
+  wayland-server>=1.24.0
+  wayland-client>=1.24.0
+  libdrm>=2.4.129
+  xkbcommon>=1.8.0
   pixman-1>=0.43.0
   egl
   gbm>=21.1
   glesv2
-  vulkan>=1.2.182
   lcms2
   libudev
   libseat>=0.2.0
@@ -53,11 +52,32 @@ pkg_check_modules(WLROOTS_SYSTEM_DEPS REQUIRED IMPORTED_TARGET
   xcb-xinput
 )
 
+set(WLROOTS_VERSION 0.20.2)
+set(WLROOTS_VERSION_MAJOR 0)
+set(WLROOTS_VERSION_MINOR 20)
+set(WLROOTS_VERSION_PATCH 2)
+
+# These options match the Meson auto-detected feature set required above and
+# are consumed by Waylib's generated public wconfig.h.
+set(WLR_HAVE_DRM_BACKEND 1)
+set(WLR_HAVE_X11_BACKEND 1)
+set(WLR_HAVE_LIBINPUT_BACKEND 1)
+set(WLR_HAVE_XWAYLAND 1)
+set(WLR_HAVE_GLES2_RENDERER 1)
+set(WLR_HAVE_VULKAN_RENDERER 0)
+set(WLR_HAVE_GBM_ALLOCATOR 1)
+set(WLR_HAVE_UDMABUF_ALLOCATOR 1)
+set(WLR_HAVE_SESSION 1)
+set(WLR_HAVE_COLOR_MANAGEMENT 1)
+
 set(WLROOTS_SOURCE_DIR "${PROJECT_SOURCE_DIR}/libs/wlroots")
 set(WLROOTS_BUILD_DIR "${PROJECT_BINARY_DIR}/wlroots-static-build")
 set(WLROOTS_INSTALL_DIR "${PROJECT_BINARY_DIR}/wlroots-static-install")
 set(WLROOTS_LIBRARY
-  "${WLROOTS_INSTALL_DIR}/lib/libwlroots-0.19.a"
+  "${WLROOTS_INSTALL_DIR}/lib/libwlroots-0.20.a"
+)
+set(WLROOTS_PKGCONFIG_DIR
+  "${PROJECT_BINARY_DIR}/wlroots-pkgconfig"
 )
 
 ExternalProject_Add(wlroots_external
@@ -74,6 +94,7 @@ ExternalProject_Add(wlroots_external
     "-Dexamples=false"
     "-Dwerror=false"
     "-Ddefault_library=static"
+    "-Drenderers=gles2"
   BUILD_COMMAND
     "${MESON_EXECUTABLE}" compile -C "<BINARY_DIR>"
   INSTALL_COMMAND
@@ -82,24 +103,31 @@ ExternalProject_Add(wlroots_external
   BUILD_BYPRODUCTS "${WLROOTS_LIBRARY}"
 )
 
-file(MAKE_DIRECTORY "${WLROOTS_INSTALL_DIR}/include/wlroots-0.19")
-add_library(wlroots_archive STATIC IMPORTED GLOBAL)
-set_target_properties(wlroots_archive PROPERTIES
-  IMPORTED_LOCATION "${WLROOTS_LIBRARY}"
-  INTERFACE_INCLUDE_DIRECTORIES
-    "${WLROOTS_INSTALL_DIR}/include/wlroots-0.19"
-)
-add_dependencies(wlroots_archive wlroots_external)
-
-add_library(wlroots INTERFACE)
-target_compile_definitions(wlroots INTERFACE WLR_USE_UNSTABLE)
-target_link_libraries(wlroots INTERFACE
-  "$<LINK_LIBRARY:WHOLE_ARCHIVE,wlroots_archive>"
-  PkgConfig::WLROOTS_SYSTEM_DEPS
-  Threads::Threads
-  ${CMAKE_DL_LIBS}
-  m
-  rt
+file(MAKE_DIRECTORY
+  "${WLROOTS_INSTALL_DIR}/include/wlroots-0.20"
+  "${WLROOTS_BUILD_DIR}/protocol"
+  "${WLROOTS_PKGCONFIG_DIR}"
 )
 
-add_library(Wlroots::Wlroots ALIAS wlroots)
+# Waylib supports standalone wlroots through this pkg-config contract. The
+# archive and generated headers are produced by wlroots_external before
+# waylibserver is compiled.
+file(WRITE "${WLROOTS_PKGCONFIG_DIR}/waylib-wlroots.pc"
+"prefix=${WLROOTS_INSTALL_DIR}
+exec_prefix=\${prefix}
+libdir=\${prefix}/lib
+includedir=\${prefix}/include/wlroots-0.20
+
+Name: waylib-wlroots
+Description: FlakeWM vendored upstream wlroots
+Version: ${WLROOTS_VERSION}
+Requires: wayland-server wayland-client libdrm xkbcommon pixman-1 egl gbm glesv2 lcms2 libudev libseat libdisplay-info libinput xcb xcb-composite xcb-dri3 xcb-errors xcb-ewmh xcb-icccm xcb-present xcb-render xcb-renderutil xcb-res xcb-shm xcb-xfixes xcb-xinput
+Cflags: -I\${includedir} -I${WLROOTS_BUILD_DIR}/protocol -DWLR_USE_UNSTABLE
+Libs: -L\${libdir} -lwlroots-0.20 -ldl -lm -lrt
+
+wlroots_version=${WLROOTS_VERSION}
+wlroots_version_major=${WLROOTS_VERSION_MAJOR}
+wlroots_version_minor=${WLROOTS_VERSION_MINOR}
+wlroots_version_patch=${WLROOTS_VERSION_PATCH}
+wlroots_features=DRM_BACKEND X11_BACKEND LIBINPUT_BACKEND XWAYLAND GLES2_RENDERER GBM_ALLOCATOR UDMABUF_ALLOCATOR SESSION COLOR_MANAGEMENT
+")

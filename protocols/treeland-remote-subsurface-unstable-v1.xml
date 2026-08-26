@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="treeland_remote_subsurface_unstable_v1">
+  <copyright>
+    Copyright © 2026 UnionTech Software Technology Co., Ltd.
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included
+    in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <interface name="treeland_subsurface_manager_v1" version="1">
+    <enum name="error">
+      <entry name="bad_surface" value="0" summary="the wl_surface is invalid or already exported"/>
+    </enum>
+
+    <request name="destroy" type="destructor"/>
+
+    <request name="export_surface">
+      <arg name="id" type="new_id" interface="treeland_exported_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="treeland_exported_surface_v1" version="1">
+    <enum name="reject_reason">
+      <entry name="invalid_token" value="0" summary="the parent token is invalid"/>
+      <entry name="cyclic" value="1" summary="the relationship would create a cycle"/>
+    </enum>
+
+    <request name="destroy" type="destructor"/>
+
+    <request name="create_remote_subsurface">
+      <arg name="id" type="new_id" interface="treeland_remote_subsurface_v1"/>
+      <arg name="parent_token" type="string"/>
+    </request>
+
+    <event name="surface_token">
+      <arg name="token" type="string"/>
+    </event>
+
+    <event name="parent_rejected">
+      <arg name="reason" type="uint" enum="reject_reason"/>
+      <arg name="parent_token" type="string"/>
+    </event>
+  </interface>
+
+  <interface name="treeland_remote_subsurface_v1" version="1">
+    <request name="destroy" type="destructor"/>
+
+    <request name="set_position">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+
+    <request name="place_above">
+      <arg name="sibling_token" type="string"/>
+    </request>
+
+    <request name="place_below">
+      <arg name="sibling_token" type="string"/>
+    </request>
+
+    <event name="invalid_sibling">
+      <arg name="sibling_token" type="string"/>
+    </event>
+  </interface>
+</protocol>

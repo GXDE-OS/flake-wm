@@ -1,35 +1,83 @@
 /*
  * Copyright (C) 2026 CharOfString <root@charofstring.cc>
  *
- * This program is free software: you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation, either version 3 of the License, or (at your option)
- * any later version.
+ * This file is part of FlakeWM.
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
+ * FlakeWM is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * FlakeWM is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program. If not, see <https://www.gnu.org/licenses/>.
+ * FlakeWM. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <stdlib.h>
+#include <wlogging.h>
+#include <woutputrenderwindow.h>
+#include <wrenderhelper.h>
 
-#include "src/utils/args_handler/args_handler.h"
+#include <QGuiApplication>
+#include <QQmlApplicationEngine>
+#include <WServer>
 
-int main(int argc, char** argv) {
-  // Parse command line arguments to basic configurations.
-  Flake::Utils::ArgsHandler* args_helper = new Flake::Utils::ArgsHandler(argv);
-  Flake::Utils::StartupArgs configs = args_helper->GetArgs();
-  Flake::Utils::SetMinimumLogLevel(configs.info_level);
+#include "src/core/compositor/compositor.h"
 
-  // If the exit flag is set, just exit.
-  if (configs.exit_flag) {
-    delete args_helper;
-    return EXIT_SUCCESS;
+WAYLIB_SERVER_USE_NAMESPACE
+
+int main(int argc, char* argv[]) {
+  // We referenced waylib/examples/tinywl/main.cpp.
+  // First of all, we need to initialize wlroots logging & QtQuick render
+  // backend, then we let Waylib install its own QPA. The order does matter.
+  WLog::init();
+  WRenderHelper::setupRendererBackend();
+  WServer::initializeQPA();
+
+  // Also referenced Waylib version of TinyWL.
+  // Curently Waylib render path uses OpenGL ES, and we want to keep
+  // non-integer scale factor. The compositor should NOT exit the whole desktop
+  // session just because a top-level Qt window is closed.
+  QGuiApplication::setAttribute(Qt::AA_UseOpenGLES);
+  QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
+    Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+  QGuiApplication::setQuitOnLastWindowClosed(false);
+
+  QGuiApplication application(argc, argv);
+  QGuiApplication::setApplicationName(QStringLiteral("FlakeWM"));
+  QGuiApplication::setDesktopFileName(QStringLiteral("flakewm"));
+  QGuiApplication::setOrganizationName(QStringLiteral("FlakeWM"));
+
+  QQmlApplicationEngine engine;
+
+#ifdef FLAKEWM_WAYLIB_QML_IMPORT_PATH
+  // Only when building from vendored Waylib: QML pathes are injected via
+  // CMake.
+  engine.addImportPath(QStringLiteral(FLAKEWM_WAYLIB_QML_IMPORT_PATH));
+#endif
+  QObject::connect(
+    &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
+    [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
+  engine.loadFromModule("FlakeWM", "Main");
+
+  if (engine.rootObjects().isEmpty()) {
+    return EXIT_FAILURE;
   }
 
-  return EXIT_SUCCESS;
+  // Create a QML scene first and then we kickstart compositor.
+  // Then, start() can bind the existing OutputRenderWindow tp wlroots
+  // renderer/allocator.
+  // Compositor is a C++ singleton that is registered by qt_add_qml_module.
+  auto* window = engine.rootObjects().constFirst()
+    ->findChild<WOutputRenderWindow*>();
+  auto* compositor = engine.singletonInstance<FlakeCompositor*>(
+    "FlakeWM", "Compositor");
+  if (!window || !compositor || !compositor->Start(window, &engine)) {
+    qCritical("(Compositor) Init: Failed to initialize compositor, halted!!");
+    return EXIT_FAILURE;
+  }
+
+  return application.exec();
 }
