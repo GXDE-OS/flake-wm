@@ -93,11 +93,19 @@ add_subdirectory(
 
 set(ENV{PKG_CONFIG_PATH} "${_flakewm_saved_pkg_config_path}")
 
-# FindPkgConfig omits -L paths whose libraries do not exist yet at configure
-# time. wlroots_external creates this archive during the build, so preserve
-# that link directory on Waylib's public server target.
+# Preserve the future wlroots archive directory and, when a compatibility
+# fallback is selected, its configure-time linker-script directory.
 target_link_directories(waylibserver PUBLIC
-  "${WLROOTS_INSTALL_DIR}/lib"
+  ${WLROOTS_LINK_DIRECTORIES}
 )
+set_property(TARGET waylibserver APPEND PROPERTY
+  BUILD_RPATH "${WLROOTS_RUNTIME_LIBRARY_DIRS}"
+)
+if(WLROOTS_RUNTIME_LIBRARY_DIRS)
+  list(JOIN WLROOTS_RUNTIME_LIBRARY_DIRS ":" _flakewm_vendor_build_rpath)
+  target_link_options(waylibserver INTERFACE
+    "LINKER:-rpath,${_flakewm_vendor_build_rpath}"
+  )
+endif()
 
 add_dependencies(waylibserver wlroots_external)
