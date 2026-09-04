@@ -53,6 +53,7 @@ class WQuickOutputLayout;
 class WSeat;
 class WServer;
 class WSocket;
+class WSurface;
 class WXdgShell;
 WAYLIB_SERVER_END_NAMESPACE
 
@@ -101,6 +102,13 @@ class FlakeCompositor final : public QObject {
   void socketNameChanged();
 
  private:
+  class SeatEventFilter;
+
+  void RegisterSurface(WSurface* surface);
+  void UnregisterSurface(WSurface* surface);
+  void UpdateSurfaceOutputs();
+  void UpdateSurfaceOutputs(WSurface* surface);
+
   // Wayland server core and input/output backend.
   // QObject parent is responsible for the Qt side destruction order.
   WServer* server_ = nullptr;
@@ -113,6 +121,8 @@ class FlakeCompositor final : public QObject {
   WQmlCreator* outputs_ = nullptr;
   WQmlCreator* toplevels_ = nullptr;
   WQmlCreator* popups_ = nullptr;
+  SeatEventFilter* seat_event_filter_ = nullptr;
+  QList<WSurface*> surfaces_;
 
   // Current minimal protocol set:
   // xdg-shell client, and an auto-named Wayland socket.
