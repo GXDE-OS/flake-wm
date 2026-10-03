@@ -815,6 +815,24 @@ bool xwayland_surface_has_type(struct wlr_xwayland_surface *wlr_xwayland_surface
     return false;
 }
 
+/* Like KWin, only normal windows and dialogs take focus when mapped, so a
+ * notification bubble (dde-osd) does not steal focus from the window being
+ * typed in. The first window type we understand wins, which makes dde-osd's
+ * "UTILITY, KDE_OVERRIDE, NORMAL" a utility window. */
+bool xwayland_surface_wants_focus_on_map(struct wlr_xwayland_surface *wlr_xwayland_surface)
+{
+    for (size_t i = 0; i < wlr_xwayland_surface->window_type_len; ++i) {
+        xcb_atom_t atom = wlr_xwayland_surface->window_type[i];
+        for (int type = NET_WM_WINDOW_TYPE_DESKTOP; type <= NET_WM_WINDOW_TYPE_NORMAL; type++) {
+            if (atom == xwayland->atoms[type]) {
+                return type == NET_WM_WINDOW_TYPE_NORMAL || type == NET_WM_WINDOW_TYPE_DIALOG;
+            }
+        }
+    }
+    /* no known type means a normal window or a dialog */
+    return true;
+}
+
 bool xwayland_surface_has_input(struct wlr_xwayland_surface *wlr_xwayland_surface, uint32_t input)
 {
     xcb_get_window_attributes_reply_t *reply = xcb_get_window_attributes_reply(

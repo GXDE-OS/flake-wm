@@ -167,6 +167,8 @@ void xwayland_restack_unmanaged(struct xwayland_server *xwayland);
 
 bool xwayland_surface_has_type(struct wlr_xwayland_surface *wlr_xwayland_surface, int type);
 
+bool xwayland_surface_wants_focus_on_map(struct wlr_xwayland_surface *wlr_xwayland_surface);
+
 enum {
     INPUT_MASK_POINTER = 1 << 0,
     INPUT_MASK_KEYBOARD = 1 << 1,

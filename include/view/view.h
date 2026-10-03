@@ -168,6 +168,8 @@ struct view {
     bool minimized_when_show_desktop;
     bool minimized_when_show_active_only;
     bool use_slide;
+    /* map without being activated and focused, like X11 utility windows */
+    bool no_focus_on_map;
 };
 
 struct view_impl {

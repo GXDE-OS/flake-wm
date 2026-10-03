@@ -420,6 +420,15 @@ static void xwayland_view_handle_request_activate(struct wl_listener *listener, 
     struct xwayland_view *xwayland_view =
         wl_container_of(listener, xwayland_view, request_activate);
 
+    /* notification bubbles (dde-osd) ask for activation by themselves, which
+     * takes the keyboard focus away from the window being typed in. Windows
+     * not focused on map are only focused by clicking them. */
+    if (xwayland_view->view.no_focus_on_map) {
+        kywc_log(KYWC_DEBUG, "xwayland ignore request_activate of %s",
+                 xwayland_view->wlr_xwayland_surface->class);
+        return;
+    }
+
     /* force sync activate surface and focus surface */
     if (xwayland_view->xwayland->activated_surface == xwayland_view->wlr_xwayland_surface) {
         wlr_xwayland_surface_activate(xwayland_view->wlr_xwayland_surface, true);
@@ -881,9 +890,11 @@ static void xwayland_view_handle_map(struct wl_listener *listener, void *data)
     wl_signal_add(&xwayland_view->view.base.events.capabilities, &xwayland_view->set_capabilities);
 
     xwayland_view_apply_type(xwayland_view);
+    xwayland_view->view.no_focus_on_map =
+        !xwayland_surface_wants_focus_on_map(wlr_xwayland_surface);
 
     /* we should stack above the new window always */
-    if (!view_is_activatable(&xwayland_view->view)) {
+    if (!view_is_activatable(&xwayland_view->view) || xwayland_view->view.no_focus_on_map) {
         xwayland_restack_view(xwayland_view);
     }
 

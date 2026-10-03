@@ -441,8 +441,12 @@ void view_map(struct view *view)
     }
 
     kywc_view->has_initial_position = false;
-    kywc_view_activate(kywc_view);
-    view_set_focus(view, kywc_view->focused_seat);
+    if (view->no_focus_on_map) {
+        view_raise_to_top(view, false);
+    } else {
+        kywc_view_activate(kywc_view);
+        view_set_focus(view, kywc_view->focused_seat);
+    }
 
     view_update_round_corner(view);
     modal_create(view);

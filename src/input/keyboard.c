@@ -404,6 +404,43 @@ static int keyboard_handle_repeat(void *data)
     return 0;
 }
 
+/* The input method uploads a copy of our keymap to its virtual keyboard. The
+ * seat resends the keymap to every client whenever the active keyboard has a
+ * different keymap object, so switching between the virtual and the physical
+ * keyboard made Xwayland reload its keymap around the first key typed in an X11
+ * application, and Chromium based clients like QQ then inserted that key as
+ * text even though the input method composed it. Share the keymap object of a
+ * physical keyboard with the same keymap to avoid the resend. */
+static void keyboard_share_keymap(struct keyboard *keyboard)
+{
+    struct wlr_keyboard *wlr_keyboard = keyboard->wlr_keyboard;
+    if (!wlr_keyboard->keymap) {
+        return;
+    }
+
+    struct keyboard *physical;
+    wl_list_for_each(physical, &keyboard->seat->keyboards, link) {
+        struct wlr_keyboard *dst_keyboard = physical->wlr_keyboard;
+        if (physical->is_virtual || !dst_keyboard->keymap) {
+            continue;
+        }
+        if (dst_keyboard->keymap == wlr_keyboard->keymap) {
+            return;
+        }
+        if (keyboard_keymaps_match(wlr_keyboard, dst_keyboard)) {
+            /* emits keymap again, which returns above */
+            wlr_keyboard_set_keymap(wlr_keyboard, dst_keyboard->keymap);
+            return;
+        }
+    }
+}
+
+static void keyboard_handle_keymap(struct wl_listener *listener, void *data)
+{
+    struct keyboard *keyboard = wl_container_of(listener, keyboard, keymap);
+    keyboard_share_keymap(keyboard);
+}
+
 struct keyboard *keyboard_create(struct seat *seat, struct wlr_keyboard *wlr_keyboard)
 {
     struct keyboard *keyboard = calloc(1, sizeof(struct keyboard));
@@ -436,6 +473,14 @@ struct keyboard *keyboard_create(struct seat *seat, struct wlr_keyboard *wlr_key
     wl_signal_add(&keyboard->wlr_keyboard->events.key, &keyboard->key);
     keyboard->modifiers.notify = keyboard_handle_modifiers;
     wl_signal_add(&keyboard->wlr_keyboard->events.modifiers, &keyboard->modifiers);
+
+    if (keyboard->is_virtual) {
+        keyboard->keymap.notify = keyboard_handle_keymap;
+        wl_signal_add(&keyboard->wlr_keyboard->events.keymap, &keyboard->keymap);
+        keyboard_share_keymap(keyboard);
+    } else {
+        wl_list_init(&keyboard->keymap.link);
+    }
 
     return keyboard;
 }
@@ -515,6 +560,7 @@ void keyboard_destroy(struct keyboard *keyboard)
     wl_list_remove(&keyboard->link);
     wl_list_remove(&keyboard->key.link);
     wl_list_remove(&keyboard->modifiers.link);
+    wl_list_remove(&keyboard->keymap.link);
 
     if (!keyboard->is_virtual) {
         struct keyboard_group *group = keyboard_group_from_wlr_keyboard(wlr_keyboard);
