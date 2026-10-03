@@ -1,3 +1,10 @@
+gxde-wlcom (2.3.7-gxde2) lizhi; urgency=high
+
+  * 修复通知气泡抢占焦点导致XWayland程序候选窗消失、按键丢失的问题
+  * 减少输入法虚拟键盘与物理键盘切换时向XWayland重复发送键盘布局
+
+ -- CharOfString <root@charofstring.cc>  Fri, 02 Oct 2026 21:32:45 -0500
+
 gxde-wlcom (2.3.7-gxde1) lizhi; urgency=high
 
   * 现在可以摇晃鼠标以临时放大鼠标大小
