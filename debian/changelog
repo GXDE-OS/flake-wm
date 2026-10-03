@@ -1,3 +1,9 @@
+gxde-wlcom (2.3.7-gxde4) lizhi; urgency=high
+
+  * 迁移至CMake构建系统
+
+ -- CharOfString <root@charofstring.cc>  Sat, 03 Oct 2026 06:09:11 -0500
+
 gxde-wlcom (2.3.7-gxde3) lizhi; urgency=high
 
   * 修复通知气泡抢占焦点导致XWayland程序候选窗消失、按键丢失的问题
