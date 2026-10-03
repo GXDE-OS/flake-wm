@@ -25,6 +25,8 @@ struct keyboard {
 
     struct wl_listener key;
     struct wl_listener modifiers;
+    /* virtual keyboard only */
+    struct wl_listener keymap;
 
     bool is_virtual;
     struct keyboard_state state;
