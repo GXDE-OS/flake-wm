@@ -48,8 +48,10 @@ WAYLAND_DISPLAY=[display]
 
 如果合成器崩溃，可在构建时使用ASAN/UBSAN来回溯
 ```bash
-$ meson setup build -Dbuildtype=debug -Db_sanitize=address,undefined
-$ ninja -C build
+$ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_C_FLAGS="-fsanitize=address,undefined" \
+    -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+$ cmake --build build
 ```
 
 如果合成器多次崩溃且崩溃场景存在随机性，可使用valgrind工具进行测试

@@ -84,3 +84,9 @@ Thumbs.db
 .codex/*
 .gemini/*
 .qwen/*
+
+# ---> CMake build tree
+build/*
+
+# ---> Vendored third party sources (libs/) are kept verbatim
+!/libs/**
