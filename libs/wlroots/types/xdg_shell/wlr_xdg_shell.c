@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include "types/wlr_xdg_shell.h"
 
-#define WM_BASE_VERSION 6
+#define WM_BASE_VERSION 7
 
 static const struct xdg_wm_base_interface xdg_shell_impl;
 
@@ -129,6 +129,12 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_xdg_shell *xdg_shell =
 		wl_container_of(listener, xdg_shell, display_destroy);
 	wl_signal_emit_mutable(&xdg_shell->events.destroy, xdg_shell);
+
+	assert(wl_list_empty(&xdg_shell->events.new_surface.listener_list));
+	assert(wl_list_empty(&xdg_shell->events.new_toplevel.listener_list));
+	assert(wl_list_empty(&xdg_shell->events.new_popup.listener_list));
+	assert(wl_list_empty(&xdg_shell->events.destroy.listener_list));
+
 	wl_list_remove(&xdg_shell->display_destroy.link);
 	wl_global_destroy(xdg_shell->global);
 	free(xdg_shell);
@@ -158,6 +164,8 @@ struct wlr_xdg_shell *wlr_xdg_shell_create(struct wl_display *display,
 	xdg_shell->global = global;
 
 	wl_signal_init(&xdg_shell->events.new_surface);
+	wl_signal_init(&xdg_shell->events.new_toplevel);
+	wl_signal_init(&xdg_shell->events.new_popup);
 	wl_signal_init(&xdg_shell->events.destroy);
 
 	xdg_shell->display_destroy.notify = handle_display_destroy;

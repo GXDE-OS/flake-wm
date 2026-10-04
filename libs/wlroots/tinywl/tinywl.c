@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200112L
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
@@ -42,7 +41,8 @@ struct tinywl_server {
 	struct wlr_scene_output_layout *scene_layout;
 
 	struct wlr_xdg_shell *xdg_shell;
-	struct wl_listener new_xdg_surface;
+	struct wl_listener new_xdg_toplevel;
+	struct wl_listener new_xdg_popup;
 	struct wl_list toplevels;
 
 	struct wlr_cursor *cursor;
@@ -56,6 +56,7 @@ struct tinywl_server {
 	struct wlr_seat *seat;
 	struct wl_listener new_input;
 	struct wl_listener request_cursor;
+	struct wl_listener pointer_focus_change;
 	struct wl_listener request_set_selection;
 	struct wl_list keyboards;
 	enum tinywl_cursor_mode cursor_mode;
@@ -85,11 +86,18 @@ struct tinywl_toplevel {
 	struct wlr_scene_tree *scene_tree;
 	struct wl_listener map;
 	struct wl_listener unmap;
+	struct wl_listener commit;
 	struct wl_listener destroy;
 	struct wl_listener request_move;
 	struct wl_listener request_resize;
 	struct wl_listener request_maximize;
 	struct wl_listener request_fullscreen;
+};
+
+struct tinywl_popup {
+	struct wlr_xdg_popup *xdg_popup;
+	struct wl_listener commit;
+	struct wl_listener destroy;
 };
 
 struct tinywl_keyboard {
@@ -102,7 +110,7 @@ struct tinywl_keyboard {
 	struct wl_listener destroy;
 };
 
-static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface *surface) {
+static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 	/* Note: this function only deals with keyboard focus. */
 	if (toplevel == NULL) {
 		return;
@@ -110,6 +118,7 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 	struct tinywl_server *server = toplevel->server;
 	struct wlr_seat *seat = server->seat;
 	struct wlr_surface *prev_surface = seat->keyboard_state.focused_surface;
+	struct wlr_surface *surface = toplevel->xdg_toplevel->base->surface;
 	if (prev_surface == surface) {
 		/* Don't re-focus an already focused surface. */
 		return;
@@ -139,7 +148,7 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 	 * clients without additional work on your part.
 	 */
 	if (keyboard != NULL) {
-		wlr_seat_keyboard_notify_enter(seat, toplevel->xdg_toplevel->base->surface,
+		wlr_seat_keyboard_notify_enter(seat, surface,
 			keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
 	}
 }
@@ -181,7 +190,7 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 		}
 		struct tinywl_toplevel *next_toplevel =
 			wl_container_of(server->toplevels.prev, next_toplevel, link);
-		focus_toplevel(next_toplevel, next_toplevel->xdg_toplevel->base->surface);
+		focus_toplevel(next_toplevel);
 		break;
 	default:
 		return false;
@@ -325,6 +334,18 @@ static void seat_request_cursor(struct wl_listener *listener, void *data) {
 	}
 }
 
+static void seat_pointer_focus_change(struct wl_listener *listener, void *data) {
+	struct tinywl_server *server = wl_container_of(
+			listener, server, pointer_focus_change);
+	/* This event is raised when the pointer focus is changed, including when the
+	 * client is closed. We set the cursor image to its default if target surface
+	 * is NULL */
+	struct wlr_seat_pointer_focus_change_event *event = data;
+	if (event->new_surface == NULL) {
+		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
+	}
+}
+
 static void seat_request_set_selection(struct wl_listener *listener, void *data) {
 	/* This event is raised by the seat when a client wants to set the selection,
 	 * usually when the user copies something. wlroots allows compositors to
@@ -370,7 +391,7 @@ static void reset_cursor_mode(struct tinywl_server *server) {
 	server->grabbed_toplevel = NULL;
 }
 
-static void process_cursor_move(struct tinywl_server *server, uint32_t time) {
+static void process_cursor_move(struct tinywl_server *server) {
 	/* Move the grabbed toplevel to the new position. */
 	struct tinywl_toplevel *toplevel = server->grabbed_toplevel;
 	wlr_scene_node_set_position(&toplevel->scene_tree->node,
@@ -378,7 +399,7 @@ static void process_cursor_move(struct tinywl_server *server, uint32_t time) {
 		server->cursor->y - server->grab_y);
 }
 
-static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
+static void process_cursor_resize(struct tinywl_server *server) {
 	/*
 	 * Resizing the grabbed toplevel can be a little bit complicated, because we
 	 * could be resizing from any corner or edge. This not only resizes the
@@ -420,10 +441,9 @@ static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
 		}
 	}
 
-	struct wlr_box geo_box;
-	wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+	struct wlr_box *geo_box = &toplevel->xdg_toplevel->base->geometry;
 	wlr_scene_node_set_position(&toplevel->scene_tree->node,
-		new_left - geo_box.x, new_top - geo_box.y);
+		new_left - geo_box->x, new_top - geo_box->y);
 
 	int new_width = new_right - new_left;
 	int new_height = new_bottom - new_top;
@@ -433,10 +453,10 @@ static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
 static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 	/* If the mode is non-passthrough, delegate to those functions. */
 	if (server->cursor_mode == TINYWL_CURSOR_MOVE) {
-		process_cursor_move(server, time);
+		process_cursor_move(server);
 		return;
 	} else if (server->cursor_mode == TINYWL_CURSOR_RESIZE) {
-		process_cursor_resize(server, time);
+		process_cursor_resize(server);
 		return;
 	}
 
@@ -514,16 +534,16 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	/* Notify the client with pointer focus that a button press has occurred */
 	wlr_seat_pointer_notify_button(server->seat,
 			event->time_msec, event->button, event->state);
-	double sx, sy;
-	struct wlr_surface *surface = NULL;
-	struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
-			server->cursor->x, server->cursor->y, &surface, &sx, &sy);
-	if (event->state == WLR_BUTTON_RELEASED) {
+	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
 		/* If you released any buttons, we exit interactive move/resize mode. */
 		reset_cursor_mode(server);
 	} else {
 		/* Focus that client if the button was _pressed_ */
-		focus_toplevel(toplevel, surface);
+		double sx, sy;
+		struct wlr_surface *surface = NULL;
+		struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
+				server->cursor->x, server->cursor->y, &surface, &sx, &sy);
+		focus_toplevel(toplevel);
 	}
 }
 
@@ -536,7 +556,7 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
 	/* Notify the client with pointer focus of the axis event. */
 	wlr_seat_pointer_notify_axis(server->seat,
 			event->time_msec, event->orientation, event->delta,
-			event->delta_discrete, event->source);
+			event->delta_discrete, event->source, event->relative_direction);
 }
 
 static void server_cursor_frame(struct wl_listener *listener, void *data) {
@@ -594,7 +614,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	struct wlr_output *wlr_output = data;
 
 	/* Configures the output created by the backend to use our allocator
-	 * and our renderer. Must be done once, before commiting the output */
+	 * and our renderer. Must be done once, before committing the output */
 	wlr_output_init_render(wlr_output, server->allocator, server->renderer);
 
 	/* The output may be disabled, switch it on. */
@@ -656,7 +676,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
 
-	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
+	focus_toplevel(toplevel);
 }
 
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
@@ -671,12 +691,26 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->link);
 }
 
+static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
+	/* Called when a new surface state is committed. */
+	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
+
+	if (toplevel->xdg_toplevel->base->initial_commit) {
+		/* When an xdg_surface performs an initial commit, the compositor must
+		 * reply with a configure so the client can map the surface. tinywl
+		 * configures the xdg_toplevel with 0,0 size to let the client pick the
+		 * dimensions itself. */
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+	}
+}
+
 static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	/* Called when the xdg_toplevel is destroyed. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 
 	wl_list_remove(&toplevel->map.link);
 	wl_list_remove(&toplevel->unmap.link);
+	wl_list_remove(&toplevel->commit.link);
 	wl_list_remove(&toplevel->destroy.link);
 	wl_list_remove(&toplevel->request_move.link);
 	wl_list_remove(&toplevel->request_resize.link);
@@ -689,16 +723,10 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 static void begin_interactive(struct tinywl_toplevel *toplevel,
 		enum tinywl_cursor_mode mode, uint32_t edges) {
 	/* This function sets up an interactive move or resize operation, where the
-	 * compositor stops propegating pointer events to clients and instead
+	 * compositor stops propagating pointer events to clients and instead
 	 * consumes them itself, to move or resize windows. */
 	struct tinywl_server *server = toplevel->server;
-	struct wlr_surface *focused_surface =
-		server->seat->pointer_state.focused_surface;
-	if (toplevel->xdg_toplevel->base->surface !=
-			wlr_surface_get_root_surface(focused_surface)) {
-		/* Deny move/resize requests from unfocused clients. */
-		return;
-	}
+
 	server->grabbed_toplevel = toplevel;
 	server->cursor_mode = mode;
 
@@ -706,17 +734,16 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 		server->grab_x = server->cursor->x - toplevel->scene_tree->node.x;
 		server->grab_y = server->cursor->y - toplevel->scene_tree->node.y;
 	} else {
-		struct wlr_box geo_box;
-		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+		struct wlr_box *geo_box = &toplevel->xdg_toplevel->base->geometry;
 
-		double border_x = (toplevel->scene_tree->node.x + geo_box.x) +
-			((edges & WLR_EDGE_RIGHT) ? geo_box.width : 0);
-		double border_y = (toplevel->scene_tree->node.y + geo_box.y) +
-			((edges & WLR_EDGE_BOTTOM) ? geo_box.height : 0);
+		double border_x = (toplevel->scene_tree->node.x + geo_box->x) +
+			((edges & WLR_EDGE_RIGHT) ? geo_box->width : 0);
+		double border_y = (toplevel->scene_tree->node.y + geo_box->y) +
+			((edges & WLR_EDGE_BOTTOM) ? geo_box->height : 0);
 		server->grab_x = server->cursor->x - border_x;
 		server->grab_y = server->cursor->y - border_y;
 
-		server->grab_geobox = geo_box;
+		server->grab_geobox = *geo_box;
 		server->grab_geobox.x += toplevel->scene_tree->node.x;
 		server->grab_geobox.y += toplevel->scene_tree->node.y;
 
@@ -750,13 +777,17 @@ static void xdg_toplevel_request_resize(
 static void xdg_toplevel_request_maximize(
 		struct wl_listener *listener, void *data) {
 	/* This event is raised when a client would like to maximize itself,
-	 * typically because the user clicked on the maximize button on
-	 * client-side decorations. tinywl doesn't support maximization, but
-	 * to conform to xdg-shell protocol we still must send a configure.
-	 * wlr_xdg_surface_schedule_configure() is used to send an empty reply. */
+	 * typically because the user clicked on the maximize button on client-side
+	 * decorations. tinywl doesn't support maximization, but to conform to
+	 * xdg-shell protocol we still must send a configure.
+	 * wlr_xdg_surface_schedule_configure() is used to send an empty reply.
+	 * However, if the request was sent before an initial commit, we don't do
+	 * anything and let the client finish the initial surface setup. */
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_maximize);
-	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	if (toplevel->xdg_toplevel->base->initialized) {
+		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	}
 }
 
 static void xdg_toplevel_request_fullscreen(
@@ -764,61 +795,93 @@ static void xdg_toplevel_request_fullscreen(
 	/* Just as with request_maximize, we must send a configure here. */
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_fullscreen);
-	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	if (toplevel->xdg_toplevel->base->initialized) {
+		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	}
 }
 
-static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
-	/* This event is raised when wlr_xdg_shell receives a new xdg surface from a
-	 * client, either a toplevel (application window) or popup. */
-	struct tinywl_server *server =
-		wl_container_of(listener, server, new_xdg_surface);
-	struct wlr_xdg_surface *xdg_surface = data;
+static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
+	/* This event is raised when a client creates a new toplevel (application window). */
+	struct tinywl_server *server = wl_container_of(listener, server, new_xdg_toplevel);
+	struct wlr_xdg_toplevel *xdg_toplevel = data;
+
+	/* Allocate a tinywl_toplevel for this surface */
+	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
+	toplevel->server = server;
+	toplevel->xdg_toplevel = xdg_toplevel;
+	toplevel->scene_tree =
+		wlr_scene_xdg_surface_create(&toplevel->server->scene->tree, xdg_toplevel->base);
+	toplevel->scene_tree->node.data = toplevel;
+	xdg_toplevel->base->data = toplevel->scene_tree;
+
+	/* Listen to the various events it can emit */
+	toplevel->map.notify = xdg_toplevel_map;
+	wl_signal_add(&xdg_toplevel->base->surface->events.map, &toplevel->map);
+	toplevel->unmap.notify = xdg_toplevel_unmap;
+	wl_signal_add(&xdg_toplevel->base->surface->events.unmap, &toplevel->unmap);
+	toplevel->commit.notify = xdg_toplevel_commit;
+	wl_signal_add(&xdg_toplevel->base->surface->events.commit, &toplevel->commit);
+
+	toplevel->destroy.notify = xdg_toplevel_destroy;
+	wl_signal_add(&xdg_toplevel->events.destroy, &toplevel->destroy);
+
+	/* cotd */
+	toplevel->request_move.notify = xdg_toplevel_request_move;
+	wl_signal_add(&xdg_toplevel->events.request_move, &toplevel->request_move);
+	toplevel->request_resize.notify = xdg_toplevel_request_resize;
+	wl_signal_add(&xdg_toplevel->events.request_resize, &toplevel->request_resize);
+	toplevel->request_maximize.notify = xdg_toplevel_request_maximize;
+	wl_signal_add(&xdg_toplevel->events.request_maximize, &toplevel->request_maximize);
+	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
+	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
+}
+
+static void xdg_popup_commit(struct wl_listener *listener, void *data) {
+	/* Called when a new surface state is committed. */
+	struct tinywl_popup *popup = wl_container_of(listener, popup, commit);
+
+	if (popup->xdg_popup->base->initial_commit) {
+		/* When an xdg_surface performs an initial commit, the compositor must
+		 * reply with a configure so the client can map the surface.
+		 * tinywl sends an empty configure. A more sophisticated compositor
+		 * might change an xdg_popup's geometry to ensure it's not positioned
+		 * off-screen, for example. */
+		wlr_xdg_surface_schedule_configure(popup->xdg_popup->base);
+	}
+}
+
+static void xdg_popup_destroy(struct wl_listener *listener, void *data) {
+	/* Called when the xdg_popup is destroyed. */
+	struct tinywl_popup *popup = wl_container_of(listener, popup, destroy);
+
+	wl_list_remove(&popup->commit.link);
+	wl_list_remove(&popup->destroy.link);
+
+	free(popup);
+}
+
+static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
+	/* This event is raised when a client creates a new popup. */
+	struct wlr_xdg_popup *xdg_popup = data;
+
+	struct tinywl_popup *popup = calloc(1, sizeof(*popup));
+	popup->xdg_popup = xdg_popup;
 
 	/* We must add xdg popups to the scene graph so they get rendered. The
 	 * wlroots scene graph provides a helper for this, but to use it we must
 	 * provide the proper parent scene node of the xdg popup. To enable this,
 	 * we always set the user data field of xdg_surfaces to the corresponding
 	 * scene node. */
-	if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
-		struct wlr_xdg_surface *parent =
-			wlr_xdg_surface_try_from_wlr_surface(xdg_surface->popup->parent);
-		assert(parent != NULL);
-		struct wlr_scene_tree *parent_tree = parent->data;
-		xdg_surface->data = wlr_scene_xdg_surface_create(
-			parent_tree, xdg_surface);
-		return;
-	}
-	assert(xdg_surface->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL);
+	struct wlr_xdg_surface *parent = wlr_xdg_surface_try_from_wlr_surface(xdg_popup->parent);
+	assert(parent != NULL);
+	struct wlr_scene_tree *parent_tree = parent->data;
+	xdg_popup->base->data = wlr_scene_xdg_surface_create(parent_tree, xdg_popup->base);
 
-	/* Allocate a tinywl_toplevel for this surface */
-	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
-	toplevel->server = server;
-	toplevel->xdg_toplevel = xdg_surface->toplevel;
-	toplevel->scene_tree = wlr_scene_xdg_surface_create(
-			&toplevel->server->scene->tree, toplevel->xdg_toplevel->base);
-	toplevel->scene_tree->node.data = toplevel;
-	xdg_surface->data = toplevel->scene_tree;
+	popup->commit.notify = xdg_popup_commit;
+	wl_signal_add(&xdg_popup->base->surface->events.commit, &popup->commit);
 
-	/* Listen to the various events it can emit */
-	toplevel->map.notify = xdg_toplevel_map;
-	wl_signal_add(&xdg_surface->surface->events.map, &toplevel->map);
-	toplevel->unmap.notify = xdg_toplevel_unmap;
-	wl_signal_add(&xdg_surface->surface->events.unmap, &toplevel->unmap);
-	toplevel->destroy.notify = xdg_toplevel_destroy;
-	wl_signal_add(&xdg_surface->events.destroy, &toplevel->destroy);
-
-	/* cotd */
-	struct wlr_xdg_toplevel *xdg_toplevel = xdg_surface->toplevel;
-	toplevel->request_move.notify = xdg_toplevel_request_move;
-	wl_signal_add(&xdg_toplevel->events.request_move, &toplevel->request_move);
-	toplevel->request_resize.notify = xdg_toplevel_request_resize;
-	wl_signal_add(&xdg_toplevel->events.request_resize, &toplevel->request_resize);
-	toplevel->request_maximize.notify = xdg_toplevel_request_maximize;
-	wl_signal_add(&xdg_toplevel->events.request_maximize,
-		&toplevel->request_maximize);
-	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
-	wl_signal_add(&xdg_toplevel->events.request_fullscreen,
-		&toplevel->request_fullscreen);
+	popup->destroy.notify = xdg_popup_destroy;
+	wl_signal_add(&xdg_popup->events.destroy, &popup->destroy);
 }
 
 int main(int argc, char *argv[]) {
@@ -843,13 +906,13 @@ int main(int argc, char *argv[]) {
 
 	struct tinywl_server server = {0};
 	/* The Wayland display is managed by libwayland. It handles accepting
-	 * clients from the Unix socket, manging Wayland globals, and so on. */
+	 * clients from the Unix socket, managing Wayland globals, and so on. */
 	server.wl_display = wl_display_create();
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
 	 * backend based on the current environment, such as opening an X11 window
 	 * if an X11 server is running. */
-	server.backend = wlr_backend_autocreate(server.wl_display, NULL);
+	server.backend = wlr_backend_autocreate(wl_display_get_event_loop(server.wl_display), NULL);
 	if (server.backend == NULL) {
 		wlr_log(WLR_ERROR, "failed to create wlr_backend");
 		return 1;
@@ -891,7 +954,7 @@ int main(int argc, char *argv[]) {
 
 	/* Creates an output layout, which a wlroots utility for working with an
 	 * arrangement of screens in a physical layout. */
-	server.output_layout = wlr_output_layout_create();
+	server.output_layout = wlr_output_layout_create(server.wl_display);
 
 	/* Configure a listener to be notified when new outputs are available on the
 	 * backend. */
@@ -914,9 +977,10 @@ int main(int argc, char *argv[]) {
 	 */
 	wl_list_init(&server.toplevels);
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
-	server.new_xdg_surface.notify = server_new_xdg_surface;
-	wl_signal_add(&server.xdg_shell->events.new_surface,
-			&server.new_xdg_surface);
+	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
+	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
+	server.new_xdg_popup.notify = server_new_xdg_popup;
+	wl_signal_add(&server.xdg_shell->events.new_popup, &server.new_xdg_popup);
 
 	/*
 	 * Creates a cursor, which is a wlroots utility for tracking the cursor
@@ -967,6 +1031,9 @@ int main(int argc, char *argv[]) {
 	server.request_cursor.notify = seat_request_cursor;
 	wl_signal_add(&server.seat->events.request_set_cursor,
 			&server.request_cursor);
+	server.pointer_focus_change.notify = seat_pointer_focus_change;
+	wl_signal_add(&server.seat->pointer_state.events.focus_change,
+			&server.pointer_focus_change);
 	server.request_set_selection.notify = seat_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 			&server.request_set_selection);
@@ -1002,12 +1069,33 @@ int main(int argc, char *argv[]) {
 			socket);
 	wl_display_run(server.wl_display);
 
+
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
 	wl_display_destroy_clients(server.wl_display);
+
+	wl_list_remove(&server.new_xdg_toplevel.link);
+	wl_list_remove(&server.new_xdg_popup.link);
+
+	wl_list_remove(&server.cursor_motion.link);
+	wl_list_remove(&server.cursor_motion_absolute.link);
+	wl_list_remove(&server.cursor_button.link);
+	wl_list_remove(&server.cursor_axis.link);
+	wl_list_remove(&server.cursor_frame.link);
+
+	wl_list_remove(&server.new_input.link);
+	wl_list_remove(&server.request_cursor.link);
+	wl_list_remove(&server.pointer_focus_change.link);
+	wl_list_remove(&server.request_set_selection.link);
+
+	wl_list_remove(&server.new_output.link);
+
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);
-	wlr_output_layout_destroy(server.output_layout);
+	wlr_cursor_destroy(server.cursor);
+	wlr_allocator_destroy(server.allocator);
+	wlr_renderer_destroy(server.renderer);
+	wlr_backend_destroy(server.backend);
 	wl_display_destroy(server.wl_display);
 	return 0;
 }

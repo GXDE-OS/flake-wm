@@ -15,7 +15,7 @@
 
 /*
  * Copy+Paste from libinput, but this should neither use libinput, nor
- * tablet-unstable-v2 headers, so we can't include them
+ * tablet-v2 headers, so we can't include them
  */
 enum wlr_tablet_tool_type {
 	/** A generic pen */
@@ -34,7 +34,6 @@ enum wlr_tablet_tool_type {
 	WLR_TABLET_TOOL_TYPE_LENS,
 	/** A rotary device with positional and rotation data */
 	WLR_TABLET_TOOL_TYPE_TOTEM,
-
 };
 
 struct wlr_tablet_tool {
@@ -64,13 +63,14 @@ struct wlr_tablet {
 
 	const struct wlr_tablet_impl *impl;
 
+	uint16_t usb_vendor_id, usb_product_id; // zero if unset
 	double width_mm, height_mm;
 
 	struct {
-		struct wl_signal axis;
-		struct wl_signal proximity;
-		struct wl_signal tip;
-		struct wl_signal button;
+		struct wl_signal axis; // struct wlr_tablet_tool_axis_event
+		struct wl_signal proximity; // struct wlr_tablet_tool_proximity_event
+		struct wl_signal tip; // struct wlr_tablet_tool_tip_event
+		struct wl_signal button; // struct wlr_tablet_tool_button_event
 	} events;
 
 	struct wl_array paths; // char *

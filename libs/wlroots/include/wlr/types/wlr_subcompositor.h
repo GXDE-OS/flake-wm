@@ -12,8 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <wayland-server-core.h>
-
-struct wlr_surface;
+#include <wlr/types/wlr_compositor.h>
 
 /**
  * The sub-surface state describing the sub-surface's relationship with its
@@ -23,6 +22,10 @@ struct wlr_surface;
 struct wlr_subsurface_parent_state {
 	int32_t x, y;
 	struct wl_list link;
+
+	struct {
+		struct wlr_surface_synced *synced;
+	} WLR_PRIVATE;
 };
 
 struct wlr_subsurface {
@@ -36,27 +39,32 @@ struct wlr_subsurface {
 	bool has_cache;
 
 	bool synchronized;
-	bool reordered;
 	bool added;
-
-	struct wl_listener surface_client_commit;
-	struct wl_listener parent_destroy;
 
 	struct {
 		struct wl_signal destroy;
 	} events;
 
 	void *data;
+
+	struct {
+		struct wlr_surface_synced parent_synced;
+
+		struct wl_listener surface_client_commit;
+		struct wl_listener parent_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_subcompositor {
 	struct wl_global *global;
 
-	struct wl_listener display_destroy;
-
 	struct {
 		struct wl_signal destroy;
 	} events;
+
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 /**

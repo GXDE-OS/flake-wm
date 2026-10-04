@@ -8,19 +8,6 @@
 
 #define SINGLE_PIXEL_MANAGER_VERSION 1
 
-struct wlr_single_pixel_buffer_manager_v1 {
-	struct wl_global *global;
-
-	struct wl_listener display_destroy;
-};
-
-struct wlr_single_pixel_buffer_v1 {
-	struct wlr_buffer base;
-	struct wl_resource *resource;
-	uint32_t r, g, b, a;
-	uint8_t argb8888[4]; // packed little-endian DRM_FORMAT_ARGB8888
-};
-
 static void destroy_resource(struct wl_client *client,
 		struct wl_resource *resource) {
 	wl_resource_destroy(resource);
@@ -57,6 +44,10 @@ static const struct wlr_buffer_resource_interface buffer_resource_interface = {
 static void buffer_destroy(struct wlr_buffer *wlr_buffer) {
 	struct wlr_single_pixel_buffer_v1 *buffer =
 		wl_container_of(wlr_buffer, buffer, base);
+	wl_list_remove(&buffer->release.link);
+
+	wlr_buffer_finish(wlr_buffer);
+
 	if (buffer->resource != NULL) {
 		wl_resource_set_user_data(buffer->resource, NULL);
 	}
@@ -92,6 +83,13 @@ static void buffer_handle_resource_destroy(struct wl_resource *resource) {
 	wlr_buffer_drop(&buffer->base);
 }
 
+static void buffer_handle_release(struct wl_listener *listener, void *data) {
+	struct wlr_single_pixel_buffer_v1 *buffer = wl_container_of(listener, buffer, release);
+	if (buffer->resource != NULL) {
+		wl_buffer_send_release(buffer->resource);
+	}
+}
+
 static void manager_handle_create_u32_rgba_buffer(struct wl_client *client,
 		struct wl_resource *resource, uint32_t id, uint32_t r, uint32_t g,
 		uint32_t b, uint32_t a) {
@@ -122,6 +120,9 @@ static void manager_handle_create_u32_rgba_buffer(struct wl_client *client,
 	buffer->argb8888[1] = (uint8_t)((double)buffer->g * f);
 	buffer->argb8888[2] = (uint8_t)((double)buffer->r * f);
 	buffer->argb8888[3] = (uint8_t)((double)buffer->a * f);
+
+	buffer->release.notify = buffer_handle_release;
+	wl_signal_add(&buffer->base.events.release, &buffer->release);
 }
 
 static const struct wp_single_pixel_buffer_manager_v1_interface manager_impl = {
@@ -169,4 +170,15 @@ struct wlr_single_pixel_buffer_manager_v1 *wlr_single_pixel_buffer_manager_v1_cr
 	wlr_buffer_register_resource_interface(&buffer_resource_interface);
 
 	return manager;
+}
+
+struct wlr_single_pixel_buffer_v1 *wlr_single_pixel_buffer_v1_try_from_buffer(
+		struct wlr_buffer *buffer) {
+
+	if (buffer->impl != &buffer_impl) {
+		return NULL;
+	}
+
+	return wl_container_of(buffer,
+		(struct wlr_single_pixel_buffer_v1 *)NULL, base);
 }

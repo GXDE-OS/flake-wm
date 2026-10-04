@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200112L
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -13,7 +12,6 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_keyboard.h>
-#include <wlr/types/wlr_matrix.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_tablet_tool.h>
@@ -103,7 +101,7 @@ static void output_frame_notify(struct wl_listener *listener, void *data) {
 
 	struct wlr_output_state output_state;
 	wlr_output_state_init(&output_state);
-	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &output_state, NULL, NULL);
+	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &output_state, NULL);
 	wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
 		.box = { .width = wlr_output->width, .height = wlr_output->height },
 		.color = {
@@ -146,7 +144,7 @@ static void handle_cursor_button(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_button_event *event = data;
 
 	float (*color)[4];
-	if (event->state == WLR_BUTTON_RELEASED) {
+	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
 		color = &sample->default_color;
 		memcpy(&sample->clear_color, color, sizeof(*color));
 	} else {
@@ -300,7 +298,7 @@ static void new_input_notify(struct wl_listener *listener, void *data) {
 	switch (device->type) {
 	case WLR_INPUT_DEVICE_POINTER:
 	case WLR_INPUT_DEVICE_TOUCH:
-	case WLR_INPUT_DEVICE_TABLET_TOOL:
+	case WLR_INPUT_DEVICE_TABLET:
 		wlr_cursor_attach_input_device(state->cursor, device);
 		break;
 
@@ -342,7 +340,7 @@ int main(int argc, char *argv[]) {
 		.display = display
 	};
 
-	struct wlr_backend *wlr = wlr_backend_autocreate(display, NULL);
+	struct wlr_backend *wlr = wlr_backend_autocreate(wl_display_get_event_loop(display), NULL);
 	if (!wlr) {
 		exit(1);
 	}
@@ -351,7 +349,7 @@ int main(int argc, char *argv[]) {
 	state.allocator = wlr_allocator_autocreate(wlr, state.renderer);
 
 	state.cursor = wlr_cursor_create();
-	state.layout = wlr_output_layout_create();
+	state.layout = wlr_output_layout_create(display);
 	wlr_cursor_attach_output_layout(state.cursor, state.layout);
 	//wlr_cursor_map_to_region(state.cursor, state.config->cursor.mapped_box);
 	wl_list_init(&state.devices);
@@ -415,5 +413,4 @@ int main(int argc, char *argv[]) {
 
 	wlr_xcursor_manager_destroy(state.xcursor_manager);
 	wlr_cursor_destroy(state.cursor);
-	wlr_output_layout_destroy(state.layout);
 }

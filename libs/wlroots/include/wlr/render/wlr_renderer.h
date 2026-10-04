@@ -26,6 +26,12 @@ struct wlr_fbox;
  * A renderer for basic 2D operations.
  */
 struct wlr_renderer {
+	// Capabilities required for the buffer used as a render target (bitmask of
+	// enum wlr_buffer_cap)
+	uint32_t render_buffer_caps;
+	// Supported color encodings for YCbCr textures
+	uint32_t color_encodings; // bitmask of enum wlr_color_encoding
+
 	struct {
 		struct wl_signal destroy;
 		/**
@@ -36,12 +42,26 @@ struct wlr_renderer {
 		struct wl_signal lost;
 	} events;
 
-	// private state
+	struct {
+		/**
+		 * Whether color transforms are supported for input textures
+		 */
+		bool input_color_transform;
+		/**
+		 * Does the renderer support color transforms on its output?
+		 */
+		bool output_color_transform;
+		/**
+		 * Whether wait/signal timelines are supported.
+		 *
+		 * See struct wlr_drm_syncobj_timeline.
+		 */
+		bool timeline;
+	} features;
 
-	const struct wlr_renderer_impl *impl;
-
-	bool rendering;
-	bool rendering_with_buffer;
+	struct {
+		const struct wlr_renderer_impl *impl;
+	} WLR_PRIVATE;
 };
 
 /**
@@ -53,81 +73,15 @@ struct wlr_renderer {
 struct wlr_renderer *wlr_renderer_autocreate(struct wlr_backend *backend);
 
 /**
- * Start a render pass with the provided viewport.
+ * Get the formats supporting sampling usage.
  *
- * This should be called after wlr_output_attach_render(). Compositors must call
- * wlr_renderer_end() when they are done.
+ * The buffer capabilities must be passed in.
  *
- * Returns false on failure, in which case compositors shouldn't try rendering.
+ * Buffers allocated with a format from this list may be passed to
+ * wlr_texture_from_buffer().
  */
-bool wlr_renderer_begin(struct wlr_renderer *r, uint32_t width, uint32_t height);
-/**
- * Start a render pass on the provided struct wlr_buffer.
- *
- * Compositors must call wlr_renderer_end() when they are done.
- */
-bool wlr_renderer_begin_with_buffer(struct wlr_renderer *r,
-	struct wlr_buffer *buffer);
-/**
- * End a render pass.
- */
-void wlr_renderer_end(struct wlr_renderer *r);
-/**
- * Clear the viewport with the provided color.
- */
-void wlr_renderer_clear(struct wlr_renderer *r, const float color[static 4]);
-/**
- * Defines a scissor box. Only pixels that lie within the scissor box can be
- * modified by drawing functions. Providing a NULL `box` disables the scissor
- * box.
- */
-void wlr_renderer_scissor(struct wlr_renderer *r, struct wlr_box *box);
-/**
- * Renders the requested texture.
- */
-bool wlr_render_texture(struct wlr_renderer *r, struct wlr_texture *texture,
-	const float projection[static 9], int x, int y, float alpha);
-/**
- * Renders the requested texture using the provided matrix.
- */
-bool wlr_render_texture_with_matrix(struct wlr_renderer *r,
-	struct wlr_texture *texture, const float matrix[static 9], float alpha);
-/**
- * Renders the requested texture using the provided matrix, after cropping it
- * to the provided rectangle.
- */
-bool wlr_render_subtexture_with_matrix(struct wlr_renderer *r,
-	struct wlr_texture *texture, const struct wlr_fbox *box,
-	const float matrix[static 9], float alpha);
-/**
- * Renders a solid rectangle in the specified color.
- */
-void wlr_render_rect(struct wlr_renderer *r, const struct wlr_box *box,
-	const float color[static 4], const float projection[static 9]);
-/**
- * Renders a solid quadrangle in the specified color with the specified matrix.
- */
-void wlr_render_quad_with_matrix(struct wlr_renderer *r,
-	const float color[static 4], const float matrix[static 9]);
-/**
- * Get the shared-memory formats supporting import usage. Buffers allocated
- * with a format from this list may be imported via wlr_texture_from_pixels().
- */
-const uint32_t *wlr_renderer_get_shm_texture_formats(
-	struct wlr_renderer *r, size_t *len);
-/**
- * Get the DMA-BUF formats supporting sampling usage. Buffers allocated with
- * a format from this list may be imported via wlr_texture_from_dmabuf().
- */
-const struct wlr_drm_format_set *wlr_renderer_get_dmabuf_texture_formats(
-	struct wlr_renderer *renderer);
-/**
- * Reads out of pixels of the currently bound surface into data. `stride` is in
- * bytes.
- */
-bool wlr_renderer_read_pixels(struct wlr_renderer *r, uint32_t fmt,
-	uint32_t stride, uint32_t width, uint32_t height,
-	uint32_t src_x, uint32_t src_y, uint32_t dst_x, uint32_t dst_y, void *data);
+const struct wlr_drm_format_set *wlr_renderer_get_texture_formats(
+	struct wlr_renderer *r, uint32_t buffer_caps);
 
 /**
  * Initializes wl_shm, linux-dmabuf and other buffer factory protocols.

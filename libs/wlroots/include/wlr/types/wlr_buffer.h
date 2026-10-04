@@ -17,11 +17,15 @@
 struct wlr_buffer;
 struct wlr_renderer;
 
+/**
+ * Shared-memory attributes for a buffer.
+ */
 struct wlr_shm_attributes {
 	int fd;
-	uint32_t format;
-	int width, height, stride;
-	off_t offset;
+	uint32_t format; // FourCC code, see DRM_FORMAT_* in <drm_fourcc.h>
+	int width, height;
+	int stride; // Number of bytes between consecutive pixel lines
+	off_t offset; // Offset in bytes of the first pixel in FD
 };
 
 /**
@@ -106,6 +110,15 @@ bool wlr_buffer_get_shm(struct wlr_buffer *buffer,
 struct wlr_buffer *wlr_buffer_try_from_resource(struct wl_resource *resource);
 
 /**
+ * Check whether a buffer is fully opaque.
+ *
+ * When true is returned, the buffer is guaranteed to be fully opaque, but the
+ * reverse is not true: false may be returned in cases where the buffer is fully
+ * opaque.
+ */
+bool wlr_buffer_is_opaque(struct wlr_buffer *buffer);
+
+/**
  * Buffer data pointer access flags.
  */
 enum wlr_buffer_data_ptr_access_flag {
@@ -130,6 +143,12 @@ enum wlr_buffer_data_ptr_access_flag {
  */
 bool wlr_buffer_begin_data_ptr_access(struct wlr_buffer *buffer, uint32_t flags,
 	void **data, uint32_t *format, size_t *stride);
+/**
+ * Indicate that a pointer to a buffer's underlying memory will no longer be
+ * used.
+ *
+ * This function must be called after wlr_buffer_begin_data_ptr_access().
+ */
 void wlr_buffer_end_data_ptr_access(struct wlr_buffer *buffer);
 
 /**
@@ -148,11 +167,12 @@ struct wlr_client_buffer {
 	 */
 	struct wlr_buffer *source;
 
-	// private state
+	struct {
+		struct wl_listener source_destroy;
+		struct wl_listener renderer_destroy;
 
-	struct wl_listener source_destroy;
-
-	size_t n_ignore_locks;
+		size_t n_ignore_locks;
+	} WLR_PRIVATE;
 };
 
 /**
@@ -160,5 +180,30 @@ struct wlr_client_buffer {
  * buffer, returns NULL.
  */
 struct wlr_client_buffer *wlr_client_buffer_get(struct wlr_buffer *buffer);
+
+/**
+ * A single-pixel buffer.  Used by clients to draw solid-color rectangles.
+ */
+struct wlr_single_pixel_buffer_v1 {
+	struct wlr_buffer base;
+
+	// Full-scale for each component is UINT32_MAX
+	uint32_t r, g, b, a;
+
+	struct {
+		struct wl_resource *resource;
+		struct wl_listener release;
+
+		// Packed little-endian DRM_FORMAT_ARGB8888. Used for data_ptr_access
+		uint8_t argb8888[4];
+	} WLR_PRIVATE;
+};
+
+/**
+ * If the wlr_buffer is a wlr_single_pixel_buffer_v1 then unwrap it.
+ * Otherwise, returns NULL.
+ */
+struct wlr_single_pixel_buffer_v1 *wlr_single_pixel_buffer_v1_try_from_buffer(
+	struct wlr_buffer *buffer);
 
 #endif

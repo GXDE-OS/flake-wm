@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
 #include <math.h>
@@ -11,7 +10,7 @@
 #include "backend/wayland.h"
 #include "util/time.h"
 
-#include "tablet-unstable-v2-client-protocol.h"
+#include "tablet-v2-client-protocol.h"
 
 struct tablet_tool {
 	/* static */
@@ -816,8 +815,8 @@ static void handle_tablet_id(void *data, struct zwp_tablet_v2 *zwp_tablet_v2,
 	struct wlr_wl_seat *seat = data;
 	struct wlr_tablet *tablet = &seat->wlr_tablet;
 
-	tablet->base.vendor = vid;
-	tablet->base.product = pid;
+	tablet->usb_vendor_id = vid;
+	tablet->usb_product_id = pid;
 }
 
 static void handle_tablet_path(void *data, struct zwp_tablet_v2 *zwp_tablet_v2,

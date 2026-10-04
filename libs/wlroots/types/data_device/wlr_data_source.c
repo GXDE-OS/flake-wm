@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +40,8 @@ void wlr_data_source_destroy(struct wlr_data_source *source) {
 	}
 
 	wl_signal_emit_mutable(&source->events.destroy, source);
+
+	assert(wl_list_empty(&source->events.destroy.listener_list));
 
 	char **p;
 	wl_array_for_each(p, &source->mime_types) {

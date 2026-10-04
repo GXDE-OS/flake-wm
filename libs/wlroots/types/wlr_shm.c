@@ -1,3 +1,4 @@
+#undef _POSIX_C_SOURCE
 #define _DEFAULT_SOURCE // for MAP_ANONYMOUS
 #include <assert.h>
 #include <drm_fourcc.h>
@@ -6,8 +7,9 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <wayland-server.h>
+#include <wayland-server-protocol.h>
 #include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/render/drm_format_set.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_shm.h>
 #include <wlr/util/log.h>
@@ -20,15 +22,7 @@
 #error "Lock-free C11 atomic pointers are required"
 #endif
 
-#define SHM_VERSION 1
-
-struct wlr_shm {
-	struct wl_global *global;
-	uint32_t *formats;
-	size_t formats_len;
-
-	struct wl_listener display_destroy;
-};
+#define SHM_VERSION 2
 
 struct wlr_shm_pool {
 	struct wl_resource *resource; // may be NULL
@@ -161,8 +155,11 @@ static void pool_consider_destroy(struct wlr_shm_pool *pool);
 
 static void buffer_destroy(struct wlr_buffer *wlr_buffer) {
 	struct wlr_shm_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
-	assert(buffer->resource == NULL);
 	wl_list_remove(&buffer->release.link);
+
+	wlr_buffer_finish(wlr_buffer);
+
+	assert(buffer->resource == NULL);
 	wl_list_remove(&buffer->link);
 	pool_consider_destroy(buffer->pool);
 	free(buffer);
@@ -466,8 +463,14 @@ error_fd:
 	close(fd);
 }
 
+static void shm_handle_release(struct wl_client *client,
+		struct wl_resource *resource) {
+	wl_resource_destroy(resource);
+}
+
 static const struct wl_shm_interface shm_impl = {
 	.create_pool = shm_handle_create_pool,
+	.release = shm_handle_release,
 };
 
 static void shm_bind(struct wl_client *client, void *data, uint32_t version,
@@ -497,6 +500,8 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 
 struct wlr_shm *wlr_shm_create(struct wl_display *display, uint32_t version,
 		const uint32_t *formats, size_t formats_len) {
+	assert(version <= SHM_VERSION);
+
 	// ARGB8888 and XRGB8888 must be supported per the wl_shm spec
 	bool has_argb8888 = false, has_xrgb8888 = false;
 	for (size_t i = 0; i < formats_len; i++) {
@@ -528,7 +533,7 @@ struct wlr_shm *wlr_shm_create(struct wl_display *display, uint32_t version,
 		shm->formats[i] = convert_drm_format_to_wl_shm(formats[i]);
 	}
 
-	shm->global = wl_global_create(display, &wl_shm_interface, SHM_VERSION,
+	shm->global = wl_global_create(display, &wl_shm_interface, version,
 		shm, shm_bind);
 	if (shm->global == NULL) {
 		wlr_log(WLR_ERROR, "wl_global_create failed");
@@ -547,16 +552,27 @@ struct wlr_shm *wlr_shm_create(struct wl_display *display, uint32_t version,
 
 struct wlr_shm *wlr_shm_create_with_renderer(struct wl_display *display,
 		uint32_t version, struct wlr_renderer *renderer) {
-	size_t formats_len;
-	const uint32_t *formats =
-		wlr_renderer_get_shm_texture_formats(renderer, &formats_len);
-	if (formats == NULL) {
+	const struct wlr_drm_format_set *format_set =
+		wlr_renderer_get_texture_formats(renderer, WLR_BUFFER_CAP_DATA_PTR);
+	if (format_set == NULL || format_set->len == 0) {
 		wlr_log(WLR_ERROR, "Failed to initialize wl_shm: "
 			"cannot get renderer formats");
 		return NULL;
 	}
 
-	return wlr_shm_create(display, version, formats, formats_len);
+	size_t formats_len = format_set->len;
+	uint32_t *formats = calloc(formats_len, sizeof(formats[0]));
+	if (formats == NULL) {
+		return NULL;
+	}
+
+	for (size_t i = 0; i < format_set->len; i++) {
+		formats[i] = format_set->formats[i].format;
+	}
+
+	struct wlr_shm *shm = wlr_shm_create(display, version, formats, formats_len);
+	free(formats);
+	return shm;
 }
 
 static bool shm_has_format(struct wlr_shm *shm, uint32_t shm_format) {

@@ -74,6 +74,7 @@ bool wlr_drm_format_set_add(struct wlr_drm_format_set *set, uint32_t format,
 		struct wlr_drm_format *fmts = realloc(set->formats, sizeof(*fmts) * capacity);
 		if (!fmts) {
 			wlr_log_errno(WLR_ERROR, "Allocation failed");
+			wlr_drm_format_finish(&fmt);
 			return false;
 		}
 
@@ -83,6 +84,23 @@ bool wlr_drm_format_set_add(struct wlr_drm_format_set *set, uint32_t format,
 
 	set->formats[set->len++] = fmt;
 	return true;
+}
+
+bool wlr_drm_format_set_remove(struct wlr_drm_format_set *set, uint32_t format,
+		uint64_t modifier) {
+	struct wlr_drm_format *fmt = format_set_get(set, format);
+	if (fmt == NULL) {
+		return false;
+	}
+
+	for (size_t idx = 0; idx < fmt->len; idx++) {
+		if (fmt->modifiers[idx] == modifier) {
+			memmove(&fmt->modifiers[idx], &fmt->modifiers[idx+1], (fmt->len - idx - 1) * sizeof(fmt->modifiers[0]));
+			fmt->len--;
+			return true;
+		}
+	}
+	return false;
 }
 
 void wlr_drm_format_init(struct wlr_drm_format *fmt, uint32_t format) {
@@ -270,10 +288,9 @@ bool wlr_drm_format_set_union(struct wlr_drm_format_set *dst,
 	}
 
 	// Add both a and b sets into out
-	if (!drm_format_set_extend(&out, a)) {
-		return false;
-	}
-	if (!drm_format_set_extend(&out, b)) {
+	if (!drm_format_set_extend(&out, a) ||
+		!drm_format_set_extend(&out, b)) {
+		wlr_drm_format_set_finish(&out);
 		return false;
 	}
 

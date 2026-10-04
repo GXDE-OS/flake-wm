@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <fcntl.h>
 #include <math.h>
@@ -9,11 +8,12 @@
 #include <unistd.h>
 #include <drm_fourcc.h>
 #include <vulkan/vulkan.h>
+#include <wlr/render/color.h>
 #include <wlr/render/interface.h>
 #include <wlr/types/wlr_drm.h>
-#include <wlr/types/wlr_matrix.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
+#include <wlr/render/drm_syncobj.h>
 #include <wlr/render/vulkan.h>
 #include <wlr/backend/interface.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
@@ -27,7 +27,7 @@
 #include "render/vulkan/shaders/quad.frag.h"
 #include "render/vulkan/shaders/output.frag.h"
 #include "types/wlr_buffer.h"
-#include "types/wlr_matrix.h"
+#include "util/time.h"
 
 // TODO:
 // - simplify stage allocation, don't track allocations but use ringbuffer-like
@@ -58,32 +58,7 @@ struct wlr_vk_renderer *vulkan_get_renderer(struct wlr_renderer *wlr_renderer) {
 
 static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		struct wlr_vk_renderer *renderer, const struct wlr_vk_format *format,
-		bool has_blending_buffer);
-
-// https://www.w3.org/Graphics/Color/srgb
-static float color_to_linear(float non_linear) {
-	return (non_linear > 0.04045) ?
-		pow((non_linear + 0.055) / 1.055, 2.4) :
-		non_linear / 12.92;
-}
-
-static float color_to_linear_premult(float non_linear, float alpha) {
-	return (alpha == 0) ? 0 : color_to_linear(non_linear / alpha) * alpha;
-}
-
-static void mat3_to_mat4(const float mat3[9], float mat4[4][4]) {
-	memset(mat4, 0, sizeof(float) * 16);
-	mat4[0][0] = mat3[0];
-	mat4[0][1] = mat3[1];
-	mat4[0][3] = mat3[2];
-
-	mat4[1][0] = mat3[3];
-	mat4[1][1] = mat3[4];
-	mat4[1][3] = mat3[5];
-
-	mat4[2][2] = 1.f;
-	mat4[3][3] = 1.f;
-}
+		bool has_blending_buffer, bool srgb);
 
 static struct wlr_vk_descriptor_pool *alloc_ds(
 		struct wlr_vk_renderer *renderer, VkDescriptorSet *ds,
@@ -91,59 +66,72 @@ static struct wlr_vk_descriptor_pool *alloc_ds(
 		struct wl_list *pool_list, size_t *last_pool_size) {
 	VkResult res;
 
-	bool found = false;
-	struct wlr_vk_descriptor_pool *pool;
-	wl_list_for_each(pool, pool_list, link) {
-		if (pool->free > 0) {
-			found = true;
-			break;
-		}
-	}
-
-	if (!found) { // create new pool
-		pool = calloc(1, sizeof(*pool));
-		if (!pool) {
-			wlr_log_errno(WLR_ERROR, "allocation failed");
-			return NULL;
-		}
-
-		size_t count = 2 * (*last_pool_size);
-		if (!count) {
-			count = start_descriptor_pool_size;
-		}
-
-		pool->free = count;
-		VkDescriptorPoolSize pool_size = {
-			.descriptorCount = count,
-			.type = type,
-		};
-
-		VkDescriptorPoolCreateInfo dpool_info = {
-			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-			.maxSets = count,
-			.poolSizeCount = 1,
-			.pPoolSizes = &pool_size,
-			.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-		};
-
-		res = vkCreateDescriptorPool(renderer->dev->dev, &dpool_info, NULL,
-			&pool->pool);
-		if (res != VK_SUCCESS) {
-			wlr_vk_error("vkCreateDescriptorPool", res);
-			free(pool);
-			return NULL;
-		}
-
-		*last_pool_size = count;
-		wl_list_insert(pool_list, &pool->link);
-	}
-
 	VkDescriptorSetAllocateInfo ds_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 		.descriptorSetCount = 1,
 		.pSetLayouts = layout,
-		.descriptorPool = pool->pool,
 	};
+
+	struct wlr_vk_descriptor_pool *pool;
+	wl_list_for_each(pool, pool_list, link) {
+		if (pool->free > 0) {
+			ds_info.descriptorPool = pool->pool;
+			res = vkAllocateDescriptorSets(renderer->dev->dev, &ds_info, ds);
+			switch (res) {
+			case VK_ERROR_FRAGMENTED_POOL:
+			case VK_ERROR_OUT_OF_POOL_MEMORY:
+				// Descriptor sets with more than one descriptor can cause us
+				// to run out of pool memory early or lead to fragmentation
+				// that makes the pool unable to service our allocation
+				// request. Try the next pool or allocate a new one.
+				continue;
+			case VK_SUCCESS:
+				--pool->free;
+				return pool;
+			default:
+				wlr_vk_error("vkAllocateDescriptorSets", res);
+				return NULL;
+			}
+		}
+	}
+
+	pool = calloc(1, sizeof(*pool));
+	if (!pool) {
+		wlr_log_errno(WLR_ERROR, "allocation failed");
+		return NULL;
+	}
+
+	size_t count = 2 * (*last_pool_size);
+	if (!count) {
+		count = start_descriptor_pool_size;
+	}
+
+	pool->free = count;
+	VkDescriptorPoolSize pool_size = {
+		.descriptorCount = count,
+		.type = type,
+	};
+
+	VkDescriptorPoolCreateInfo dpool_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.maxSets = count,
+		.poolSizeCount = 1,
+		.pPoolSizes = &pool_size,
+		.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+	};
+
+	res = vkCreateDescriptorPool(renderer->dev->dev, &dpool_info, NULL,
+		&pool->pool);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateDescriptorPool", res);
+		free(pool);
+		return NULL;
+	}
+
+	*last_pool_size = count;
+	wl_list_insert(pool_list, &pool->link);
+
+	ds_info.descriptorPool = pool->pool;
 	res = vkAllocateDescriptorSets(renderer->dev->dev, &ds_info, ds);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkAllocateDescriptorSets", res);
@@ -165,7 +153,7 @@ struct wlr_vk_descriptor_pool *vulkan_alloc_texture_ds(
 struct wlr_vk_descriptor_pool *vulkan_alloc_blend_ds(
 	struct wlr_vk_renderer *renderer, VkDescriptorSet *ds) {
 	return alloc_ds(renderer, ds, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
-		&renderer->output_ds_layout, &renderer->output_descriptor_pools,
+		&renderer->output_ds_srgb_layout, &renderer->output_descriptor_pools,
 		&renderer->last_output_pool_size);
 }
 
@@ -183,7 +171,12 @@ static void destroy_render_format_setup(struct wlr_vk_renderer *renderer,
 
 	VkDevice dev = renderer->dev->dev;
 	vkDestroyRenderPass(dev, setup->render_pass, NULL);
-	vkDestroyPipeline(dev, setup->output_pipe, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_identity, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_srgb, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_pq, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_lut3d, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_gamma22, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_bt1886, NULL);
 
 	struct wlr_vk_pipeline *pipeline, *tmp_pipeline;
 	wl_list_for_each_safe(pipeline, tmp_pipeline, &setup->pipelines, link) {
@@ -206,6 +199,10 @@ static void shared_buffer_destroy(struct wlr_vk_renderer *r,
 	}
 
 	wl_array_release(&buffer->allocs);
+	if (buffer->cpu_mapping) {
+		vkUnmapMemory(r->dev->dev, buffer->memory);
+		buffer->cpu_mapping = NULL;
+	}
 	if (buffer->buffer) {
 		vkDestroyBuffer(r->dev->dev, buffer->buffer, NULL);
 	}
@@ -288,6 +285,8 @@ struct wlr_vk_buffer_span vulkan_get_stage_span(struct wlr_vk_renderer *r,
 		goto error_alloc;
 	}
 
+	wl_list_init(&buf->link);
+
 	VkResult res;
 	VkBufferCreateInfo buf_info = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -330,13 +329,18 @@ struct wlr_vk_buffer_span vulkan_get_stage_span(struct wlr_vk_renderer *r,
 		goto error;
 	}
 
+	res = vkMapMemory(r->dev->dev, buf->memory, 0, VK_WHOLE_SIZE, 0, &buf->cpu_mapping);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkMapMemory", res);
+		goto error;
+	}
+
 	struct wlr_vk_allocation *a = wl_array_add(&buf->allocs, sizeof(*a));
 	if (a == NULL) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		goto error;
 	}
 
-	wlr_log(WLR_DEBUG, "Created new vk staging buffer of size %" PRIu64, bsize);
 	buf->buf_size = bsize;
 	wl_list_insert(&r->stage.buffers, &buf->link);
 
@@ -470,7 +474,7 @@ bool vulkan_wait_command_buffer(struct wlr_vk_command_buffer *cb,
 }
 
 static void release_command_buffer_resources(struct wlr_vk_command_buffer *cb,
-		struct wlr_vk_renderer *renderer) {
+		struct wlr_vk_renderer *renderer, int64_t now) {
 	struct wlr_vk_texture *texture, *texture_tmp;
 	wl_list_for_each_safe(texture, texture_tmp, &cb->destroy_textures, destroy_link) {
 		wl_list_remove(&texture->destroy_link);
@@ -481,9 +485,15 @@ static void release_command_buffer_resources(struct wlr_vk_command_buffer *cb,
 	struct wlr_vk_shared_buffer *buf, *buf_tmp;
 	wl_list_for_each_safe(buf, buf_tmp, &cb->stage_buffers, link) {
 		buf->allocs.size = 0;
+		buf->last_used_ms = now;
 
 		wl_list_remove(&buf->link);
 		wl_list_insert(&renderer->stage.buffers, &buf->link);
+	}
+
+	if (cb->color_transform) {
+		wlr_color_transform_unref(cb->color_transform);
+		cb->color_transform = NULL;
 	}
 }
 
@@ -499,12 +509,22 @@ static struct wlr_vk_command_buffer *get_command_buffer(
 		return NULL;
 	}
 
+
+	// Garbage collect any buffers that have remained unused for too long
+	int64_t now = get_current_time_msec();
+	struct wlr_vk_shared_buffer *buf, *buf_tmp;
+	wl_list_for_each_safe(buf, buf_tmp, &renderer->stage.buffers, link) {
+		if (buf->allocs.size == 0 && buf->last_used_ms + 10000 < now) {
+			shared_buffer_destroy(renderer, buf);
+		}
+	}
+
 	// Destroy textures for completed command buffers
 	for (size_t i = 0; i < VULKAN_COMMAND_BUFFERS_CAP; i++) {
 		struct wlr_vk_command_buffer *cb = &renderer->command_buffers[i];
 		if (cb->vk != VK_NULL_HANDLE && !cb->recording &&
 				cb->timeline_point <= current_point) {
-			release_command_buffer_resources(cb, renderer);
+			release_command_buffer_resources(cb, renderer, now);
 		}
 	}
 
@@ -586,11 +606,15 @@ void vulkan_reset_command_buffer(struct wlr_vk_command_buffer *cb) {
 	}
 }
 
+static void finish_render_buffer_out(struct wlr_vk_render_buffer_out *out,
+		VkDevice dev) {
+	vkDestroyFramebuffer(dev, out->framebuffer, NULL);
+	vkDestroyImageView(dev, out->image_view, NULL);
+}
+
 static void destroy_render_buffer(struct wlr_vk_render_buffer *buffer) {
 	wl_list_remove(&buffer->link);
 	wlr_addon_finish(&buffer->addon);
-
-	assert(buffer->renderer->current_render_buffer != buffer);
 
 	VkDevice dev = buffer->renderer->dev->dev;
 
@@ -601,20 +625,21 @@ static void destroy_render_buffer(struct wlr_vk_render_buffer *buffer) {
 		wlr_vk_error("vkQueueWaitIdle", res);
 	}
 
-	vkDestroyFramebuffer(dev, buffer->framebuffer, NULL);
-	vkDestroyImageView(dev, buffer->image_view, NULL);
-	vkDestroyImage(dev, buffer->image, NULL);
+	finish_render_buffer_out(&buffer->linear.out, dev);
+	finish_render_buffer_out(&buffer->srgb.out, dev);
 
-	for (size_t i = 0u; i < buffer->mem_count; ++i) {
-		vkFreeMemory(dev, buffer->memories[i], NULL);
+	finish_render_buffer_out(&buffer->two_pass.out, dev);
+	vkDestroyImage(dev, buffer->two_pass.blend_image, NULL);
+	vkFreeMemory(dev, buffer->two_pass.blend_memory, NULL);
+	vkDestroyImageView(dev, buffer->two_pass.blend_image_view, NULL);
+	if (buffer->two_pass.blend_attachment_pool) {
+		vulkan_free_ds(buffer->renderer, buffer->two_pass.blend_attachment_pool,
+			buffer->two_pass.blend_descriptor_set);
 	}
 
-	vkDestroyImage(dev, buffer->blend_image, NULL);
-	vkFreeMemory(dev, buffer->blend_memory, NULL);
-	vkDestroyImageView(dev, buffer->blend_image_view, NULL);
-	if (buffer->blend_attachment_pool) {
-		vulkan_free_ds(buffer->renderer, buffer->blend_attachment_pool,
-			buffer->blend_descriptor_set);
+	vkDestroyImage(dev, buffer->image, NULL);
+	for (size_t i = 0u; i < buffer->mem_count; ++i) {
+		vkFreeMemory(dev, buffer->memories[i], NULL);
 	}
 
 	free(buffer);
@@ -630,149 +655,15 @@ static struct wlr_addon_interface render_buffer_addon_impl = {
 	.destroy = handle_render_buffer_destroy,
 };
 
-static bool setup_blend_image(struct wlr_vk_renderer *renderer,
-		struct wlr_vk_render_buffer *buffer, int32_t width, int32_t height) {
+bool vulkan_setup_two_pass_framebuffer(struct wlr_vk_render_buffer *buffer,
+		const struct wlr_dmabuf_attributes *dmabuf) {
+	struct wlr_vk_renderer *renderer = buffer->renderer;
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
-
-	// Set up an extra 16F buffer on which to do linear blending,
-	// and afterwards to render onto the target
-	VkImageCreateInfo img_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-		.imageType = VK_IMAGE_TYPE_2D,
-		.format = VK_FORMAT_R16G16B16A16_SFLOAT,
-		.mipLevels = 1,
-		.arrayLayers = 1,
-		.samples = VK_SAMPLE_COUNT_1_BIT,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-		.tiling = VK_IMAGE_TILING_OPTIMAL,
-		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		.extent = (VkExtent3D) { width, height, 1 },
-		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
-	};
-
-	res = vkCreateImage(dev, &img_info, NULL, &buffer->blend_image);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkCreateImage failed", res);
-		goto error;
-	}
-
-	VkMemoryRequirements mem_reqs;
-	vkGetImageMemoryRequirements(dev, buffer->blend_image, &mem_reqs);
-
-	int mem_type_index = vulkan_find_mem_type(renderer->dev,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mem_reqs.memoryTypeBits);
-	if (mem_type_index == -1) {
-		wlr_log(WLR_ERROR, "failed to find suitable vulkan memory type");
-		goto error;
-	}
-
-	VkMemoryAllocateInfo mem_info = {
-		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.allocationSize = mem_reqs.size,
-		.memoryTypeIndex = mem_type_index,
-	};
-
-	res = vkAllocateMemory(dev, &mem_info, NULL, &buffer->blend_memory);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkAllocatorMemory failed", res);
-		goto error;
-	}
-
-	res = vkBindImageMemory(dev, buffer->blend_image, buffer->blend_memory, 0);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkBindMemory failed", res);
-		goto error;
-	}
-
-	VkImageViewCreateInfo blend_view_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-		.image = buffer->blend_image,
-		.viewType = VK_IMAGE_VIEW_TYPE_2D,
-		.format = img_info.format,
-		.components.r = VK_COMPONENT_SWIZZLE_IDENTITY,
-		.components.g = VK_COMPONENT_SWIZZLE_IDENTITY,
-		.components.b = VK_COMPONENT_SWIZZLE_IDENTITY,
-		.components.a = VK_COMPONENT_SWIZZLE_IDENTITY,
-		.subresourceRange = (VkImageSubresourceRange) {
-			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
-	};
-
-	res = vkCreateImageView(dev, &blend_view_info, NULL, &buffer->blend_image_view);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkCreateImageView failed", res);
-		goto error;
-	}
-
-	buffer->blend_attachment_pool = vulkan_alloc_blend_ds(renderer,
-		&buffer->blend_descriptor_set);
-	if (!buffer->blend_attachment_pool) {
-		wlr_log(WLR_ERROR, "failed to allocate descriptor");
-		goto error;
-	}
-
-	VkDescriptorImageInfo ds_attach_info = {
-		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.imageView = buffer->blend_image_view,
-		.sampler = VK_NULL_HANDLE,
-	};
-	VkWriteDescriptorSet ds_write = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
-		.dstSet = buffer->blend_descriptor_set,
-		.dstBinding = 0,
-		.pImageInfo = &ds_attach_info,
-	};
-	vkUpdateDescriptorSets(dev, 1, &ds_write, 0, NULL);
-	return true;
-
-error:
-	// cleaning up blend_attachment_pool, blend_descriptor_set, blend_image,
-	// blend_memory, and blend_image_view is the caller's responsibility,
-	// since it will need to do this anyway if framebuffer setup fails
-	return false;
-}
-
-static struct wlr_vk_render_buffer *create_render_buffer(
-		struct wlr_vk_renderer *renderer, struct wlr_buffer *wlr_buffer) {
-	VkResult res;
-	VkDevice dev = renderer->dev->dev;
-
-	struct wlr_vk_render_buffer *buffer = calloc(1, sizeof(*buffer));
-	if (buffer == NULL) {
-		wlr_log_errno(WLR_ERROR, "Allocation failed");
-		return NULL;
-	}
-	buffer->wlr_buffer = wlr_buffer;
-	buffer->renderer = renderer;
-
-	struct wlr_dmabuf_attributes dmabuf = {0};
-	if (!wlr_buffer_get_dmabuf(wlr_buffer, &dmabuf)) {
-		goto error;
-	}
-
-	wlr_log(WLR_DEBUG, "vulkan create_render_buffer: %.4s, %dx%d",
-		(const char*) &dmabuf.format, dmabuf.width, dmabuf.height);
-
-	buffer->image = vulkan_import_dmabuf(renderer, &dmabuf,
-		buffer->memories, &buffer->mem_count, true);
-	if (!buffer->image) {
-		goto error;
-	}
 
 	const struct wlr_vk_format_props *fmt = vulkan_format_props_from_drm(
-		renderer->dev, dmabuf.format);
-	if (fmt == NULL) {
-		wlr_log(WLR_ERROR, "Unsupported pixel format %"PRIx32 " (%.4s)",
-			dmabuf.format, (const char*) &dmabuf.format);
-		goto error;
-	}
+		renderer->dev, dmabuf->format);
+	assert(fmt);
 
 	VkImageViewCreateInfo view_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -792,73 +683,276 @@ static struct wlr_vk_render_buffer *create_render_buffer(
 		},
 	};
 
-	res = vkCreateImageView(dev, &view_info, NULL, &buffer->image_view);
+	res = vkCreateImageView(dev, &view_info, NULL, &buffer->two_pass.out.image_view);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkCreateImageView failed", res);
 		goto error;
 	}
 
-	bool has_blending_buffer = !fmt->format.is_srgb;
-
-	buffer->render_setup = find_or_create_render_setup(
-		renderer, &fmt->format, has_blending_buffer);
-	if (!buffer->render_setup) {
+	buffer->two_pass.render_setup = find_or_create_render_setup(
+		renderer, &fmt->format, true, false);
+	if (!buffer->two_pass.render_setup) {
 		goto error;
 	}
 
-	VkImageView attachments[2] = {0};
-	uint32_t attachment_count = 0;
-
-	if (has_blending_buffer) {
-		if (!setup_blend_image(renderer, buffer, dmabuf.width, dmabuf.height)) {
-			goto error;
-		}
-		attachments[attachment_count++] = buffer->blend_image_view;
-	}
-	attachments[attachment_count++] = buffer->image_view;
-
-	VkFramebufferCreateInfo fb_info = {
-		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-		.attachmentCount = attachment_count,
-		.pAttachments = attachments,
-		.flags = 0u,
-		.width = dmabuf.width,
-		.height = dmabuf.height,
-		.layers = 1u,
-		.renderPass = buffer->render_setup->render_pass,
+	// Set up an extra 16F buffer on which to do linear blending,
+	// and afterwards to render onto the target
+	VkImageCreateInfo img_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = VK_FORMAT_R16G16B16A16_SFLOAT,
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.tiling = VK_IMAGE_TILING_OPTIMAL,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.extent = (VkExtent3D) { dmabuf->width, dmabuf->height, 1 },
+		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
 	};
 
-	res = vkCreateFramebuffer(dev, &fb_info, NULL, &buffer->framebuffer);
+	res = vkCreateImage(dev, &img_info, NULL, &buffer->two_pass.blend_image);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImage failed", res);
+		goto error;
+	}
+
+	VkMemoryRequirements mem_reqs;
+	vkGetImageMemoryRequirements(dev, buffer->two_pass.blend_image, &mem_reqs);
+
+	int mem_type_index = vulkan_find_mem_type(renderer->dev,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mem_reqs.memoryTypeBits);
+	if (mem_type_index == -1) {
+		wlr_log(WLR_ERROR, "failed to find suitable vulkan memory type");
+		goto error;
+	}
+
+	VkMemoryAllocateInfo mem_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = mem_reqs.size,
+		.memoryTypeIndex = mem_type_index,
+	};
+
+	res = vkAllocateMemory(dev, &mem_info, NULL, &buffer->two_pass.blend_memory);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkAllocatorMemory failed", res);
+		goto error;
+	}
+
+	res = vkBindImageMemory(dev, buffer->two_pass.blend_image, buffer->two_pass.blend_memory, 0);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkBindMemory failed", res);
+		goto error;
+	}
+
+	VkImageViewCreateInfo blend_view_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.image = buffer->two_pass.blend_image,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = img_info.format,
+		.components.r = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.g = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.b = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.a = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.subresourceRange = (VkImageSubresourceRange) {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+		},
+	};
+
+	res = vkCreateImageView(dev, &blend_view_info, NULL, &buffer->two_pass.blend_image_view);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImageView failed", res);
+		goto error;
+	}
+
+	buffer->two_pass.blend_attachment_pool = vulkan_alloc_blend_ds(renderer,
+		&buffer->two_pass.blend_descriptor_set);
+	if (!buffer->two_pass.blend_attachment_pool) {
+		wlr_log(WLR_ERROR, "failed to allocate descriptor");
+		goto error;
+	}
+
+	VkDescriptorImageInfo ds_attach_info = {
+		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		.imageView = buffer->two_pass.blend_image_view,
+		.sampler = VK_NULL_HANDLE,
+	};
+	VkWriteDescriptorSet ds_write = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+		.dstSet = buffer->two_pass.blend_descriptor_set,
+		.dstBinding = 0,
+		.pImageInfo = &ds_attach_info,
+	};
+	vkUpdateDescriptorSets(dev, 1, &ds_write, 0, NULL);
+
+	VkImageView attachments[] = {
+		buffer->two_pass.blend_image_view,
+		buffer->two_pass.out.image_view,
+	};
+	VkFramebufferCreateInfo fb_info = {
+		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		.attachmentCount = sizeof(attachments) / sizeof(attachments[0]),
+		.pAttachments = attachments,
+		.flags = 0u,
+		.width = dmabuf->width,
+		.height = dmabuf->height,
+		.layers = 1u,
+		.renderPass = buffer->two_pass.render_setup->render_pass,
+	};
+
+	res = vkCreateFramebuffer(dev, &fb_info, NULL, &buffer->two_pass.out.framebuffer);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkCreateFramebuffer", res);
 		goto error;
 	}
 
+	return true;
 
+error:
+	// cleaning up everything is the caller's responsibility,
+	// since it will need to do this anyway if framebuffer setup fails
+	return false;
+}
+
+bool vulkan_setup_one_pass_framebuffer(struct wlr_vk_render_buffer *buffer,
+		const struct wlr_dmabuf_attributes *dmabuf, bool srgb) {
+	struct wlr_vk_renderer *renderer = buffer->renderer;
+	VkResult res;
+	VkDevice dev = renderer->dev->dev;
+
+	const struct wlr_vk_format_props *fmt = vulkan_format_props_from_drm(
+		renderer->dev, dmabuf->format);
+	assert(fmt);
+
+	VkFormat vk_fmt = srgb ? fmt->format.vk_srgb : fmt->format.vk;
+	assert(vk_fmt != VK_FORMAT_UNDEFINED);
+
+	struct wlr_vk_render_buffer_out *out = srgb ? &buffer->srgb.out : &buffer->linear.out;
+
+	// Set up the srgb framebuffer by default; two-pass framebuffer and
+	// blending image will be set up later if necessary
+	VkImageViewCreateInfo view_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.image = buffer->image,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = vk_fmt,
+		.components.r = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.g = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.b = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.a = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.subresourceRange = (VkImageSubresourceRange) {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+		},
+	};
+
+	res = vkCreateImageView(dev, &view_info, NULL, &out->image_view);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImageView failed", res);
+		goto error;
+	}
+
+	struct wlr_vk_render_format_setup *render_setup =
+		find_or_create_render_setup(renderer, &fmt->format, false, srgb);
+	if (!render_setup) {
+		goto error;
+	}
+
+	VkFramebufferCreateInfo fb_info = {
+		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		.attachmentCount = 1,
+		.pAttachments = &out->image_view,
+		.flags = 0u,
+		.width = dmabuf->width,
+		.height = dmabuf->height,
+		.layers = 1u,
+		.renderPass = render_setup->render_pass,
+	};
+
+	res = vkCreateFramebuffer(dev, &fb_info, NULL, &out->framebuffer);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateFramebuffer", res);
+		goto error;
+	}
+
+	if (srgb) {
+		buffer->srgb.render_setup = render_setup;
+	} else {
+		buffer->linear.render_setup = render_setup;
+	}
+
+	return true;
+
+error:
+	// cleaning up everything is the caller's responsibility,
+	// since it will need to do this anyway if framebuffer setup fails
+	return false;
+}
+
+static struct wlr_vk_render_buffer *create_render_buffer(
+		struct wlr_vk_renderer *renderer, struct wlr_buffer *wlr_buffer) {
+	struct wlr_vk_render_buffer *buffer = calloc(1, sizeof(*buffer));
+	if (buffer == NULL) {
+		wlr_log_errno(WLR_ERROR, "Allocation failed");
+		return NULL;
+	}
+	buffer->wlr_buffer = wlr_buffer;
+	buffer->renderer = renderer;
 	wlr_addon_init(&buffer->addon, &wlr_buffer->addons, renderer,
 		&render_buffer_addon_impl);
 	wl_list_insert(&renderer->render_buffers, &buffer->link);
 
+	struct wlr_dmabuf_attributes dmabuf = {0};
+	if (!wlr_buffer_get_dmabuf(wlr_buffer, &dmabuf)) {
+		goto error;
+	}
+
+	wlr_log(WLR_DEBUG, "vulkan create_render_buffer: %.4s, %dx%d",
+		(const char*) &dmabuf.format, dmabuf.width, dmabuf.height);
+
+	bool using_mutable_srgb = false;
+	buffer->image = vulkan_import_dmabuf(renderer, &dmabuf,
+		buffer->memories, &buffer->mem_count, true, &using_mutable_srgb);
+	if (!buffer->image) {
+		goto error;
+	}
+
+	const struct wlr_vk_format_props *fmt = vulkan_format_props_from_drm(
+		renderer->dev, dmabuf.format);
+	if (fmt == NULL) {
+		wlr_log(WLR_ERROR, "Unsupported pixel format %"PRIx32 " (%.4s)",
+			dmabuf.format, (const char*) &dmabuf.format);
+		goto error;
+	}
+
+	if (using_mutable_srgb) {
+		if (!vulkan_setup_one_pass_framebuffer(buffer, &dmabuf, true)) {
+			goto error;
+		}
+	} else {
+		// Set up the two-pass framebuffer & blending image
+		if (!vulkan_setup_two_pass_framebuffer(buffer, &dmabuf)) {
+			goto error;
+		}
+	}
+
 	return buffer;
 
 error:
-	if (buffer->blend_attachment_pool) {
-		vulkan_free_ds(buffer->renderer, buffer->blend_attachment_pool,
-			buffer->blend_descriptor_set);
-	}
-	vkDestroyImage(dev, buffer->blend_image, NULL);
-	vkFreeMemory(dev, buffer->blend_memory, NULL);
-	vkDestroyImageView(dev, buffer->blend_image_view, NULL);
-
-	vkDestroyFramebuffer(dev, buffer->framebuffer, NULL);
-	vkDestroyImageView(dev, buffer->image_view, NULL);
-	vkDestroyImage(dev, buffer->image, NULL);
-	for (size_t i = 0u; i < buffer->mem_count; ++i) {
-		vkFreeMemory(dev, buffer->memories[i], NULL);
+	if (buffer) {
+		destroy_render_buffer(buffer);
 	}
 
 	wlr_dmabuf_attributes_finish(&dmabuf);
-	free(buffer);
 	return NULL;
 }
 
@@ -874,93 +968,11 @@ static struct wlr_vk_render_buffer *get_render_buffer(
 	return buffer;
 }
 
-static bool vulkan_bind_buffer(struct wlr_renderer *wlr_renderer,
-		struct wlr_buffer *wlr_buffer) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-
-	if (renderer->current_render_buffer) {
-		wlr_buffer_unlock(renderer->current_render_buffer->wlr_buffer);
-		renderer->current_render_buffer = NULL;
-	}
-
-	if (!wlr_buffer) {
-		return true;
-	}
-
-	struct wlr_vk_render_buffer *buffer = get_render_buffer(renderer, wlr_buffer);
-	if (!buffer) {
-		buffer = create_render_buffer(renderer, wlr_buffer);
-		if (!buffer) {
-			return false;
-		}
-	}
-
-	wlr_buffer_lock(wlr_buffer);
-	renderer->current_render_buffer = buffer;
-	return true;
-}
-
-static bool vulkan_begin(struct wlr_renderer *wlr_renderer,
-		uint32_t width, uint32_t height) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	assert(renderer->current_render_buffer);
-
-	struct wlr_vk_command_buffer *cb = vulkan_acquire_command_buffer(renderer);
-	if (cb == NULL) {
-		return false;
-	}
-
-	assert(renderer->current_command_buffer == NULL);
-	renderer->current_command_buffer = cb;
-
-	VkCommandBufferBeginInfo begin_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-	};
-	VkResult res = vkBeginCommandBuffer(cb->vk, &begin_info);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkBeginCommandBuffer", res);
-		return false;
-	}
-
-	// begin render pass
-	VkFramebuffer fb = renderer->current_render_buffer->framebuffer;
-
-	VkRect2D rect = {{0, 0}, {width, height}};
-	renderer->scissor = rect;
-
-	VkRenderPassBeginInfo rp_info = {
-		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-		.renderArea = rect,
-		.renderPass = renderer->current_render_buffer->render_setup->render_pass,
-		.framebuffer = fb,
-		.clearValueCount = 0,
-	};
-	vkCmdBeginRenderPass(cb->vk, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
-
-	VkViewport vp = {0.f, 0.f, (float) width, (float) height, 0.f, 1.f};
-	vkCmdSetViewport(cb->vk, 0, 1, &vp);
-	vkCmdSetScissor(cb->vk, 0, 1, &rect);
-
-	// Refresh projection matrix.
-	// matrix_projection() assumes a GL coordinate system so we need
-	// to pass WL_OUTPUT_TRANSFORM_FLIPPED_180 to adjust it for vulkan.
-	matrix_projection(renderer->projection, width, height,
-		WL_OUTPUT_TRANSFORM_FLIPPED_180);
-
-	renderer->render_width = width;
-	renderer->render_height = height;
-	renderer->bound_pipe = VK_NULL_HANDLE;
-
-	return true;
-}
-
-bool vulkan_sync_foreign_texture(struct wlr_vk_texture *texture) {
-	struct wlr_vk_renderer *renderer = texture->renderer;
-	VkResult res;
-
+static bool buffer_export_sync_file(struct wlr_vk_renderer *renderer, struct wlr_buffer *buffer,
+		uint32_t flags, int sync_file_fds[static WLR_DMABUF_MAX_PLANES]) {
 	struct wlr_dmabuf_attributes dmabuf = {0};
-	if (!wlr_buffer_get_dmabuf(texture->buffer, &dmabuf)) {
-		wlr_log(WLR_ERROR, "Failed to get texture DMA-BUF");
+	if (!wlr_buffer_get_dmabuf(buffer, &dmabuf)) {
+		wlr_log(WLR_ERROR, "wlr_buffer_get_dmabuf() failed");
 		return false;
 	}
 
@@ -970,7 +982,7 @@ bool vulkan_sync_foreign_texture(struct wlr_vk_texture *texture) {
 		for (int i = 0; i < dmabuf.n_planes; i++) {
 			struct pollfd pollfd = {
 				.fd = dmabuf.fd[i],
-				.events = POLLIN,
+				.events = (flags & DMA_BUF_SYNC_WRITE) ? POLLOUT : POLLIN,
 			};
 			int timeout_ms = 1000;
 			int ret = poll(&pollfd, 1, timeout_ms);
@@ -987,36 +999,39 @@ bool vulkan_sync_foreign_texture(struct wlr_vk_texture *texture) {
 	}
 
 	for (int i = 0; i < dmabuf.n_planes; i++) {
-		int sync_file_fd = dmabuf_export_sync_file(dmabuf.fd[i], DMA_BUF_SYNC_READ);
+		int sync_file_fd = dmabuf_export_sync_file(dmabuf.fd[i], flags);
 		if (sync_file_fd < 0) {
 			wlr_log(WLR_ERROR, "Failed to extract DMA-BUF fence");
 			return false;
 		}
 
-		if (texture->foreign_semaphores[i] == VK_NULL_HANDLE) {
-			VkSemaphoreCreateInfo semaphore_info = {
-				.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-			};
-			res = vkCreateSemaphore(renderer->dev->dev, &semaphore_info, NULL,
-				&texture->foreign_semaphores[i]);
-			if (res != VK_SUCCESS) {
-				close(sync_file_fd);
-				wlr_vk_error("vkCreateSemaphore", res);
-				return false;
-			}
-		}
+		sync_file_fds[i] = sync_file_fd;
+	}
 
-		VkImportSemaphoreFdInfoKHR import_info = {
-			.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
-			.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-			.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
-			.semaphore = texture->foreign_semaphores[i],
-			.fd = sync_file_fd,
-		};
-		res = renderer->dev->api.vkImportSemaphoreFdKHR(renderer->dev->dev, &import_info);
-		if (res != VK_SUCCESS) {
-			close(sync_file_fd);
-			wlr_vk_error("vkImportSemaphoreFdKHR", res);
+	return true;
+}
+
+bool vulkan_sync_foreign_texture_acquire(struct wlr_vk_texture *texture,
+		int sync_file_fds[static WLR_DMABUF_MAX_PLANES]) {
+	return buffer_export_sync_file(texture->renderer, texture->buffer, DMA_BUF_SYNC_READ, sync_file_fds);
+}
+
+bool vulkan_sync_render_buffer_acquire(struct wlr_vk_render_buffer *render_buffer,
+		int sync_file_fds[static WLR_DMABUF_MAX_PLANES]) {
+	return buffer_export_sync_file(render_buffer->renderer, render_buffer->wlr_buffer,
+		DMA_BUF_SYNC_WRITE, sync_file_fds);
+}
+
+static bool buffer_import_sync_file(struct wlr_buffer *buffer, uint32_t flags, int sync_file_fd) {
+	struct wlr_dmabuf_attributes dmabuf = {0};
+	if (!wlr_buffer_get_dmabuf(buffer, &dmabuf)) {
+		wlr_log(WLR_ERROR, "wlr_buffer_get_dmabuf() failed");
+		return false;
+	}
+
+	for (int i = 0; i < dmabuf.n_planes; i++) {
+		if (!dmabuf_import_sync_file(dmabuf.fd[i], flags,
+				sync_file_fd)) {
 			return false;
 		}
 	}
@@ -1024,20 +1039,17 @@ bool vulkan_sync_foreign_texture(struct wlr_vk_texture *texture) {
 	return true;
 }
 
-bool vulkan_sync_render_buffer(struct wlr_vk_renderer *renderer,
-		struct wlr_vk_render_buffer *render_buffer, struct wlr_vk_command_buffer *cb) {
+bool vulkan_sync_render_pass_release(struct wlr_vk_renderer *renderer,
+		struct wlr_vk_render_pass *pass) {
 	VkResult res;
+	struct wlr_vk_command_buffer *cb = pass->command_buffer;
 
-	if (!renderer->dev->implicit_sync_interop) {
+	if (!renderer->dev->implicit_sync_interop && pass->signal_timeline == NULL) {
 		// We have no choice but to block here sadly
 		return vulkan_wait_command_buffer(cb, renderer);
 	}
 
-	struct wlr_dmabuf_attributes dmabuf = {0};
-	if (!wlr_buffer_get_dmabuf(render_buffer->wlr_buffer, &dmabuf)) {
-		wlr_log(WLR_ERROR, "wlr_buffer_get_dmabuf failed");
-		return false;
-	}
+	assert(cb->binary_semaphore != VK_NULL_HANDLE);
 
 	// Note: vkGetSemaphoreFdKHR implicitly resets the semaphore
 	const VkSemaphoreGetFdInfoKHR get_fence_fd_info = {
@@ -1053,547 +1065,48 @@ bool vulkan_sync_render_buffer(struct wlr_vk_renderer *renderer,
 		return false;
 	}
 
-	for (int i = 0; i < dmabuf.n_planes; i++) {
-		if (!dmabuf_import_sync_file(dmabuf.fd[i], DMA_BUF_SYNC_WRITE,
-				sync_file_fd)) {
-			close(sync_file_fd);
-			return false;
+	bool ok = false;
+	if (pass->signal_timeline != NULL) {
+		if (!wlr_drm_syncobj_timeline_import_sync_file(pass->signal_timeline,
+				pass->signal_point, sync_file_fd)) {
+			goto out;
+		}
+	} else {
+		if (!buffer_import_sync_file(pass->render_buffer->wlr_buffer, DMA_BUF_SYNC_WRITE, sync_file_fd)) {
+			goto out;
+		}
+
+		struct wlr_vk_render_pass_texture *pass_texture;
+		wl_array_for_each(pass_texture, &pass->textures) {
+			if (!buffer_import_sync_file(pass_texture->texture->buffer, DMA_BUF_SYNC_READ, sync_file_fd)) {
+				goto out;
+			}
 		}
 	}
 
+	ok = true;
+
+out:
 	close(sync_file_fd);
-
-	return true;
+	return ok;
 }
 
-static void vulkan_end(struct wlr_renderer *wlr_renderer) {
+static const struct wlr_drm_format_set *vulkan_get_texture_formats(
+		struct wlr_renderer *wlr_renderer, uint32_t buffer_caps) {
 	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	assert(renderer->current_render_buffer);
-
-	struct wlr_vk_command_buffer *render_cb = renderer->current_command_buffer;
-	assert(render_cb != NULL);
-	renderer->current_command_buffer = NULL;
-
-	if (vulkan_record_stage_cb(renderer) == VK_NULL_HANDLE) {
-		return;
+	if (buffer_caps & WLR_BUFFER_CAP_DMABUF) {
+		return &renderer->dev->dmabuf_texture_formats;
+	} else if (buffer_caps & WLR_BUFFER_CAP_DATA_PTR) {
+		return &renderer->dev->shm_texture_formats;
+	} else {
+		return NULL;
 	}
-
-	struct wlr_vk_command_buffer *stage_cb = renderer->stage.cb;
-	assert(stage_cb != NULL);
-	renderer->stage.cb = NULL;
-
-	struct wlr_vk_render_buffer *current_rb = renderer->current_render_buffer;
-
-	if (current_rb->blend_image) {
-		// Apply output shader to map blend image to actual output image
-		vkCmdNextSubpass(render_cb->vk, VK_SUBPASS_CONTENTS_INLINE);
-
-		VkPipeline pipe = current_rb->render_setup->output_pipe;
-		if (pipe != renderer->bound_pipe) {
-			vkCmdBindPipeline(render_cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-			renderer->bound_pipe = pipe;
-		}
-
-		float final_matrix[9] = {
-			renderer->render_width, 0.f, -1.f,
-			0.f, renderer->render_height, -1.f,
-			0.f, 0.f, 0.f,
-		};
-		struct wlr_vk_vert_pcr_data vert_pcr_data;
-		mat3_to_mat4(final_matrix, vert_pcr_data.mat4);
-		vert_pcr_data.uv_off[0] = 0.f;
-		vert_pcr_data.uv_off[1] = 0.f;
-		vert_pcr_data.uv_size[0] = 1.f;
-		vert_pcr_data.uv_size[1] = 1.f;
-
-		vkCmdPushConstants(render_cb->vk, renderer->output_pipe_layout,
-			VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vert_pcr_data), &vert_pcr_data);
-		vkCmdBindDescriptorSets(render_cb->vk,
-			VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->output_pipe_layout,
-			0, 1, &current_rb->blend_descriptor_set, 0, NULL);
-
-		vkCmdDraw(render_cb->vk, 4, 1, 0, 0);
-	}
-
-	vkCmdEndRenderPass(render_cb->vk);
-
-	renderer->render_width = 0u;
-	renderer->render_height = 0u;
-	renderer->bound_pipe = VK_NULL_HANDLE;
-
-	// insert acquire and release barriers for dmabuf-images
-	unsigned barrier_count = wl_list_length(&renderer->foreign_textures) + 1;
-	VkImageMemoryBarrier *acquire_barriers = calloc(barrier_count, sizeof(*acquire_barriers));
-	VkImageMemoryBarrier *release_barriers = calloc(barrier_count, sizeof(*release_barriers));
-	VkSemaphoreSubmitInfoKHR *render_wait = calloc(barrier_count * WLR_DMABUF_MAX_PLANES, sizeof(*render_wait));
-	if (acquire_barriers == NULL || release_barriers == NULL || render_wait == NULL) {
-		wlr_log_errno(WLR_ERROR, "Allocation failed");
-		free(acquire_barriers);
-		free(release_barriers);
-		free(render_wait);
-		return;
-	}
-
-	struct wlr_vk_texture *texture, *tmp_tex;
-	unsigned idx = 0;
-	uint32_t render_wait_len = 0;
-	wl_list_for_each_safe(texture, tmp_tex, &renderer->foreign_textures, foreign_link) {
-		VkImageLayout src_layout = VK_IMAGE_LAYOUT_GENERAL;
-		if (!texture->transitioned) {
-			src_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-			texture->transitioned = true;
-		}
-
-		acquire_barriers[idx] = (VkImageMemoryBarrier){
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-			.dstQueueFamilyIndex = renderer->dev->queue_family,
-			.image = texture->image,
-			.oldLayout = src_layout,
-			.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.srcAccessMask = 0, // ignored anyways
-			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-			.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.subresourceRange.layerCount = 1,
-			.subresourceRange.levelCount = 1,
-		};
-
-		release_barriers[idx] = (VkImageMemoryBarrier){
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-			.srcQueueFamilyIndex = renderer->dev->queue_family,
-			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-			.image = texture->image,
-			.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.newLayout = VK_IMAGE_LAYOUT_GENERAL,
-			.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-			.dstAccessMask = 0, // ignored anyways
-			.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.subresourceRange.layerCount = 1,
-			.subresourceRange.levelCount = 1,
-		};
-
-		++idx;
-
-		if (!vulkan_sync_foreign_texture(texture)) {
-			wlr_log(WLR_ERROR, "Failed to wait for foreign texture DMA-BUF fence");
-		} else {
-			for (size_t i = 0; i < WLR_DMABUF_MAX_PLANES; i++) {
-				if (texture->foreign_semaphores[i] != VK_NULL_HANDLE) {
-					assert(render_wait_len < barrier_count * WLR_DMABUF_MAX_PLANES);
-					render_wait[render_wait_len++] = (VkSemaphoreSubmitInfoKHR){
-						.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
-						.semaphore = texture->foreign_semaphores[i],
-						.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
-					};
-				}
-			}
-		}
-
-		wl_list_remove(&texture->foreign_link);
-		texture->owned = false;
-	}
-
-	// also add acquire/release barriers for the current render buffer
-	VkImageLayout src_layout = VK_IMAGE_LAYOUT_GENERAL;
-	if (!current_rb->transitioned) {
-		src_layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-		current_rb->transitioned = true;
-	}
-
-	// acquire render buffer before rendering
-	acquire_barriers[idx] = (VkImageMemoryBarrier){
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-		.dstQueueFamilyIndex = renderer->dev->queue_family,
-		.image = renderer->current_render_buffer->image,
-		.oldLayout = src_layout,
-		.newLayout = VK_IMAGE_LAYOUT_GENERAL,
-		.srcAccessMask = 0, // ignored anyways
-		.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-		.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		.subresourceRange.layerCount = 1,
-		.subresourceRange.levelCount = 1,
-	};
-
-	// release render buffer after rendering
-	release_barriers[idx] = (VkImageMemoryBarrier){
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.srcQueueFamilyIndex = renderer->dev->queue_family,
-		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-		.image = renderer->current_render_buffer->image,
-		.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-		.newLayout = VK_IMAGE_LAYOUT_GENERAL,
-		.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-		.dstAccessMask = 0, // ignored anyways
-		.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		.subresourceRange.layerCount = 1,
-		.subresourceRange.levelCount = 1,
-	};
-
-	++idx;
-
-	if (current_rb->blend_image) {
-		// The render pass changes the blend image layout from
-		// color attachment to read only, so on each frame, before
-		// the render pass starts, we change it back
-		VkImageLayout blend_src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		if (!current_rb->blend_transitioned) {
-			blend_src_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-			current_rb->blend_transitioned = true;
-		}
-
-		VkImageMemoryBarrier blend_acq_barrier = {
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.image = current_rb->blend_image,
-			.oldLayout = blend_src_layout,
-			.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-			.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-			.subresourceRange = {
-				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-				.layerCount = 1,
-				.levelCount = 1,
-			}
-		};
-		vkCmdPipelineBarrier(stage_cb->vk, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-			0, 0, NULL, 0, NULL, 1, &blend_acq_barrier);
-	}
-
-	vkCmdPipelineBarrier(stage_cb->vk, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-		0, 0, NULL, 0, NULL, barrier_count, acquire_barriers);
-
-	vkCmdPipelineBarrier(render_cb->vk, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
-		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL,
-		barrier_count, release_barriers);
-
-	free(acquire_barriers);
-	free(release_barriers);
-
-	// No semaphores needed here.
-	// We don't need a semaphore from the stage/transfer submission
-	// to the render submissions since they are on the same queue
-	// and we have a renderpass dependency for that.
-	uint64_t stage_timeline_point = vulkan_end_command_buffer(stage_cb, renderer);
-	if (stage_timeline_point == 0) {
-		return;
-	}
-
-	VkCommandBufferSubmitInfoKHR stage_cb_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO_KHR,
-		.commandBuffer = stage_cb->vk,
-	};
-	VkSemaphoreSubmitInfoKHR stage_signal = {
-		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
-		.semaphore = renderer->timeline_semaphore,
-		.value = stage_timeline_point,
-	};
-	VkSubmitInfo2KHR stage_submit = {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2_KHR,
-		.commandBufferInfoCount = 1,
-		.pCommandBufferInfos = &stage_cb_info,
-		.signalSemaphoreInfoCount = 1,
-		.pSignalSemaphoreInfos = &stage_signal,
-	};
-
-	VkSemaphoreSubmitInfoKHR stage_wait;
-	if (renderer->stage.last_timeline_point > 0) {
-		stage_wait = (VkSemaphoreSubmitInfoKHR){
-			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
-			.semaphore = renderer->timeline_semaphore,
-			.value = renderer->stage.last_timeline_point,
-			.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
-		};
-
-		stage_submit.waitSemaphoreInfoCount = 1;
-		stage_submit.pWaitSemaphoreInfos = &stage_wait;
-	}
-
-	renderer->stage.last_timeline_point = stage_timeline_point;
-
-	uint64_t render_timeline_point = vulkan_end_command_buffer(render_cb, renderer);
-	if (render_timeline_point == 0) {
-		return;
-	}
-
-	size_t render_signal_len = 1;
-	VkSemaphoreSubmitInfoKHR render_signal[2] = {0};
-	render_signal[0] = (VkSemaphoreSubmitInfoKHR){
-		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
-		.semaphore = renderer->timeline_semaphore,
-		.value = render_timeline_point,
-	};
-	if (renderer->dev->implicit_sync_interop) {
-		if (render_cb->binary_semaphore == VK_NULL_HANDLE) {
-			VkExportSemaphoreCreateInfo export_info = {
-				.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
-				.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-			};
-			VkSemaphoreCreateInfo semaphore_info = {
-				.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-				.pNext = &export_info,
-			};
-			VkResult res = vkCreateSemaphore(renderer->dev->dev, &semaphore_info,
-				NULL, &render_cb->binary_semaphore);
-			if (res != VK_SUCCESS) {
-				wlr_vk_error("vkCreateSemaphore", res);
-				return;
-			}
-		}
-
-		render_signal[render_signal_len++] = (VkSemaphoreSubmitInfoKHR){
-			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
-			.semaphore = render_cb->binary_semaphore,
-		};
-	}
-
-	VkCommandBufferSubmitInfoKHR render_cb_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO_KHR,
-		.commandBuffer = render_cb->vk,
-	};
-	VkSubmitInfo2KHR render_submit = {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2_KHR,
-		.waitSemaphoreInfoCount = render_wait_len,
-		.pWaitSemaphoreInfos = render_wait,
-		.commandBufferInfoCount = 1,
-		.pCommandBufferInfos = &render_cb_info,
-		.signalSemaphoreInfoCount = render_signal_len,
-		.pSignalSemaphoreInfos = render_signal,
-	};
-
-	VkSubmitInfo2KHR submit_infos[] = { stage_submit, render_submit };
-	VkResult res = renderer->dev->api.vkQueueSubmit2KHR(renderer->dev->queue, 2, submit_infos, VK_NULL_HANDLE);
-	if (res == VK_ERROR_DEVICE_LOST) {
-		wlr_log(WLR_ERROR, "vkQueueSubmit failed with VK_ERROR_DEVICE_LOST");
-		wl_signal_emit_mutable(&wlr_renderer->events.lost, NULL);
-		return;
-	} else if (res != VK_SUCCESS) {
-		wlr_vk_error("vkQueueSubmit", res);
-		return;
-	}
-
-	free(render_wait);
-
-	struct wlr_vk_shared_buffer *stage_buf, *stage_buf_tmp;
-	wl_list_for_each_safe(stage_buf, stage_buf_tmp, &renderer->stage.buffers, link) {
-		if (stage_buf->allocs.size == 0) {
-			continue;
-		}
-		wl_list_remove(&stage_buf->link);
-		wl_list_insert(&stage_cb->stage_buffers, &stage_buf->link);
-	}
-
-	if (!vulkan_sync_render_buffer(renderer, renderer->current_render_buffer, render_cb)) {
-		return;
-	}
-}
-
-static bool vulkan_render_subtexture_with_matrix(struct wlr_renderer *wlr_renderer,
-		struct wlr_texture *wlr_texture, const struct wlr_fbox *box,
-		const float matrix[static 9], float alpha) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	VkCommandBuffer cb = renderer->current_command_buffer->vk;
-
-	struct wlr_vk_texture *texture = vulkan_get_texture(wlr_texture);
-	assert(texture->renderer == renderer);
-	if (texture->dmabuf_imported && !texture->owned) {
-		// Store this texture in the list of textures that need to be
-		// acquired before rendering and released after rendering.
-		// We don't do it here immediately since barriers inside
-		// a renderpass are suboptimal (would require additional renderpass
-		// dependency and potentially multiple barriers) and it's
-		// better to issue one barrier for all used textures anyways.
-		texture->owned = true;
-		assert(texture->foreign_link.prev == NULL);
-		assert(texture->foreign_link.next == NULL);
-		wl_list_insert(&renderer->foreign_textures, &texture->foreign_link);
-	}
-
-	struct wlr_vk_pipeline *pipe = setup_get_or_create_pipeline(
-		renderer->current_render_buffer->render_setup,
-		&(struct wlr_vk_pipeline_key) {
-			.layout = {
-				.ycbcr_format = texture->format->is_ycbcr ? texture->format : NULL,
-			},
-			.texture_transform = texture->transform,
-		});
-	if (!pipe) {
-		return false;
-	}
-
-	struct wlr_vk_texture_view *view =
-		vulkan_texture_get_or_create_view(texture, pipe->layout);
-	if (!view) {
-		return false;
-	}
-
-	if (pipe->vk != renderer->bound_pipe) {
-		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe->vk);
-		renderer->bound_pipe = pipe->vk;
-	}
-
-	vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
-		pipe->layout->vk, 0, 1, &view->ds, 0, NULL);
-
-	float final_matrix[9];
-	wlr_matrix_multiply(final_matrix, renderer->projection, matrix);
-
-	struct wlr_vk_vert_pcr_data vert_pcr_data;
-	mat3_to_mat4(final_matrix, vert_pcr_data.mat4);
-
-	vert_pcr_data.uv_off[0] = box->x / wlr_texture->width;
-	vert_pcr_data.uv_off[1] = box->y / wlr_texture->height;
-	vert_pcr_data.uv_size[0] = box->width / wlr_texture->width;
-	vert_pcr_data.uv_size[1] = box->height / wlr_texture->height;
-
-	vkCmdPushConstants(cb, pipe->layout->vk,
-		VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vert_pcr_data), &vert_pcr_data);
-	vkCmdPushConstants(cb, pipe->layout->vk,
-		VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(vert_pcr_data), sizeof(float),
-		&alpha);
-	vkCmdDraw(cb, 4, 1, 0, 0);
-	texture->last_used_cb = renderer->current_command_buffer;
-
-	return true;
-}
-
-static void vulkan_clear(struct wlr_renderer *wlr_renderer,
-		const float color[static 4]) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	VkCommandBuffer cb = renderer->current_command_buffer->vk;
-
-	if (renderer->scissor.extent.width == 0 || renderer->scissor.extent.height == 0) {
-		return;
-	}
-
-	VkClearAttachment att = {
-		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		.colorAttachment = 0u,
-		// Input color values are given in srgb space, vulkan expects
-		// them in linear space. We explicitly import argb8 render buffers
-		// as srgb, vulkan will convert the input values we give here to
-		// srgb first.
-		// But in other parts of wlroots we just always assume
-		// srgb so that's why we have to convert here.
-		.clearValue.color.float32 = {
-			color_to_linear_premult(color[0], color[3]),
-			color_to_linear_premult(color[1], color[3]),
-			color_to_linear_premult(color[2], color[3]),
-			color[3], // no conversion for alpha
-		},
-	};
-
-	VkClearRect rect = {
-		.rect = renderer->scissor,
-		.layerCount = 1,
-	};
-	vkCmdClearAttachments(cb, 1, &att, 1, &rect);
-}
-
-static void vulkan_scissor(struct wlr_renderer *wlr_renderer,
-		struct wlr_box *box) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	VkCommandBuffer cb = renderer->current_command_buffer->vk;
-
-	uint32_t w = renderer->render_width;
-	uint32_t h = renderer->render_height;
-	struct wlr_box dst = {0, 0, w, h};
-	if (box && !wlr_box_intersection(&dst, box, &dst)) {
-		dst = (struct wlr_box) {0, 0, 0, 0}; // empty
-	}
-
-	VkRect2D rect = (VkRect2D) {{dst.x, dst.y}, {dst.width, dst.height}};
-	renderer->scissor = rect;
-	vkCmdSetScissor(cb, 0, 1, &rect);
-}
-
-static const uint32_t *vulkan_get_shm_texture_formats(
-		struct wlr_renderer *wlr_renderer, size_t *len) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	*len = renderer->dev->shm_format_count;
-	return renderer->dev->shm_formats;
-}
-
-static void vulkan_render_quad_with_matrix(struct wlr_renderer *wlr_renderer,
-		const float color[static 4], const float matrix[static 9]) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	VkCommandBuffer cb = renderer->current_command_buffer->vk;
-
-	struct wlr_vk_pipeline *pipe = setup_get_or_create_pipeline(
-		renderer->current_render_buffer->render_setup,
-		&(struct wlr_vk_pipeline_key) {
-			.source = WLR_VK_SHADER_SOURCE_SINGLE_COLOR,
-			.layout = {
-				.ycbcr_format = NULL,
-			},
-		});
-	if (!pipe) {
-		return;
-	}
-
-	if (pipe->vk != renderer->bound_pipe) {
-		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe->vk);
-		renderer->bound_pipe = pipe->vk;
-	}
-
-	float final_matrix[9];
-	wlr_matrix_multiply(final_matrix, renderer->projection, matrix);
-
-	struct wlr_vk_vert_pcr_data vert_pcr_data;
-	mat3_to_mat4(final_matrix, vert_pcr_data.mat4);
-	vert_pcr_data.uv_off[0] = 0.f;
-	vert_pcr_data.uv_off[1] = 0.f;
-	vert_pcr_data.uv_size[0] = 1.f;
-	vert_pcr_data.uv_size[1] = 1.f;
-
-	// Input color values are given in srgb space, shader expects
-	// them in linear space. The shader does all computation in linear
-	// space and expects in inputs in linear space since it outputs
-	// colors in linear space as well (and vulkan then automatically
-	// does the conversion for out SRGB render targets).
-	// But in other parts of wlroots we just always assume
-	// srgb so that's why we have to convert here.
-	float linear_color[4];
-	linear_color[0] = color_to_linear_premult(color[0], color[3]);
-	linear_color[1] = color_to_linear_premult(color[1], color[3]);
-	linear_color[2] = color_to_linear_premult(color[2], color[3]);
-	linear_color[3] = color[3]; // no conversion for alpha
-
-	vkCmdPushConstants(cb, pipe->layout->vk,
-		VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vert_pcr_data), &vert_pcr_data);
-	vkCmdPushConstants(cb, pipe->layout->vk,
-		VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(vert_pcr_data), sizeof(float) * 4,
-		linear_color);
-	vkCmdDraw(cb, 4, 1, 0, 0);
-}
-
-static const struct wlr_drm_format_set *vulkan_get_dmabuf_texture_formats(
-		struct wlr_renderer *wlr_renderer) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	return &renderer->dev->dmabuf_texture_formats;
 }
 
 static const struct wlr_drm_format_set *vulkan_get_render_formats(
 		struct wlr_renderer *wlr_renderer) {
 	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
 	return &renderer->dev->dmabuf_render_formats;
-}
-
-static uint32_t vulkan_preferred_read_format(
-		struct wlr_renderer *wlr_renderer) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-	struct wlr_dmabuf_attributes dmabuf = {0};
-	if (!wlr_buffer_get_dmabuf(renderer->current_render_buffer->wlr_buffer,
-				&dmabuf)) {
-		wlr_log(WLR_ERROR, "vulkan_preferred_read_format: Failed to get dmabuf of current render buffer");
-		return DRM_FORMAT_INVALID;
-	}
-	return dmabuf.format;
 }
 
 static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
@@ -1603,8 +1116,6 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 		free(renderer);
 		return;
 	}
-
-	assert(!renderer->current_render_buffer);
 
 	VkResult res = vkDeviceWaitIdle(renderer->dev->dev);
 	if (res != VK_SUCCESS) {
@@ -1616,10 +1127,15 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 		if (cb->vk == VK_NULL_HANDLE) {
 			continue;
 		}
-		release_command_buffer_resources(cb, renderer);
+		release_command_buffer_resources(cb, renderer, 0);
 		if (cb->binary_semaphore != VK_NULL_HANDLE) {
 			vkDestroySemaphore(renderer->dev->dev, cb->binary_semaphore, NULL);
 		}
+		VkSemaphore *sem_ptr;
+		wl_array_for_each(sem_ptr, &cb->wait_semaphores) {
+			vkDestroySemaphore(renderer->dev->dev, *sem_ptr, NULL);
+		}
+		wl_array_release(&cb->wait_semaphores);
 	}
 
 	// stage.cb automatically freed with command pool
@@ -1637,6 +1153,12 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	wl_list_for_each_safe(render_buffer, render_buffer_tmp,
 			&renderer->render_buffers, link) {
 		destroy_render_buffer(render_buffer);
+	}
+
+	struct wlr_vk_color_transform *color_transform, *color_transform_tmp;
+	wl_list_for_each_safe(color_transform, color_transform_tmp,
+			&renderer->color_transforms, link) {
+		vk_color_transform_destroy(&color_transform->addon);
 	}
 
 	struct wlr_vk_render_format_setup *setup, *tmp_setup;
@@ -1670,10 +1192,16 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 		free(pipeline_layout);
 	}
 
+	vkDestroyImageView(dev->dev, renderer->dummy3d_image_view, NULL);
+	vkDestroyImage(dev->dev, renderer->dummy3d_image, NULL);
+	vkFreeMemory(dev->dev, renderer->dummy3d_mem, NULL);
+
 	vkDestroySemaphore(dev->dev, renderer->timeline_semaphore, NULL);
 	vkDestroyPipelineLayout(dev->dev, renderer->output_pipe_layout, NULL);
-	vkDestroyDescriptorSetLayout(dev->dev, renderer->output_ds_layout, NULL);
+	vkDestroyDescriptorSetLayout(dev->dev, renderer->output_ds_srgb_layout, NULL);
+	vkDestroyDescriptorSetLayout(dev->dev, renderer->output_ds_lut3d_layout, NULL);
 	vkDestroyCommandPool(dev->dev, renderer->command_pool, NULL);
+	vkDestroySampler(dev->dev, renderer->output_sampler_lut3d, NULL);
 
 	if (renderer->read_pixels_cache.initialized) {
 		vkFreeMemory(dev->dev, renderer->read_pixels_cache.dst_img_memory, NULL);
@@ -1686,13 +1214,12 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	free(renderer);
 }
 
-static bool vulkan_read_pixels(struct wlr_renderer *wlr_renderer,
+bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
+		VkFormat src_format, VkImage src_image,
 		uint32_t drm_format, uint32_t stride,
 		uint32_t width, uint32_t height, uint32_t src_x, uint32_t src_y,
 		uint32_t dst_x, uint32_t dst_y, void *data) {
-	struct wlr_vk_renderer *vk_renderer = vulkan_get_renderer(wlr_renderer);
 	VkDevice dev = vk_renderer->dev->dev;
-	VkImage src_image = vk_renderer->current_render_buffer->image;
 
 	const struct wlr_pixel_format_info *pixel_format_info = drm_get_pixel_format_info(drm_format);
 	if (!pixel_format_info) {
@@ -1711,7 +1238,6 @@ static bool vulkan_read_pixels(struct wlr_renderer *wlr_renderer,
 		return false;
 	}
 	VkFormat dst_format = wlr_vk_format->vk;
-	VkFormat src_format = vk_renderer->current_render_buffer->render_setup->render_format->vk;
 	VkFormatProperties dst_format_props = {0}, src_format_props = {0};
 	vkGetPhysicalDeviceFormatProperties(vk_renderer->dev->phdev, dst_format, &dst_format_props);
 	vkGetPhysicalDeviceFormatProperties(vk_renderer->dev->phdev, src_format, &src_format_props);
@@ -1761,7 +1287,6 @@ static bool vulkan_read_pixels(struct wlr_renderer *wlr_renderer,
 
 		int mem_type = vulkan_find_mem_type(vk_renderer->dev,
 				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-				VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 				VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
 				mem_reqs.memoryTypeBits);
 		if (mem_type < 0) {
@@ -1898,6 +1423,19 @@ static bool vulkan_read_pixels(struct wlr_renderer *wlr_renderer,
 		return false;
 	}
 
+	VkMappedMemoryRange mem_range = {
+		.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+		.memory = dst_img_memory,
+		.offset = 0,
+		.size = VK_WHOLE_SIZE,
+	};
+	res = vkInvalidateMappedMemoryRanges(dev, 1, &mem_range);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkInvalidateMappedMemoryRanges", res);
+		vkUnmapMemory(dev, dst_img_memory);
+		return false;
+	}
+
 	const char *d = (const char *)v + img_sub_layout.offset;
 	unsigned char *p = (unsigned char *)data + dst_y * stride;
 	uint32_t bytes_per_pixel = pixel_format_info->bytes_per_block;
@@ -1913,6 +1451,7 @@ static bool vulkan_read_pixels(struct wlr_renderer *wlr_renderer,
 	vkUnmapMemory(dev, dst_img_memory);
 	// Don't need to free anything else, since memory and image are cached
 	return true;
+
 free_memory:
 	vkFreeMemory(dev, dst_img_memory, NULL);
 destroy_image:
@@ -1924,10 +1463,6 @@ destroy_image:
 static int vulkan_get_drm_fd(struct wlr_renderer *wlr_renderer) {
 	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
 	return renderer->dev->drm_fd;
-}
-
-static uint32_t vulkan_get_render_buffer_caps(struct wlr_renderer *wlr_renderer) {
-	return WLR_BUFFER_CAP_DMABUF;
 }
 
 static struct wlr_render_pass *vulkan_begin_buffer_pass(struct wlr_renderer *wlr_renderer,
@@ -1942,7 +1477,8 @@ static struct wlr_render_pass *vulkan_begin_buffer_pass(struct wlr_renderer *wlr
 		}
 	}
 
-	struct wlr_vk_render_pass *render_pass = vulkan_begin_render_pass(renderer, render_buffer);
+	struct wlr_vk_render_pass *render_pass = vulkan_begin_render_pass(
+		renderer, render_buffer, options);
 	if (render_pass == NULL) {
 		return NULL;
 	}
@@ -1950,21 +1486,10 @@ static struct wlr_render_pass *vulkan_begin_buffer_pass(struct wlr_renderer *wlr
 }
 
 static const struct wlr_renderer_impl renderer_impl = {
-	.bind_buffer = vulkan_bind_buffer,
-	.begin = vulkan_begin,
-	.end = vulkan_end,
-	.clear = vulkan_clear,
-	.scissor = vulkan_scissor,
-	.render_subtexture_with_matrix = vulkan_render_subtexture_with_matrix,
-	.render_quad_with_matrix = vulkan_render_quad_with_matrix,
-	.get_shm_texture_formats = vulkan_get_shm_texture_formats,
-	.get_dmabuf_texture_formats = vulkan_get_dmabuf_texture_formats,
+	.get_texture_formats = vulkan_get_texture_formats,
 	.get_render_formats = vulkan_get_render_formats,
-	.preferred_read_format = vulkan_preferred_read_format,
-	.read_pixels = vulkan_read_pixels,
 	.destroy = vulkan_destroy,
 	.get_drm_fd = vulkan_get_drm_fd,
-	.get_render_buffer_caps = vulkan_get_render_buffer_caps,
 	.texture_from_buffer = vulkan_texture_from_buffer,
 	.begin_buffer_pass = vulkan_begin_buffer_pass,
 };
@@ -1997,14 +1522,14 @@ static bool init_tex_layouts(struct wlr_vk_renderer *renderer,
 		return false;
 	}
 
-	VkPushConstantRange pc_ranges[2] = {
+	VkPushConstantRange pc_ranges[] = {
 		{
 			.size = sizeof(struct wlr_vk_vert_pcr_data),
 			.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
 		},
 		{
 			.offset = pc_ranges[0].size,
-			.size = sizeof(float) * 4, // alpha or color
+			.size = sizeof(struct wlr_vk_frag_texture_pcr_data),
 			.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
 		},
 	};
@@ -2013,7 +1538,7 @@ static bool init_tex_layouts(struct wlr_vk_renderer *renderer,
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.setLayoutCount = 1,
 		.pSetLayouts = out_ds_layout,
-		.pushConstantRangeCount = 2,
+		.pushConstantRangeCount = sizeof(pc_ranges) / sizeof(pc_ranges[0]),
 		.pPushConstantRanges = pc_ranges,
 	};
 
@@ -2026,13 +1551,11 @@ static bool init_tex_layouts(struct wlr_vk_renderer *renderer,
 	return true;
 }
 
-static bool init_blend_to_output_layouts(struct wlr_vk_renderer *renderer,
-		VkDescriptorSetLayout *out_ds_layout,
-		VkPipelineLayout *out_pipe_layout) {
+static bool init_blend_to_output_layouts(struct wlr_vk_renderer *renderer) {
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
 
-	VkDescriptorSetLayoutBinding ds_binding = {
+	VkDescriptorSetLayoutBinding ds_binding_input = {
 		.binding = 0,
 		.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
 		.descriptorCount = 1,
@@ -2043,32 +1566,83 @@ static bool init_blend_to_output_layouts(struct wlr_vk_renderer *renderer,
 	VkDescriptorSetLayoutCreateInfo ds_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 		.bindingCount = 1,
-		.pBindings = &ds_binding,
+		.pBindings = &ds_binding_input,
 	};
 
-	res = vkCreateDescriptorSetLayout(dev, &ds_info, NULL, out_ds_layout);
+	res = vkCreateDescriptorSetLayout(dev, &ds_info, NULL, &renderer->output_ds_srgb_layout);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateDescriptorSetLayout", res);
+		return false;
+	}
+
+	VkSamplerCreateInfo sampler_create_info = {
+		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+		.magFilter = VK_FILTER_LINEAR,
+		.minFilter = VK_FILTER_LINEAR,
+		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+		.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		.minLod = 0.f,
+		.maxLod = 0.25f,
+	};
+
+	res = vkCreateSampler(renderer->dev->dev, &sampler_create_info, NULL,
+		&renderer->output_sampler_lut3d);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateSampler", res);
+		return false;
+	}
+
+	VkDescriptorSetLayoutBinding ds_binding_lut3d = {
+		.binding = 0,
+		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.descriptorCount = 1,
+		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+		.pImmutableSamplers = &renderer->output_sampler_lut3d,
+	};
+
+	VkDescriptorSetLayoutCreateInfo ds_lut3d_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = 1,
+		.pBindings = &ds_binding_lut3d,
+	};
+
+	res = vkCreateDescriptorSetLayout(dev, &ds_lut3d_info, NULL,
+		&renderer->output_ds_lut3d_layout);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkCreateDescriptorSetLayout", res);
 		return false;
 	}
 
 	// pipeline layout -- standard vertex uniforms, no shader uniforms
-	VkPushConstantRange pc_ranges[1] = {
+	VkPushConstantRange pc_ranges[] = {
 		{
+			.offset = 0,
 			.size = sizeof(struct wlr_vk_vert_pcr_data),
 			.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
 		},
+		{
+			.offset = sizeof(struct wlr_vk_vert_pcr_data),
+			.size = sizeof(struct wlr_vk_frag_output_pcr_data),
+			.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+		},
+	};
+
+	VkDescriptorSetLayout out_ds_layouts[] = {
+		renderer->output_ds_srgb_layout,
+		renderer->output_ds_lut3d_layout,
 	};
 
 	VkPipelineLayoutCreateInfo pl_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-		.setLayoutCount = 1,
-		.pSetLayouts = out_ds_layout,
-		.pushConstantRangeCount = 1,
+		.setLayoutCount = sizeof(out_ds_layouts) / sizeof(out_ds_layouts[0]),
+		.pSetLayouts = out_ds_layouts,
+		.pushConstantRangeCount = sizeof(pc_ranges) / sizeof(pc_ranges[0]),
 		.pPushConstantRanges = pc_ranges,
 	};
 
-	res = vkCreatePipelineLayout(dev, &pl_info, NULL, out_pipe_layout);
+	res = vkCreatePipelineLayout(dev, &pl_info, NULL, &renderer->output_pipe_layout);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkCreatePipelineLayout", res);
 		return false;
@@ -2080,14 +1654,16 @@ static bool init_blend_to_output_layouts(struct wlr_vk_renderer *renderer,
 static bool pipeline_layout_key_equals(
 		const struct wlr_vk_pipeline_layout_key *a,
 		const struct wlr_vk_pipeline_layout_key *b) {
-	assert(!a->ycbcr_format || a->ycbcr_format->is_ycbcr);
-	assert(!b->ycbcr_format || b->ycbcr_format->is_ycbcr);
+	assert(!a->ycbcr.format || vulkan_format_is_ycbcr(a->ycbcr.format));
+	assert(!b->ycbcr.format || vulkan_format_is_ycbcr(b->ycbcr.format));
 
 	if (a->filter_mode != b->filter_mode) {
 		return false;
 	}
 
-	if (a->ycbcr_format != b->ycbcr_format) {
+	if (a->ycbcr.format != b->ycbcr.format ||
+			a->ycbcr.encoding != b->ycbcr.encoding ||
+			a->ycbcr.range != b->ycbcr.range) {
 		return false;
 	}
 
@@ -2237,14 +1813,14 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 		.scissorCount = 1,
 	};
 
-	VkDynamicState dynStates[2] = {
+	VkDynamicState dyn_states[] = {
 		VK_DYNAMIC_STATE_VIEWPORT,
 		VK_DYNAMIC_STATE_SCISSOR,
 	};
 	VkPipelineDynamicStateCreateInfo dynamic = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-		.pDynamicStates = dynStates,
-		.dynamicStateCount = 2,
+		.pDynamicStates = dyn_states,
+		.dynamicStateCount = sizeof(dyn_states) / sizeof(dyn_states[0]),
 	};
 
 	VkPipelineVertexInputStateCreateInfo vertex = {
@@ -2256,7 +1832,7 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 		.layout = pipeline_layout->vk,
 		.renderPass = setup->render_pass,
 		.subpass = 0,
-		.stageCount = 2,
+		.stageCount = sizeof(stages) / sizeof(stages[0]),
 		.pStages = stages,
 
 		.pInputAssemblyState = &assembly,
@@ -2281,11 +1857,25 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 }
 
 static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
-		VkRenderPass rp, VkPipelineLayout pipe_layout, VkPipeline *pipe) {
+		VkRenderPass rp, VkPipelineLayout pipe_layout, VkPipeline *pipe,
+		enum wlr_vk_output_transform transform) {
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
 
-	VkPipelineShaderStageCreateInfo tex_stages[2] = {
+	uint32_t output_transform_type = transform;
+	VkSpecializationMapEntry spec_entry = {
+		.constantID = 0,
+		.offset = 0,
+		.size = sizeof(uint32_t),
+	};
+	VkSpecializationInfo specialization = {
+		.mapEntryCount = 1,
+		.pMapEntries = &spec_entry,
+		.dataSize = sizeof(uint32_t),
+		.pData = &output_transform_type,
+	};
+
+	VkPipelineShaderStageCreateInfo tex_stages[] = {
 		{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
 			.stage = VK_SHADER_STAGE_VERTEX_BIT,
@@ -2297,6 +1887,7 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 			.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
 			.module = renderer->output_module,
 			.pName = "main",
+			.pSpecializationInfo = &specialization,
 		},
 	};
 
@@ -2339,14 +1930,14 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		.scissorCount = 1,
 	};
 
-	VkDynamicState dynStates[2] = {
+	VkDynamicState dyn_states[] = {
 		VK_DYNAMIC_STATE_VIEWPORT,
 		VK_DYNAMIC_STATE_SCISSOR,
 	};
 	VkPipelineDynamicStateCreateInfo dynamic = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-		.pDynamicStates = dynStates,
-		.dynamicStateCount = 2,
+		.pDynamicStates = dyn_states,
+		.dynamicStateCount = sizeof(dyn_states) / sizeof(dyn_states[0]),
 	};
 
 	VkPipelineVertexInputStateCreateInfo vertex = {
@@ -2359,7 +1950,7 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		.layout = pipe_layout,
 		.renderPass = rp,
 		.subpass = 1, // second subpass!
-		.stageCount = 2,
+		.stageCount = sizeof(tex_stages) / sizeof(tex_stages[0]),
 		.pStages = tex_stages,
 		.pInputAssemblyState = &assembly,
 		.pRasterizationState = &rasterization,
@@ -2378,6 +1969,33 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 	}
 
 	return true;
+}
+
+static VkSamplerYcbcrModelConversion ycbcr_model_from_wlr(enum wlr_color_encoding encoding) {
+	switch (encoding) {
+	case WLR_COLOR_ENCODING_NONE:
+		abort(); // must be explicit
+	case WLR_COLOR_ENCODING_BT601:
+		return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601;
+	case WLR_COLOR_ENCODING_BT709:
+		return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
+	case WLR_COLOR_ENCODING_BT2020:
+		return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020;
+	default:
+		abort(); // unsupported
+	}
+}
+
+static VkSamplerYcbcrRange ycbcr_range_from_wlr(enum wlr_color_range range) {
+	switch (range) {
+	case WLR_COLOR_RANGE_NONE:
+		abort(); // must be explicit
+	case WLR_COLOR_RANGE_LIMITED:
+		return VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+	case WLR_COLOR_RANGE_FULL:
+		return VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
+	}
+	abort(); // unreachable
 }
 
 struct wlr_vk_pipeline_layout *get_or_create_pipeline_layout(
@@ -2421,12 +2039,12 @@ struct wlr_vk_pipeline_layout *get_or_create_pipeline_layout(
 		.maxLod = 0.25f,
 	};
 
-	if (key->ycbcr_format) {
+	if (key->ycbcr.format) {
 		VkSamplerYcbcrConversionCreateInfo conversion_create_info = {
 			.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
-			.format = key->ycbcr_format->vk,
-			.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601,
-			.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW,
+			.format = key->ycbcr.format->vk,
+			.ycbcrModel = ycbcr_model_from_wlr(key->ycbcr.encoding),
+			.ycbcrRange = ycbcr_range_from_wlr(key->ycbcr.range),
 			.xChromaOffset = VK_CHROMA_LOCATION_MIDPOINT,
 			.yChromaOffset = VK_CHROMA_LOCATION_MIDPOINT,
 			.chromaFilter = VK_FILTER_LINEAR,
@@ -2444,22 +2062,125 @@ struct wlr_vk_pipeline_layout *get_or_create_pipeline_layout(
 			.conversion = pipeline_layout->ycbcr.conversion,
 		};
 		sampler_create_info.pNext = &conversion_info;
+	} else {
+		assert(key->ycbcr.encoding == WLR_COLOR_ENCODING_NONE || key->ycbcr.encoding == WLR_COLOR_ENCODING_IDENTITY);
+		assert(key->ycbcr.range == WLR_COLOR_RANGE_NONE || key->ycbcr.range == WLR_COLOR_RANGE_FULL);
 	}
 
 	res = vkCreateSampler(renderer->dev->dev, &sampler_create_info, NULL, &pipeline_layout->sampler);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkCreateSampler", res);
 		free(pipeline_layout);
-		return false;
+		return NULL;
 	}
 
 	if (!init_tex_layouts(renderer, pipeline_layout->sampler, &pipeline_layout->ds, &pipeline_layout->vk)) {
 		free(pipeline_layout);
-		return false;
+		return NULL;
 	}
 
 	wl_list_insert(&renderer->pipeline_layouts, &pipeline_layout->link);
 	return pipeline_layout;
+}
+
+
+/* The fragment shader for the blend->image subpass can be configured to either
+ * use or not a sampler3d lookup table; however, even if the shader does not use
+ * the sampler, a valid descriptor set should be bound. Create that here, linked to
+ * a 1x1x1 image.
+ */
+static bool init_dummy_images(struct wlr_vk_renderer *renderer) {
+	VkResult res;
+	VkDevice dev = renderer->dev->dev;
+
+	VkFormat format = VK_FORMAT_R32G32B32A32_SFLOAT;
+
+	VkImageCreateInfo img_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.imageType = VK_IMAGE_TYPE_3D,
+		.format = format,
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.extent = (VkExtent3D) { 1, 1, 1 },
+		.tiling = VK_IMAGE_TILING_OPTIMAL,
+		.usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+	};
+	res = vkCreateImage(dev, &img_info, NULL, &renderer->dummy3d_image);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImage failed", res);
+		return false;
+	}
+
+	VkMemoryRequirements mem_reqs = {0};
+	vkGetImageMemoryRequirements(dev, renderer->dummy3d_image, &mem_reqs);
+	int mem_type_index = vulkan_find_mem_type(renderer->dev,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mem_reqs.memoryTypeBits);
+	if (mem_type_index == -1) {
+		wlr_log(WLR_ERROR, "Failed to find suitable memory type");
+		return false;
+	}
+	VkMemoryAllocateInfo mem_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = mem_reqs.size,
+		.memoryTypeIndex = mem_type_index,
+	};
+	res = vkAllocateMemory(dev, &mem_info, NULL, &renderer->dummy3d_mem);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkAllocateMemory failed", res);
+		return false;
+	}
+	res = vkBindImageMemory(dev, renderer->dummy3d_image, renderer->dummy3d_mem, 0);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkBindMemory failed", res);
+		return false;
+	}
+
+	VkImageViewCreateInfo view_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.viewType = VK_IMAGE_VIEW_TYPE_3D,
+		.format = format,
+		.components.r = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.g = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.b = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.components.a = VK_COMPONENT_SWIZZLE_IDENTITY,
+		.subresourceRange = (VkImageSubresourceRange) {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+		},
+		.image = renderer->dummy3d_image,
+	};
+	res = vkCreateImageView(dev, &view_info, NULL, &renderer->dummy3d_image_view);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImageView failed", res);
+		return false;
+	}
+
+	renderer->output_ds_lut3d_dummy_pool = vulkan_alloc_texture_ds(renderer,
+		renderer->output_ds_lut3d_layout, &renderer->output_ds_lut3d_dummy);
+	if (!renderer->output_ds_lut3d_dummy_pool) {
+		wlr_log(WLR_ERROR, "Failed to allocate descriptor");
+		return false;
+	}
+	VkDescriptorImageInfo ds_img_info = {
+		.imageView = renderer->dummy3d_image_view,
+		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	};
+	VkWriteDescriptorSet ds_write = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.dstSet = renderer->output_ds_lut3d_dummy,
+		.pImageInfo = &ds_img_info,
+	};
+	vkUpdateDescriptorSets(dev, 1, &ds_write, 0, NULL);
+
+	return true;
 }
 
 // Creates static render data, such as sampler, layouts and shader modules
@@ -2469,8 +2190,11 @@ static bool init_static_render_data(struct wlr_vk_renderer *renderer) {
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
 
-	if (!init_blend_to_output_layouts(renderer, &renderer->output_ds_layout,
-			&renderer->output_pipe_layout)) {
+	if (!init_blend_to_output_layouts(renderer)) {
+		return false;
+	}
+
+	if (!init_dummy_images(renderer)) {
 		return false;
 	}
 
@@ -2525,10 +2249,12 @@ static bool init_static_render_data(struct wlr_vk_renderer *renderer) {
 
 static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		struct wlr_vk_renderer *renderer, const struct wlr_vk_format *format,
-		bool has_blending_buffer) {
+		bool use_blending_buffer, bool srgb) {
 	struct wlr_vk_render_format_setup *setup;
 	wl_list_for_each(setup, &renderer->render_format_setups, link) {
-		if (setup->render_format == format) {
+		if (setup->render_format == format &&
+				setup->use_blending_buffer == use_blending_buffer &&
+				setup->use_srgb == srgb) {
 			return setup;
 		}
 	}
@@ -2540,14 +2266,16 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 	}
 
 	setup->render_format = format;
+	setup->use_blending_buffer = use_blending_buffer;
+	setup->use_srgb = srgb;
 	setup->renderer = renderer;
 	wl_list_init(&setup->pipelines);
 
 	VkDevice dev = renderer->dev->dev;
 	VkResult res;
 
-	if (has_blending_buffer) {
-		VkAttachmentDescription attachments[2] = {
+	if (use_blending_buffer) {
+		VkAttachmentDescription attachments[] = {
 			{
 				.format = VK_FORMAT_R16G16B16A16_SFLOAT,
 				.samples = VK_SAMPLE_COUNT_1_BIT,
@@ -2585,7 +2313,7 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 			.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 		};
 
-		VkSubpassDescription subpasses[2] = {
+		VkSubpassDescription subpasses[] = {
 			{
 				.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
 				.colorAttachmentCount = 1,
@@ -2600,7 +2328,7 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 			}
 		};
 
-		VkSubpassDependency deps[3] = {
+		VkSubpassDependency deps[] = {
 			{
 				.srcSubpass = VK_SUBPASS_EXTERNAL,
 				.srcStageMask = VK_PIPELINE_STAGE_HOST_BIT |
@@ -2642,11 +2370,11 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
 			.pNext = NULL,
 			.flags = 0,
-			.attachmentCount = 2u,
+			.attachmentCount = sizeof(attachments) / sizeof(attachments[0]),
 			.pAttachments = attachments,
-			.subpassCount = 2u,
+			.subpassCount = sizeof(subpasses) / sizeof(subpasses[0]),
 			.pSubpasses = subpasses,
-			.dependencyCount = 3u,
+			.dependencyCount = sizeof(deps) / sizeof(deps[0]),
 			.pDependencies = deps,
 		};
 
@@ -2659,7 +2387,32 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		// this is only well defined if render pass has a 2nd subpass
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				 &setup->output_pipe)) {
+				&setup->output_pipe_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+			renderer, setup->render_pass, renderer->output_pipe_layout,
+			&setup->output_pipe_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886)) {
 			goto error;
 		}
 	} else {
@@ -2673,6 +2426,10 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 			.initialLayout = VK_IMAGE_LAYOUT_GENERAL,
 			.finalLayout = VK_IMAGE_LAYOUT_GENERAL,
 		};
+		if (srgb) {
+			assert(format->vk_srgb);
+			attachment.format = format->vk_srgb;
+		}
 
 		VkAttachmentReference color_ref = {
 			.attachment = 0u,
@@ -2685,7 +2442,7 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 			.pColorAttachments = &color_ref,
 		};
 
-		VkSubpassDependency deps[2] = {
+		VkSubpassDependency deps[] = {
 			{
 				.srcSubpass = VK_SUBPASS_EXTERNAL,
 				.srcStageMask = VK_PIPELINE_STAGE_HOST_BIT |
@@ -2720,7 +2477,7 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 			.pAttachments = &attachment,
 			.subpassCount = 1,
 			.pSubpasses = &subpass,
-			.dependencyCount = 2u,
+			.dependencyCount = sizeof(deps) / sizeof(deps[0]),
 			.pDependencies = deps,
 		};
 
@@ -2733,7 +2490,7 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 
 	if (!setup_get_or_create_pipeline(setup, &(struct wlr_vk_pipeline_key){
 		.source = WLR_VK_SHADER_SOURCE_SINGLE_COLOR,
-		.layout = { .ycbcr_format = NULL },
+		.layout = {0},
 	})) {
 		goto error;
 	}
@@ -2741,7 +2498,7 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 	if (!setup_get_or_create_pipeline(setup, &(struct wlr_vk_pipeline_key){
 		.source = WLR_VK_SHADER_SOURCE_TEXTURE,
 		.texture_transform = WLR_VK_TEXTURE_TRANSFORM_IDENTITY,
-		.layout = {.ycbcr_format = NULL },
+		.layout = {0},
 	})) {
 		goto error;
 	}
@@ -2749,25 +2506,9 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 	if (!setup_get_or_create_pipeline(setup, &(struct wlr_vk_pipeline_key){
 		.source = WLR_VK_SHADER_SOURCE_TEXTURE,
 		.texture_transform = WLR_VK_TEXTURE_TRANSFORM_SRGB,
-		.layout = {.ycbcr_format = NULL },
+		.layout = {0},
 	})) {
 		goto error;
-	}
-
-	for (size_t i = 0; i < renderer->dev->format_prop_count; i++) {
-		const struct wlr_vk_format *format = &renderer->dev->format_props[i].format;
-		const struct wlr_vk_pipeline_layout_key layout = {
-			.ycbcr_format = format,
-		};
-
-		if (format->is_ycbcr) {
-			if (!setup_get_or_create_pipeline(setup, &(struct wlr_vk_pipeline_key){
-				.texture_transform = WLR_VK_TEXTURE_TRANSFORM_SRGB,
-				.layout = layout
-			})) {
-				goto error;
-			}
-		}
 	}
 
 	wl_list_insert(&renderer->render_format_setups, &setup->link);
@@ -2787,7 +2528,9 @@ struct wlr_renderer *vulkan_renderer_create_for_device(struct wlr_vk_device *dev
 	}
 
 	renderer->dev = dev;
-	wlr_renderer_init(&renderer->wlr_renderer, &renderer_impl);
+	wlr_renderer_init(&renderer->wlr_renderer, &renderer_impl, WLR_BUFFER_CAP_DMABUF);
+	renderer->wlr_renderer.features.input_color_transform = true;
+	renderer->wlr_renderer.features.output_color_transform = true;
 	wl_list_init(&renderer->stage.buffers);
 	wl_list_init(&renderer->foreign_textures);
 	wl_list_init(&renderer->textures);
@@ -2795,7 +2538,18 @@ struct wlr_renderer *vulkan_renderer_create_for_device(struct wlr_vk_device *dev
 	wl_list_init(&renderer->output_descriptor_pools);
 	wl_list_init(&renderer->render_format_setups);
 	wl_list_init(&renderer->render_buffers);
+	wl_list_init(&renderer->color_transforms);
 	wl_list_init(&renderer->pipeline_layouts);
+
+	renderer->wlr_renderer.color_encodings =
+		WLR_COLOR_ENCODING_BT601 |
+		WLR_COLOR_ENCODING_BT709 |
+		WLR_COLOR_ENCODING_BT2020;
+
+	uint64_t cap_syncobj_timeline;
+	if (dev->drm_fd >= 0 && drmGetCap(dev->drm_fd, DRM_CAP_SYNCOBJ_TIMELINE, &cap_syncobj_timeline) == 0) {
+		renderer->wlr_renderer.features.timeline = dev->sync_file_import_export && cap_syncobj_timeline != 0;
+	}
 
 	if (!init_static_render_data(renderer)) {
 		goto error;
@@ -2852,26 +2606,24 @@ struct wlr_renderer *wlr_vk_renderer_create_with_drm_fd(int drm_fd) {
 	if (!phdev) {
 		// We rather fail here than doing some guesswork
 		wlr_log(WLR_ERROR, "Could not match drm and vulkan device");
-		return NULL;
+		goto error;
 	}
 
 	struct wlr_vk_device *dev = vulkan_device_create(ini, phdev);
 	if (!dev) {
 		wlr_log(WLR_ERROR, "Failed to create vulkan device");
-		vulkan_instance_destroy(ini);
-		return NULL;
+		goto error;
 	}
 
 	// Do not use the drm_fd that was passed in: we should prefer the render
 	// node even if a primary node was provided
 	dev->drm_fd = vulkan_open_phdev_drm_fd(phdev);
-	if (dev->drm_fd < 0) {
-		vulkan_device_destroy(dev);
-		vulkan_instance_destroy(ini);
-		return NULL;
-	}
 
 	return vulkan_renderer_create_for_device(dev);
+
+error:
+	vulkan_instance_destroy(ini);
+	return NULL;
 }
 
 VkInstance wlr_vk_renderer_get_instance(struct wlr_renderer *renderer) {
@@ -2892,12 +2644,4 @@ VkDevice wlr_vk_renderer_get_device(struct wlr_renderer *renderer) {
 uint32_t wlr_vk_renderer_get_queue_family(struct wlr_renderer *renderer) {
 	struct wlr_vk_renderer *vk_renderer = vulkan_get_renderer(renderer);
 	return vk_renderer->dev->queue_family;
-}
-
-void wlr_vk_renderer_get_current_image_attribs(struct wlr_renderer *renderer,
-		struct wlr_vk_image_attribs *attribs) {
-	struct wlr_vk_renderer *vk_renderer = vulkan_get_renderer(renderer);
-	attribs->image = vk_renderer->current_render_buffer->image;
-	attribs->format = vk_renderer->current_render_buffer->render_setup->render_format->vk;
-	attribs->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }

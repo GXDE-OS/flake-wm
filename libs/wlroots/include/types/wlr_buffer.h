@@ -51,15 +51,6 @@ struct wlr_dmabuf_buffer *dmabuf_buffer_create(
 bool dmabuf_buffer_drop(struct wlr_dmabuf_buffer *buffer);
 
 /**
- * Check whether a buffer is fully opaque.
- *
- * When true is returned, the buffer is guaranteed to be fully opaque, but the
- * reverse is not true: false may be returned in cases where the buffer is fully
- * opaque.
- */
-bool buffer_is_opaque(struct wlr_buffer *buffer);
-
-/**
  * Creates a struct wlr_client_buffer from a given struct wlr_buffer by creating
  * a texture from it, and copying its struct wl_resource.
  */
@@ -73,5 +64,11 @@ struct wlr_client_buffer *wlr_client_buffer_create(struct wlr_buffer *buffer,
  */
 bool wlr_client_buffer_apply_damage(struct wlr_client_buffer *client_buffer,
 	struct wlr_buffer *next, const pixman_region32_t *damage);
+
+/**
+ * Return the DRM format of the buffer. If this buffer isn't shared
+ * memory or a DMA-BUF, returns DRM_FORMAT_INVALID.
+ */
+uint32_t buffer_get_drm_format(struct wlr_buffer *buffer);
 
 #endif

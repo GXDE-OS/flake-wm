@@ -1,3 +1,4 @@
+check = find_program('./check.sh', native: true)
 embed = find_program('./embed.sh', native: true)
 
 shaders = [
@@ -9,6 +10,15 @@ shaders = [
 ]
 
 foreach name : shaders
+	custom_target(
+		'gles2-' + name,
+		input: name,
+		output: name + '_check',
+		command: [check, glslang, '@INPUT@'],
+		capture: true,
+		build_by_default: true,
+	)
+
 	output = name.underscorify() + '_src.h'
 	var = name.underscorify() + '_src'
 	wlr_files += custom_target(

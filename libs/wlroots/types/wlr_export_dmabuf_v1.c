@@ -85,11 +85,11 @@ static void frame_output_handle_commit(struct wl_listener *listener,
 			attribs.fd[i], size, attribs.offset[i], attribs.stride[i], i);
 	}
 
-	time_t tv_sec = event->when->tv_sec;
+	time_t tv_sec = event->when.tv_sec;
 	uint32_t tv_sec_hi = (sizeof(tv_sec) > 4) ? tv_sec >> 32 : 0;
 	uint32_t tv_sec_lo = tv_sec & 0xFFFFFFFF;
 	zwlr_export_dmabuf_frame_v1_send_ready(frame->resource,
-		tv_sec_hi, tv_sec_lo, event->when->tv_nsec);
+		tv_sec_hi, tv_sec_lo, event->when.tv_nsec);
 	frame_destroy(frame);
 }
 
@@ -192,6 +192,9 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_export_dmabuf_manager_v1 *manager =
 		wl_container_of(listener, manager, display_destroy);
 	wl_signal_emit_mutable(&manager->events.destroy, manager);
+
+	assert(wl_list_empty(&manager->events.destroy.listener_list));
+
 	wl_list_remove(&manager->display_destroy.link);
 	wl_global_destroy(manager->global);
 	free(manager);
@@ -204,6 +207,7 @@ struct wlr_export_dmabuf_manager_v1 *wlr_export_dmabuf_manager_v1_create(
 		return NULL;
 	}
 	wl_list_init(&manager->frames);
+
 	wl_signal_init(&manager->events.destroy);
 
 	manager->global = wl_global_create(display,

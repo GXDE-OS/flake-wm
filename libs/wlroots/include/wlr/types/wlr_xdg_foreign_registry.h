@@ -23,17 +23,20 @@
 struct wlr_xdg_foreign_registry {
 	struct wl_list exported_surfaces; // struct wlr_xdg_foreign_exported_surface
 
-	struct wl_listener display_destroy;
 	struct {
 		struct wl_signal destroy;
 	} events;
+
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_xdg_foreign_exported {
 	struct wl_list link; // wlr_xdg_foreign_registry.exported_surfaces
 	struct wlr_xdg_foreign_registry *registry;
 
-	struct wlr_surface *surface;
+	struct wlr_xdg_toplevel *toplevel;
 
 	char handle[WLR_XDG_FOREIGN_HANDLE_SIZE];
 

@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
 #include <stdlib.h>
@@ -17,11 +16,12 @@
 #include <wlr/interfaces/wlr_pointer.h>
 #include <wlr/interfaces/wlr_touch.h>
 #include <wlr/render/wlr_renderer.h>
-#include <wlr/types/wlr_matrix.h>
 #include <wlr/util/log.h>
 
 #include "backend/x11.h"
+#include "render/pixel_format.h"
 #include "util/time.h"
+#include "types/wlr_buffer.h"
 #include "types/wlr_output.h"
 
 static const uint32_t SUPPORTED_OUTPUT_STATE =
@@ -96,6 +96,8 @@ static void output_destroy(struct wlr_output *wlr_output) {
 	struct wlr_x11_output *output = get_x11_output_from_output(wlr_output);
 	struct wlr_x11_backend *x11 = output->x11;
 
+	wlr_output_finish(wlr_output);
+
 	pixman_region32_fini(&output->exposed);
 
 	wlr_pointer_finish(&output->pointer);
@@ -131,6 +133,27 @@ static bool output_test(struct wlr_output *wlr_output,
 		return false;
 	}
 
+	if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
+		// If the size doesn't match, reject buffer (scaling is not supported)
+		int pending_width, pending_height;
+		output_pending_resolution(wlr_output, state,
+			&pending_width, &pending_height);
+		if (state->buffer->width != pending_width ||
+				state->buffer->height != pending_height) {
+			wlr_log(WLR_DEBUG, "Primary buffer size mismatch");
+			return false;
+		}
+		// Source crop is not supported
+		struct wlr_fbox src_box;
+		output_state_get_buffer_src_box(state, &src_box);
+		if (src_box.x != 0.0 || src_box.y != 0.0 ||
+				src_box.width != (double)state->buffer->width ||
+				src_box.height != (double)state->buffer->height) {
+			wlr_log(WLR_DEBUG, "Source crop not supported in X11 output");
+			return false;
+		}
+	}
+
 	// All we can do to influence adaptive sync on the X11 backend is set the
 	// _VARIABLE_REFRESH window property like mesa automatically does. We don't
 	// have any control beyond that, so we set the state to enabled on creating
@@ -145,17 +168,19 @@ static bool output_test(struct wlr_output *wlr_output,
 
 	if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
 		struct wlr_buffer *buffer = state->buffer;
-		struct wlr_dmabuf_attributes dmabuf_attrs;
-		struct wlr_shm_attributes shm_attrs;
-		uint32_t format = DRM_FORMAT_INVALID;
-		if (wlr_buffer_get_dmabuf(buffer, &dmabuf_attrs)) {
-			format = dmabuf_attrs.format;
-		} else if (wlr_buffer_get_shm(buffer, &shm_attrs)) {
-			format = shm_attrs.format;
-		}
+		uint32_t format = buffer_get_drm_format(buffer);
 		if (format != x11->x11_format->drm) {
 			wlr_log(WLR_DEBUG, "Unsupported buffer format");
 			return false;
+		}
+		struct wlr_shm_attributes shm;
+		if (wlr_buffer_get_shm(buffer, &shm)) {
+			const struct wlr_pixel_format_info *info = drm_get_pixel_format_info(format);
+			if (shm.stride != pixel_format_info_min_stride(info, shm.width)) {
+				// xcb_shm_create_pixmap() does not allow arbitrary strides.
+				wlr_log(WLR_DEBUG, "Unsupported shm buffer stride");
+				return false;
+			}
 		}
 	}
 
@@ -243,6 +268,12 @@ static xcb_pixmap_t import_shm(struct wlr_x11_output *output,
 	if (shm->format != x11->x11_format->drm) {
 		// The pixmap's depth must match the window's depth, otherwise Present
 		// will throw a Match error
+		return XCB_PIXMAP_NONE;
+	}
+
+	const struct wlr_pixel_format_info *info = drm_get_pixel_format_info(shm->format);
+	if (shm->stride != pixel_format_info_min_stride(info, shm->width)) {
+		// xcb_shm_create_pixmap() does not allow arbitrary strides.
 		return XCB_PIXMAP_NONE;
 	}
 
@@ -449,25 +480,26 @@ static bool output_cursor_to_picture(struct wlr_x11_output *output,
 		return true;
 	}
 
+	struct wlr_texture *texture = wlr_texture_from_buffer(renderer, buffer);
+	if (!texture) {
+		return false;
+	}
+
 	int depth = 32;
-	int stride = buffer->width * 4;
-
-	uint8_t *data = malloc(buffer->height * stride);
+	int stride = texture->width * 4;
+	uint8_t *data = malloc(texture->height * stride);
 	if (data == NULL) {
+		wlr_texture_destroy(texture);
 		return false;
 	}
 
-	if (!wlr_renderer_begin_with_buffer(renderer, buffer)) {
-		free(data);
-		return false;
-	}
+	bool result = wlr_texture_read_pixels(texture, &(struct wlr_texture_read_pixels_options) {
+		.format = DRM_FORMAT_ARGB8888,
+		.stride = stride,
+		.data = data,
+	});
 
-	bool result = wlr_renderer_read_pixels(
-		renderer, DRM_FORMAT_ARGB8888,
-		stride, buffer->width, buffer->height, 0, 0, 0, 0,
-		data);
-
-	wlr_renderer_end(renderer);
+	wlr_texture_destroy(texture);
 
 	if (!result) {
 		free(data);
@@ -575,7 +607,7 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	wlr_output_state_init(&state);
 	wlr_output_state_set_custom_mode(&state, 1024, 768, 0);
 
-	wlr_output_init(wlr_output, &x11->backend, &output_impl, x11->wl_display, &state);
+	wlr_output_init(wlr_output, &x11->backend, &output_impl, x11->event_loop, &state);
 	wlr_output_state_finish(&state);
 
 	size_t output_num = ++last_output_num;
@@ -748,9 +780,6 @@ void handle_x11_present_event(struct wlr_x11_backend *x11,
 
 		output->last_msc = complete_notify->msc;
 
-		struct timespec t;
-		timespec_from_nsec(&t, complete_notify->ust * 1000);
-
 		uint32_t flags = 0;
 		if (complete_notify->mode == XCB_PRESENT_COMPLETE_MODE_FLIP) {
 			flags |= WLR_OUTPUT_PRESENT_ZERO_COPY;
@@ -761,10 +790,10 @@ void handle_x11_present_event(struct wlr_x11_backend *x11,
 			.output = &output->wlr_output,
 			.commit_seq = complete_notify->serial,
 			.presented = presented,
-			.when = &t,
 			.seq = complete_notify->msc,
 			.flags = flags,
 		};
+		timespec_from_nsec(&present_event.when, complete_notify->ust * 1000);
 		wlr_output_send_present(&output->wlr_output, &present_event);
 
 		wlr_output_send_frame(&output->wlr_output);

@@ -42,6 +42,8 @@ struct wlr_scene_output_layout;
 
 struct wlr_presentation;
 struct wlr_linux_dmabuf_v1;
+struct wlr_gamma_control_manager_v1;
+struct wlr_color_manager_v1;
 struct wlr_output_state;
 
 typedef bool (*wlr_scene_buffer_point_accepts_input_func_t)(
@@ -74,9 +76,9 @@ struct wlr_scene_node {
 
 	struct wlr_addon_set addons;
 
-	// private state
-
-	pixman_region32_t visible;
+	struct {
+		pixman_region32_t visible;
+	} WLR_PRIVATE;
 };
 
 enum wlr_scene_debug_damage_option {
@@ -99,17 +101,23 @@ struct wlr_scene {
 	struct wl_list outputs; // wlr_scene_output.link
 
 	// May be NULL
-	struct wlr_presentation *presentation;
 	struct wlr_linux_dmabuf_v1 *linux_dmabuf_v1;
+	struct wlr_gamma_control_manager_v1 *gamma_control_manager_v1;
+	struct wlr_color_manager_v1 *color_manager_v1;
 
-	// private state
+	bool restack_xwayland_surfaces;
 
-	struct wl_listener presentation_destroy;
-	struct wl_listener linux_dmabuf_v1_destroy;
+	struct {
+		struct wl_listener linux_dmabuf_v1_destroy;
+		struct wl_listener gamma_control_manager_v1_destroy;
+		struct wl_listener gamma_control_manager_v1_set_gamma;
+		struct wl_listener color_manager_v1_destroy;
 
-	enum wlr_scene_debug_damage_option debug_damage_option;
-	bool direct_scanout;
-	bool calculate_visibility;
+		enum wlr_scene_debug_damage_option debug_damage_option;
+		bool direct_scanout;
+		bool calculate_visibility;
+		bool highlight_transparent_region;
+	} WLR_PRIVATE;
 };
 
 /** A scene-graph node displaying a single surface. */
@@ -117,19 +125,17 @@ struct wlr_scene_surface {
 	struct wlr_scene_buffer *buffer;
 	struct wlr_surface *surface;
 
-	// private state
+	struct {
+		struct wlr_box clip;
 
-	struct wlr_box clip;
+		struct wlr_addon addon;
 
-	struct wlr_addon addon;
-
-	struct wl_listener outputs_update;
-	struct wl_listener output_enter;
-	struct wl_listener output_leave;
-	struct wl_listener output_sample;
-	struct wl_listener frame_done;
-	struct wl_listener surface_destroy;
-	struct wl_listener surface_commit;
+		struct wl_listener outputs_update;
+		struct wl_listener output_sample;
+		struct wl_listener frame_done;
+		struct wl_listener surface_destroy;
+		struct wl_listener surface_commit;
+	} WLR_PRIVATE;
 };
 
 /** A scene-graph node displaying a solid-colored rectangle */
@@ -147,6 +153,13 @@ struct wlr_scene_outputs_update_event {
 struct wlr_scene_output_sample_event {
 	struct wlr_scene_output *output;
 	bool direct_scanout;
+	struct wlr_drm_syncobj_timeline *release_timeline;
+	uint64_t release_point;
+};
+
+struct wlr_scene_frame_done_event {
+	struct wlr_scene_output *output;
+	struct timespec when;
 };
 
 /** A scene-graph node displaying a buffer */
@@ -161,7 +174,7 @@ struct wlr_scene_buffer {
 		struct wl_signal output_enter; // struct wlr_scene_output
 		struct wl_signal output_leave; // struct wlr_scene_output
 		struct wl_signal output_sample; // struct wlr_scene_output_sample_event
-		struct wl_signal frame_done; // struct timespec
+		struct wl_signal frame_done; // struct wlr_scene_frame_done_event
 	} events;
 
 	// May be NULL
@@ -170,8 +183,7 @@ struct wlr_scene_buffer {
 	/**
 	 * The output that the largest area of this buffer is displayed on.
 	 * This may be NULL if the buffer is not currently displayed on any
-	 * outputs. This is the output that should be used for frame callbacks,
-	 * presentation feedback, etc.
+	 * outputs.
 	 */
 	struct wlr_scene_output *primary_output;
 
@@ -181,12 +193,32 @@ struct wlr_scene_buffer {
 	int dst_width, dst_height;
 	enum wl_output_transform transform;
 	pixman_region32_t opaque_region;
+	enum wlr_color_transfer_function transfer_function;
+	enum wlr_color_named_primaries primaries;
+	enum wlr_color_encoding color_encoding;
+	enum wlr_color_range color_range;
 
-	// private state
+	struct {
+		uint64_t active_outputs;
+		struct wlr_texture *texture;
+		struct wlr_linux_dmabuf_feedback_v1_init_options prev_feedback_options;
 
-	uint64_t active_outputs;
-	struct wlr_texture *texture;
-	struct wlr_linux_dmabuf_feedback_v1_init_options prev_feedback_options;
+		bool own_buffer;
+		int buffer_width, buffer_height;
+		bool buffer_is_opaque;
+
+		struct wlr_drm_syncobj_timeline *wait_timeline;
+		uint64_t wait_point;
+
+		struct wl_listener buffer_release;
+		struct wl_listener renderer_destroy;
+
+		// True if the underlying buffer is a wlr_single_pixel_buffer_v1
+		bool is_single_pixel_buffer;
+		// If is_single_pixel_buffer is set, contains the color of the buffer
+		// as {R, G, B, A} where the max value of each component is UINT32_MAX
+		uint32_t single_pixel_buffer_color[4];
+	} WLR_PRIVATE;
 };
 
 /** A viewport for an output in the scene-graph */
@@ -204,18 +236,41 @@ struct wlr_scene_output {
 		struct wl_signal destroy;
 	} events;
 
-	// private state
+	struct {
+		pixman_region32_t pending_commit_damage;
 
-	uint8_t index;
-	bool prev_scanout;
+		uint8_t index;
 
-	struct wl_listener output_commit;
-	struct wl_listener output_damage;
-	struct wl_listener output_needs_frame;
+		/**
+		 * When scanout is applicable, we increment this every time a frame is rendered until
+		 * DMABUF_FEEDBACK_DEBOUNCE_FRAMES is hit to debounce the scanout dmabuf feedback. Likewise,
+		 * when scanout is no longer applicable, we decrement this until zero is hit to debounce
+		 * composition dmabuf feedback.
+		 */
+		uint8_t dmabuf_feedback_debounce;
+		bool prev_scanout;
 
-	struct wl_list damage_highlight_regions;
+		bool gamma_lut_changed;
+		struct wlr_gamma_control_v1 *gamma_lut;
+		struct wlr_color_transform *gamma_lut_color_transform;
 
-	struct wl_array render_list;
+		struct wlr_color_transform *prev_gamma_lut_color_transform;
+		struct wlr_color_transform *prev_supplied_color_transform;
+		struct wlr_color_transform *combined_color_transform;
+
+		struct wl_listener output_commit;
+		struct wl_listener output_damage;
+		struct wl_listener output_needs_frame;
+
+		struct wl_list damage_highlight_regions;
+
+		struct wl_array render_list;
+
+		struct wlr_drm_syncobj_timeline *in_timeline;
+		uint64_t in_point;
+		struct wlr_drm_syncobj_timeline *out_timeline;
+		uint64_t out_point;
+	} WLR_PRIVATE;
 };
 
 struct wlr_scene_timer {
@@ -228,12 +283,12 @@ struct wlr_scene_layer_surface_v1 {
 	struct wlr_scene_tree *tree;
 	struct wlr_layer_surface_v1 *layer_surface;
 
-	// private state
-
-	struct wl_listener tree_destroy;
-	struct wl_listener layer_surface_destroy;
-	struct wl_listener layer_surface_map;
-	struct wl_listener layer_surface_unmap;
+	struct {
+		struct wl_listener tree_destroy;
+		struct wl_listener layer_surface_destroy;
+		struct wl_listener layer_surface_map;
+		struct wl_listener layer_surface_unmap;
+	} WLR_PRIVATE;
 };
 
 /**
@@ -298,17 +353,11 @@ struct wlr_scene_node *wlr_scene_node_at(struct wlr_scene_node *node,
 
 /**
  * Create a new scene-graph.
+ *
+ * The graph is also a struct wlr_scene_node. Associated resources can be
+ * destroyed through wlr_scene_node_destroy().
  */
 struct wlr_scene *wlr_scene_create(void);
-
-/**
- * Handle presentation feedback for all surfaces in the scene, assuming that
- * scene outputs and the scene rendering functions are used.
- *
- * Asserts that a struct wlr_presentation hasn't already been set for the scene.
- */
-void wlr_scene_set_presentation(struct wlr_scene *scene,
-	struct wlr_presentation *presentation);
 
 /**
  * Handles linux_dmabuf_v1 feedback for all surfaces in the scene.
@@ -318,6 +367,21 @@ void wlr_scene_set_presentation(struct wlr_scene *scene,
 void wlr_scene_set_linux_dmabuf_v1(struct wlr_scene *scene,
 	struct wlr_linux_dmabuf_v1 *linux_dmabuf_v1);
 
+/**
+ * Handles gamma_control_v1 for all outputs in the scene.
+ *
+ * Asserts that a struct wlr_gamma_control_manager_v1 hasn't already been set
+ * for the scene.
+ */
+void wlr_scene_set_gamma_control_manager_v1(struct wlr_scene *scene,
+	struct wlr_gamma_control_manager_v1 *gamma_control);
+
+/**
+ * Handles color_management_v1 feedback for all surfaces in the scene.
+ *
+ * Asserts that a struct wlr_color_manager_v1 hasn't already been set for the scene.
+ */
+void wlr_scene_set_color_manager_v1(struct wlr_scene *scene, struct wlr_color_manager_v1 *manager);
 
 /**
  * Add a node displaying nothing but its children.
@@ -327,11 +391,29 @@ struct wlr_scene_tree *wlr_scene_tree_create(struct wlr_scene_tree *parent);
 /**
  * Add a node displaying a single surface to the scene-graph.
  *
- * The child sub-surfaces are ignored.
+ * The child sub-surfaces are ignored. See wlr_scene_subsurface_tree_create()
  *
- * wlr_surface_send_enter() and wlr_surface_send_leave() will be called
- * automatically based on the position of the surface and outputs in
- * the scene.
+ * Note that this helper does multiple things on behalf of the compositor. Some
+ * of these include protocol implementations where compositors just need to enable
+ * the protocols:
+ *  - wp_viewporter
+ *  - wp_presentation_time
+ *  - wp_fractional_scale_v1
+ *  - wp_alpha_modifier_v1
+ *  - wp_linux_drm_syncobj_v1
+ *  - zwp_linux_dmabuf_v1 presentation feedback with wlr_scene_set_linux_dmabuf_v1()
+ *
+ * This helper will also transparently:
+ *  - Send preferred buffer scale¹
+ *  - Send preferred buffer transform¹
+ *  - Restack xwayland surfaces. See wlr_xwayland_surface_restack()²
+ *  - Send output enter/leave events.
+ *
+ * ¹ Note that scale and transform sent to the surface will be based on the output
+ * which has the largest visible surface area. Intelligent visibility calculations
+ * influence this.
+ * ² xwayland stacking order is undefined when the xwayland surfaces do not
+ * intersect.
  */
 struct wlr_scene_surface *wlr_scene_surface_create(struct wlr_scene_tree *parent,
 	struct wlr_surface *surface);
@@ -362,7 +444,15 @@ struct wlr_scene_surface *wlr_scene_surface_try_from_buffer(
 	struct wlr_scene_buffer *scene_buffer);
 
 /**
+ * Call wlr_surface_send_frame_done() if the surface is visible.
+ */
+void wlr_scene_surface_send_frame_done(struct wlr_scene_surface *scene_surface,
+	const struct timespec *when);
+
+/**
  * Add a node displaying a solid-colored rectangle to the scene-graph.
+ *
+ * The color argument must be a premultiplied color value.
  */
 struct wlr_scene_rect *wlr_scene_rect_create(struct wlr_scene_tree *parent,
 		int width, int height, const float color[static 4]);
@@ -374,6 +464,8 @@ void wlr_scene_rect_set_size(struct wlr_scene_rect *rect, int width, int height)
 
 /**
  * Change the color of an existing rectangle node.
+ *
+ * The color argument must be a premultiplied color value.
  */
 void wlr_scene_rect_set_color(struct wlr_scene_rect *rect, const float color[static 4]);
 
@@ -401,6 +493,28 @@ void wlr_scene_buffer_set_buffer(struct wlr_scene_buffer *scene_buffer,
  */
 void wlr_scene_buffer_set_buffer_with_damage(struct wlr_scene_buffer *scene_buffer,
 	struct wlr_buffer *buffer, const pixman_region32_t *region);
+
+/**
+ * Options for wlr_scene_buffer_set_buffer_with_options().
+ */
+struct wlr_scene_buffer_set_buffer_options {
+	// The damage region is in buffer-local coordinates. If the region is NULL,
+	// the whole buffer node will be damaged.
+	const pixman_region32_t *damage;
+
+	// Wait for a timeline synchronization point before reading from the buffer.
+	struct wlr_drm_syncobj_timeline *wait_timeline;
+	uint64_t wait_point;
+};
+
+/**
+ * Sets the buffer's backing buffer.
+ *
+ * If the buffer is NULL, the buffer node will not be displayed. If options is
+ * NULL, empty options are used.
+ */
+void wlr_scene_buffer_set_buffer_with_options(struct wlr_scene_buffer *scene_buffer,
+	struct wlr_buffer *buffer, const struct wlr_scene_buffer_set_buffer_options *options);
 
 /**
  * Sets the buffer's opaque region. This is an optimization hint used to
@@ -446,11 +560,23 @@ void wlr_scene_buffer_set_opacity(struct wlr_scene_buffer *scene_buffer,
 void wlr_scene_buffer_set_filter_mode(struct wlr_scene_buffer *scene_buffer,
 	enum wlr_scale_filter_mode filter_mode);
 
+void wlr_scene_buffer_set_transfer_function(struct wlr_scene_buffer *scene_buffer,
+	enum wlr_color_transfer_function transfer_function);
+
+void wlr_scene_buffer_set_primaries(struct wlr_scene_buffer *scene_buffer,
+	enum wlr_color_named_primaries primaries);
+
+void wlr_scene_buffer_set_color_encoding(struct wlr_scene_buffer *scene_buffer,
+	enum wlr_color_encoding encoding);
+
+void wlr_scene_buffer_set_color_range(struct wlr_scene_buffer *scene_buffer,
+	enum wlr_color_range range);
+
 /**
  * Calls the buffer's frame_done signal.
  */
 void wlr_scene_buffer_send_frame_done(struct wlr_scene_buffer *scene_buffer,
-	struct timespec *now);
+	struct wlr_scene_frame_done_event *event);
 
 /**
  * Add a viewport for the specified output to the scene-graph.
@@ -471,7 +597,26 @@ void wlr_scene_output_set_position(struct wlr_scene_output *scene_output,
 
 struct wlr_scene_output_state_options {
 	struct wlr_scene_timer *timer;
+
+	/**
+	 * Color transform to apply before the output's color transform. Cannot be
+	 * used when the output has a non-NULL image description set.
+	 */
+	struct wlr_color_transform *color_transform;
+
+	/**
+	 * Allows use of a custom swapchain. This can be useful when trying out an
+	 * output configuration. The swapchain dimensions must match the respective
+	 * wlr_output_state or output size if not specified.
+	 */
+	struct wlr_swapchain *swapchain;
 };
+
+/**
+ * Returns true if scene wants to render a new frame. False, if no new frame
+ * is needed and an output commit can be skipped for the current frame.
+ */
+bool wlr_scene_output_needs_frame(struct wlr_scene_output *scene_output);
 
 /**
  * Render and commit an output.
@@ -551,7 +696,7 @@ struct wlr_scene_tree *wlr_scene_subsurface_tree_create(
  * A NULL or empty clip will disable clipping
  */
 void wlr_scene_subsurface_tree_set_clip(struct wlr_scene_node *node,
-	struct wlr_box *clip);
+	const struct wlr_box *clip);
 
 /**
  * Add a node displaying an xdg_surface and all of its sub-surfaces to the

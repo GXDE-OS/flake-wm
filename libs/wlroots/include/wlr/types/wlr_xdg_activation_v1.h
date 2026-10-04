@@ -28,17 +28,18 @@ struct wlr_xdg_activation_token_v1 {
 		struct wl_signal destroy;
 	} events;
 
-	// private state
+	struct {
+		char *token;
+		struct wl_resource *resource; // can be NULL
+		struct wl_event_source *timeout; // can be NULL
 
-	char *token;
-	struct wl_resource *resource; // can be NULL
-	struct wl_event_source *timeout; // can be NULL
-
-	struct wl_listener seat_destroy;
-	struct wl_listener surface_destroy;
+		struct wl_listener seat_destroy;
+		struct wl_listener surface_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_xdg_activation_v1 {
+	struct wl_global *global;
 	uint32_t token_timeout_msec; // token timeout in milliseconds (0 to disable)
 
 	struct wl_list tokens; // wlr_xdg_activation_token_v1.link
@@ -49,13 +50,11 @@ struct wlr_xdg_activation_v1 {
 		struct wl_signal new_token; // struct wlr_xdg_activation_token_v1
 	} events;
 
-	// private state
+	struct {
+		struct wl_display *display;
 
-	struct wl_display *display;
-
-	struct wl_global *global;
-
-	struct wl_listener display_destroy;
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_xdg_activation_v1_request_activate_event {

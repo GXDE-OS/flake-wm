@@ -1,4 +1,5 @@
-#define _XOPEN_SOURCE 600
+#undef _POSIX_C_SOURCE
+#define _XOPEN_SOURCE 600 // for M_PI
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +11,6 @@
 #include <wlr/backend/session.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
-#include <wlr/types/wlr_matrix.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
@@ -89,7 +89,7 @@ static void output_frame_notify(struct wl_listener *listener, void *data) {
 
 	struct wlr_output_state output_state;
 	wlr_output_state_init(&output_state);
-	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &output_state, NULL, NULL);
+	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &output_state, NULL);
 
 	wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
 		.box = { .width = wlr_output->width, .height = wlr_output->height },
@@ -351,7 +351,7 @@ static void new_input_notify(struct wl_listener *listener, void *data) {
 		wl_signal_add(&pstate->wlr_tablet_pad->events.ring, &pstate->ring);
 		wl_list_insert(&sample->tablet_pads, &pstate->link);
 		break;
-	case WLR_INPUT_DEVICE_TABLET_TOOL:;
+	case WLR_INPUT_DEVICE_TABLET:;
 		struct wlr_tablet *tablet = wlr_tablet_from_input_device(device);
 		sample->width_mm = tablet->width_mm == 0 ?
 			20 : tablet->width_mm;
@@ -386,7 +386,7 @@ int main(int argc, char *argv[]) {
 	};
 	wl_list_init(&state.tablet_pads);
 	wl_list_init(&state.tablet_tools);
-	struct wlr_backend *wlr = wlr_backend_autocreate(display, NULL);
+	struct wlr_backend *wlr = wlr_backend_autocreate(wl_display_get_event_loop(display), NULL);
 	if (!wlr) {
 		exit(1);
 	}

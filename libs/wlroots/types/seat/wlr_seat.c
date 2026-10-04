@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +11,7 @@
 #include "types/wlr_seat.h"
 #include "util/global.h"
 
-#define SEAT_VERSION 8
+#define SEAT_VERSION 9
 
 static void seat_handle_get_pointer(struct wl_client *client,
 		struct wl_resource *seat_resource, uint32_t id) {
@@ -71,6 +70,8 @@ static void seat_handle_get_touch(struct wl_client *client,
 
 static void seat_client_destroy(struct wlr_seat_client *client) {
 	wl_signal_emit_mutable(&client->events.destroy, client);
+
+	assert(wl_list_empty(&client->events.destroy.listener_list));
 
 	if (client == client->seat->pointer_state.focused_client) {
 		client->seat->pointer_state.focused_client = NULL;
@@ -152,6 +153,7 @@ static struct wlr_seat_client *seat_client_create(struct wlr_seat *wlr_seat,
 	wl_list_init(&seat_client->keyboards);
 	wl_list_init(&seat_client->touches);
 	wl_list_init(&seat_client->data_devices);
+
 	wl_signal_init(&seat_client->events.destroy);
 
 	wl_list_insert(&wlr_seat->clients, &seat_client->link);
@@ -227,6 +229,31 @@ void wlr_seat_destroy(struct wlr_seat *seat) {
 	}
 
 	wl_signal_emit_mutable(&seat->events.destroy, seat);
+
+	assert(wl_list_empty(&seat->pointer_state.events.focus_change.listener_list));
+
+	assert(wl_list_empty(&seat->keyboard_state.events.focus_change.listener_list));
+
+	assert(wl_list_empty(&seat->events.request_start_drag.listener_list));
+	assert(wl_list_empty(&seat->events.start_drag.listener_list));
+
+	assert(wl_list_empty(&seat->events.request_set_cursor.listener_list));
+
+	assert(wl_list_empty(&seat->events.request_set_selection.listener_list));
+	assert(wl_list_empty(&seat->events.set_selection.listener_list));
+	assert(wl_list_empty(&seat->events.request_set_primary_selection.listener_list));
+	assert(wl_list_empty(&seat->events.set_primary_selection.listener_list));
+
+	assert(wl_list_empty(&seat->events.pointer_grab_begin.listener_list));
+	assert(wl_list_empty(&seat->events.pointer_grab_end.listener_list));
+
+	assert(wl_list_empty(&seat->events.keyboard_grab_begin.listener_list));
+	assert(wl_list_empty(&seat->events.keyboard_grab_end.listener_list));
+
+	assert(wl_list_empty(&seat->events.touch_grab_begin.listener_list));
+	assert(wl_list_empty(&seat->events.touch_grab_end.listener_list));
+
+	assert(wl_list_empty(&seat->events.destroy.listener_list));
 
 	wl_list_remove(&seat->display_destroy.link);
 
@@ -444,9 +471,13 @@ struct wlr_seat_client *wlr_seat_client_from_resource(
 }
 
 uint32_t wlr_seat_client_next_serial(struct wlr_seat_client *client) {
-	uint32_t serial = wl_display_next_serial(wl_client_get_display(client->client));
-	struct wlr_serial_ringset *set = &client->serials;
+	struct wl_display *display = wl_client_get_display(client->client);
+	uint32_t serial = wl_display_next_serial(display);
+	if (serial == 0) {
+		serial = wl_display_next_serial(display);
+	}
 
+	struct wlr_serial_ringset *set = &client->serials;
 	if (set->count == 0) {
 		set->data[0].min_incl = serial;
 		set->data[0].max_incl = serial;

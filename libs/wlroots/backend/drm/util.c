@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <drm_fourcc.h>
 #include <drm_mode.h>
@@ -84,6 +83,28 @@ void parse_edid(struct wlr_drm_connector *conn, size_t len, const uint8_t *data)
 	output->model = di_info_get_model(info);
 	output->serial = di_info_get_serial(info);
 
+	const struct di_color_primaries *color_characteristics = di_info_get_default_color_primaries(info);
+	if (color_characteristics->has_primaries) {
+		output->default_primaries_value = (struct wlr_color_primaries) {
+			.red = { .x = color_characteristics->primary[0].x, .y = color_characteristics->primary[0].y },
+			.green = { .x = color_characteristics->primary[1].x, .y = color_characteristics->primary[1].y },
+			.blue = { .x = color_characteristics->primary[2].x, .y = color_characteristics->primary[2].y },
+			.white = { .x = color_characteristics->default_white.x, .y = color_characteristics->default_white.y },
+		};
+		output->default_primaries = &output->default_primaries_value;
+	}
+
+	const struct di_supported_signal_colorimetry *colorimetry = di_info_get_supported_signal_colorimetry(info);
+	bool has_bt2020 = colorimetry->bt2020_cycc || colorimetry->bt2020_ycc || colorimetry->bt2020_rgb;
+	if (conn->props.colorspace != 0 && has_bt2020) {
+		output->supported_primaries |= WLR_COLOR_NAMED_PRIMARIES_BT2020;
+	}
+
+	const struct di_hdr_static_metadata *hdr_static_metadata = di_info_get_hdr_static_metadata(info);
+	if (conn->props.hdr_output_metadata != 0 && hdr_static_metadata->type1 && hdr_static_metadata->pq) {
+		output->supported_transfer_functions |= WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+	}
+
 	di_info_destroy(info);
 }
 
@@ -113,9 +134,9 @@ static bool is_taken(size_t n, const uint32_t arr[static n], uint32_t key) {
  * passing 12 arguments to a function.
  */
 struct match_state {
-	const size_t num_objs;
-	const uint32_t *restrict objs;
-	const size_t num_res;
+	const size_t num_conns;
+	const uint32_t *restrict conns;
+	const size_t num_crtcs;
 	size_t score;
 	size_t replaced;
 	uint32_t *restrict res;
@@ -124,27 +145,31 @@ struct match_state {
 	bool exit_early;
 };
 
-/*
- * skips: The number of SKIP elements encountered so far.
- * score: The number of resources we've matched so far.
+/**
+ * Step to process a CRTC.
+ *
+ * This is a naive implementation of maximum bipartite matching.
+ *
+ * score: The number of connectors we've matched so far.
  * replaced: The number of changes from the original solution.
- * i: The index of the current element.
+ * crtc_index: The index of the current CRTC.
  *
  * This tries to match a solution as close to st->orig as it can.
  *
  * Returns whether we've set a new best element with this solution.
  */
-static bool match_obj_(struct match_state *st, size_t skips, size_t score, size_t replaced, size_t i) {
+static bool match_connectors_with_crtcs_(struct match_state *st,
+		size_t score, size_t replaced, size_t crtc_index) {
 	// Finished
-	if (i >= st->num_res) {
+	if (crtc_index >= st->num_crtcs) {
 		if (score > st->score ||
 				(score == st->score && replaced < st->replaced)) {
 			st->score = score;
 			st->replaced = replaced;
-			memcpy(st->best, st->res, sizeof(st->best[0]) * st->num_res);
+			memcpy(st->best, st->res, sizeof(st->best[0]) * st->num_crtcs);
 
-			st->exit_early = (st->score == st->num_res - skips
-					|| st->score == st->num_objs)
+			st->exit_early = (st->score == st->num_crtcs
+					|| st->score == st->num_conns)
 					&& st->replaced == 0;
 
 			return true;
@@ -153,27 +178,16 @@ static bool match_obj_(struct match_state *st, size_t skips, size_t score, size_
 		}
 	}
 
-	if (st->orig[i] == SKIP) {
-		st->res[i] = SKIP;
-		return match_obj_(st, skips + 1, score, replaced, i + 1);
-	}
-
 	bool has_best = false;
 
 	/*
 	 * Attempt to use the current solution first, to try and avoid
 	 * recalculating everything
 	 */
-	if (st->orig[i] != UNMATCHED && !is_taken(i, st->res, st->orig[i])) {
-		st->res[i] = st->orig[i];
-		size_t obj_score = st->objs[st->res[i]] != 0 ? 1 : 0;
-		if (match_obj_(st, skips, score + obj_score, replaced, i + 1)) {
-			has_best = true;
-		}
-	}
-	if (st->orig[i] == UNMATCHED) {
-		st->res[i] = UNMATCHED;
-		if (match_obj_(st, skips, score, replaced, i + 1)) {
+	if (st->orig[crtc_index] != UNMATCHED && !is_taken(crtc_index, st->res, st->orig[crtc_index])) {
+		st->res[crtc_index] = st->orig[crtc_index];
+		size_t crtc_score = st->conns[st->res[crtc_index]] != 0 ? 1 : 0;
+		if (match_connectors_with_crtcs_(st, score + crtc_score, replaced, crtc_index + 1)) {
 			has_best = true;
 		}
 	}
@@ -181,29 +195,29 @@ static bool match_obj_(struct match_state *st, size_t skips, size_t score, size_
 		return true;
 	}
 
-	if (st->orig[i] != UNMATCHED) {
+	if (st->orig[crtc_index] != UNMATCHED) {
 		++replaced;
 	}
 
-	for (size_t candidate = 0; candidate < st->num_objs; ++candidate) {
+	for (size_t candidate = 0; candidate < st->num_conns; ++candidate) {
 		// We tried this earlier
-		if (candidate == st->orig[i]) {
+		if (candidate == st->orig[crtc_index]) {
 			continue;
 		}
 
 		// Not compatible
-		if (!(st->objs[candidate] & (1 << i))) {
+		if (!(st->conns[candidate] & (1 << crtc_index))) {
 			continue;
 		}
 
 		// Already taken
-		if (is_taken(i, st->res, candidate)) {
+		if (is_taken(crtc_index, st->res, candidate)) {
 			continue;
 		}
 
-		st->res[i] = candidate;
-		size_t obj_score = st->objs[candidate] != 0 ? 1 : 0;
-		if (match_obj_(st, skips, score + obj_score, replaced, i + 1)) {
+		st->res[crtc_index] = candidate;
+		size_t crtc_score = st->conns[candidate] != 0 ? 1 : 0;
+		if (match_connectors_with_crtcs_(st, score + crtc_score, replaced, crtc_index + 1)) {
 			has_best = true;
 		}
 
@@ -212,37 +226,37 @@ static bool match_obj_(struct match_state *st, size_t skips, size_t score, size_
 		}
 	}
 
-	if (has_best) {
-		return true;
+	// Maybe this CRTC can't be matched
+	st->res[crtc_index] = UNMATCHED;
+	if (match_connectors_with_crtcs_(st, score, replaced, crtc_index + 1)) {
+		has_best = true;
 	}
 
-	// Maybe this resource can't be matched
-	st->res[i] = UNMATCHED;
-	return match_obj_(st, skips, score, replaced, i + 1);
+	return has_best;
 }
 
-size_t match_obj(size_t num_objs, const uint32_t objs[static restrict num_objs],
-		size_t num_res, const uint32_t res[static restrict num_res],
-		uint32_t out[static restrict num_res]) {
-	uint32_t solution[num_res];
-	for (size_t i = 0; i < num_res; ++i) {
+void match_connectors_with_crtcs(size_t num_conns,
+		const uint32_t conns[static restrict num_conns],
+		size_t num_crtcs, const uint32_t prev_crtcs[static restrict num_crtcs],
+		uint32_t new_crtcs[static restrict num_crtcs]) {
+	uint32_t solution[num_crtcs];
+	for (size_t i = 0; i < num_crtcs; ++i) {
 		solution[i] = UNMATCHED;
 	}
 
 	struct match_state st = {
-		.num_objs = num_objs,
-		.num_res = num_res,
+		.num_conns = num_conns,
+		.num_crtcs = num_crtcs,
 		.score = 0,
 		.replaced = SIZE_MAX,
-		.objs = objs,
+		.conns = conns,
 		.res = solution,
-		.best = out,
-		.orig = res,
+		.best = new_crtcs,
+		.orig = prev_crtcs,
 		.exit_early = false,
 	};
 
-	match_obj_(&st, 0, 0, 0, 0);
-	return st.score;
+	match_connectors_with_crtcs_(&st, 0, 0, 0);
 }
 
 void generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay,

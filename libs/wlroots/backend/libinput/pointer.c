@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <libinput.h>
 #include <wlr/interfaces/wlr_pointer.h>
+#include <wlr/util/log.h>
 #include "backend/libinput.h"
 
 const struct wlr_pointer_impl libinput_pointer_impl = {
@@ -8,11 +9,9 @@ const struct wlr_pointer_impl libinput_pointer_impl = {
 };
 
 void init_device_pointer(struct wlr_libinput_input_device *dev) {
-	const char *name = libinput_device_get_name(dev->handle);
+	const char *name = get_libinput_device_name(dev->handle);
 	struct wlr_pointer *wlr_pointer = &dev->pointer;
 	wlr_pointer_init(wlr_pointer, &libinput_pointer_impl, name);
-	wlr_pointer->base.vendor = libinput_device_get_id_vendor(dev->handle);
-	wlr_pointer->base.product = libinput_device_get_id_product(dev->handle);
 }
 
 struct wlr_libinput_input_device *device_from_pointer(
@@ -54,6 +53,38 @@ void handle_pointer_motion_abs(struct libinput_event *event,
 	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 
+static bool pointer_button_state_from_libinput(enum libinput_button_state state,
+		enum wl_pointer_button_state *out) {
+	switch (state) {
+	case LIBINPUT_BUTTON_STATE_PRESSED:
+		*out = WL_POINTER_BUTTON_STATE_PRESSED;
+		return true;
+	case LIBINPUT_BUTTON_STATE_RELEASED:
+		*out = WL_POINTER_BUTTON_STATE_RELEASED;
+		return true;
+	}
+	return false;
+}
+
+static bool axis_source_from_libinput(enum libinput_pointer_axis_source source,
+		enum wl_pointer_axis_source *out) {
+	switch (source) {
+	case LIBINPUT_POINTER_AXIS_SOURCE_WHEEL:
+		*out = WL_POINTER_AXIS_SOURCE_WHEEL;
+		return true;
+	case LIBINPUT_POINTER_AXIS_SOURCE_FINGER:
+		*out = WL_POINTER_AXIS_SOURCE_FINGER;
+		return true;
+	case LIBINPUT_POINTER_AXIS_SOURCE_CONTINUOUS:
+		*out = WL_POINTER_AXIS_SOURCE_CONTINUOUS;
+		return true;
+	case LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT:
+		*out = WL_POINTER_AXIS_SOURCE_WHEEL_TILT;
+		return true;
+	}
+	return false;
+}
+
 void handle_pointer_button(struct libinput_event *event,
 		struct wlr_pointer *pointer) {
 	struct libinput_event_pointer *pevent =
@@ -63,25 +94,12 @@ void handle_pointer_button(struct libinput_event *event,
 		.time_msec = usec_to_msec(libinput_event_pointer_get_time_usec(pevent)),
 		.button = libinput_event_pointer_get_button(pevent),
 	};
-	// Ignore events which aren't a seat-wide state change. For instance, if
-	// the same button is pressed twice on the same seat, ignore the second
-	// press.
-	uint32_t seat_count = libinput_event_pointer_get_seat_button_count(pevent);
-	switch (libinput_event_pointer_get_button_state(pevent)) {
-	case LIBINPUT_BUTTON_STATE_PRESSED:
-		wlr_event.state = WLR_BUTTON_PRESSED;
-		if (seat_count != 1) {
-			return;
-		}
-		break;
-	case LIBINPUT_BUTTON_STATE_RELEASED:
-		wlr_event.state = WLR_BUTTON_RELEASED;
-		if (seat_count != 0) {
-			return;
-		}
-		break;
+	if (!pointer_button_state_from_libinput(libinput_event_pointer_get_button_state(pevent),
+			&wlr_event.state)) {
+		wlr_log(WLR_DEBUG, "Unhandled libinput button state");
+		return;
 	}
-	wl_signal_emit_mutable(&pointer->events.button, &wlr_event);
+	wlr_pointer_notify_button(pointer, &wlr_event);
 	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 
@@ -93,19 +111,9 @@ void handle_pointer_axis(struct libinput_event *event,
 		.pointer = pointer,
 		.time_msec = usec_to_msec(libinput_event_pointer_get_time_usec(pevent)),
 	};
-	switch (libinput_event_pointer_get_axis_source(pevent)) {
-	case LIBINPUT_POINTER_AXIS_SOURCE_WHEEL:
-		wlr_event.source = WLR_AXIS_SOURCE_WHEEL;
-		break;
-	case LIBINPUT_POINTER_AXIS_SOURCE_FINGER:
-		wlr_event.source = WLR_AXIS_SOURCE_FINGER;
-		break;
-	case LIBINPUT_POINTER_AXIS_SOURCE_CONTINUOUS:
-		wlr_event.source = WLR_AXIS_SOURCE_CONTINUOUS;
-		break;
-	case LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT:
-		wlr_event.source = WLR_AXIS_SOURCE_WHEEL_TILT;
-		break;
+	if (!axis_source_from_libinput(libinput_event_pointer_get_axis_source(pevent), &wlr_event.source)) {
+		wlr_log(WLR_DEBUG, "Unhandled libinput pointer axis source");
+		return;
 	}
 	const enum libinput_pointer_axis axes[] = {
 		LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL,
@@ -118,10 +126,10 @@ void handle_pointer_axis(struct libinput_event *event,
 
 		switch (axes[i]) {
 		case LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL:
-			wlr_event.orientation = WLR_AXIS_ORIENTATION_VERTICAL;
+			wlr_event.orientation = WL_POINTER_AXIS_VERTICAL_SCROLL;
 			break;
 		case LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL:
-			wlr_event.orientation = WLR_AXIS_ORIENTATION_HORIZONTAL;
+			wlr_event.orientation = WL_POINTER_AXIS_HORIZONTAL_SCROLL;
 			break;
 		}
 		wlr_event.delta =
@@ -129,14 +137,17 @@ void handle_pointer_axis(struct libinput_event *event,
 		wlr_event.delta_discrete =
 			libinput_event_pointer_get_axis_value_discrete(pevent, axes[i]);
 		wlr_event.delta_discrete *= WLR_POINTER_AXIS_DISCRETE_STEP;
+		wlr_event.relative_direction = WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL;
+		if (libinput_device_config_scroll_get_natural_scroll_enabled(libinput_event_get_device(event))) {
+			wlr_event.relative_direction = WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED;
+		}
 		wl_signal_emit_mutable(&pointer->events.axis, &wlr_event);
 	}
 	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 
-#if HAVE_LIBINPUT_SCROLL_VALUE120
 void handle_pointer_axis_value120(struct libinput_event *event,
-		struct wlr_pointer *pointer, enum wlr_axis_source source) {
+		struct wlr_pointer *pointer, enum wl_pointer_axis_source source) {
 	struct libinput_event_pointer *pevent =
 		libinput_event_get_pointer_event(event);
 	struct wlr_pointer_axis_event wlr_event = {
@@ -155,15 +166,15 @@ void handle_pointer_axis_value120(struct libinput_event *event,
 		}
 		switch (axes[i]) {
 		case LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL:
-			wlr_event.orientation = WLR_AXIS_ORIENTATION_VERTICAL;
+			wlr_event.orientation = WL_POINTER_AXIS_VERTICAL_SCROLL;
 			break;
 		case LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL:
-			wlr_event.orientation = WLR_AXIS_ORIENTATION_HORIZONTAL;
+			wlr_event.orientation = WL_POINTER_AXIS_HORIZONTAL_SCROLL;
 			break;
 		}
 		wlr_event.delta =
 			libinput_event_pointer_get_scroll_value(pevent, axes[i]);
-		if (source == WLR_AXIS_SOURCE_WHEEL) {
+		if (source == WL_POINTER_AXIS_SOURCE_WHEEL) {
 			wlr_event.delta_discrete =
 				libinput_event_pointer_get_scroll_value_v120(pevent, axes[i]);
 		}
@@ -171,7 +182,6 @@ void handle_pointer_axis_value120(struct libinput_event *event,
 	}
 	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
-#endif
 
 void handle_pointer_swipe_begin(struct libinput_event *event,
 		struct wlr_pointer *pointer) {

@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200112L
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
@@ -90,14 +89,21 @@ static void server_handle_new_output(struct wl_listener *listener, void *data) {
 	wlr_output_commit_state(wlr_output, &state);
 	wlr_output_state_finish(&state);
 
-	wlr_output_create_global(wlr_output);
+	wlr_output_create_global(wlr_output, server->display);
 }
 
 static void surface_handle_commit(struct wl_listener *listener, void *data) {
 	struct surface *surface = wl_container_of(listener, surface, commit);
+
 	wlr_scene_rect_set_size(surface->border,
 			surface->wlr->current.width + 2 * border_width,
 			surface->wlr->current.height + 2 * border_width);
+
+	struct wlr_xdg_toplevel *xdg_toplevel =
+		wlr_xdg_toplevel_try_from_wlr_surface(surface->wlr);
+	if (xdg_toplevel != NULL && xdg_toplevel->base->initial_commit) {
+		wlr_xdg_toplevel_set_size(xdg_toplevel, 0, 0);
+	}
 }
 
 static void surface_handle_destroy(struct wl_listener *listener, void *data) {
@@ -160,7 +166,7 @@ int main(int argc, char *argv[]) {
 	struct server server = {0};
 	server.surface_offset = 0;
 	server.display = wl_display_create();
-	server.backend = wlr_backend_autocreate(server.display, NULL);
+	server.backend = wlr_backend_autocreate(wl_display_get_event_loop(server.display), NULL);
 	server.scene = wlr_scene_create();
 
 	server.renderer = wlr_renderer_autocreate(server.backend);

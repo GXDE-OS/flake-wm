@@ -2,9 +2,8 @@
 #include <drm_fourcc.h>
 #include <pixman.h>
 #include <stdlib.h>
-#include <wayland-server.h>
+#include <wayland-util.h>
 #include <wlr/render/interface.h>
-#include <wlr/types/wlr_matrix.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 
@@ -44,7 +43,7 @@ bool begin_pixman_data_ptr_access(struct wlr_buffer *wlr_buffer, pixman_image_t 
 
 		pixman_image_t *new_image = pixman_image_create_bits_no_clear(format,
 			wlr_buffer->width, wlr_buffer->height, data, stride);
-		if (image == NULL) {
+		if (new_image == NULL) {
 			wlr_buffer_end_data_ptr_access(wlr_buffer);
 			return false;
 		}
@@ -90,7 +89,42 @@ static void texture_destroy(struct wlr_texture *wlr_texture) {
 	free(texture);
 }
 
+static bool texture_read_pixels(struct wlr_texture *wlr_texture,
+		const struct wlr_texture_read_pixels_options *options) {
+	struct wlr_pixman_texture *texture = get_texture(wlr_texture);
+
+	struct wlr_box src;
+	wlr_texture_read_pixels_options_get_src_box(options, wlr_texture, &src);
+
+	pixman_format_code_t fmt = get_pixman_format_from_drm(options->format);
+	if (fmt == 0) {
+		wlr_log(WLR_ERROR, "Cannot read pixels: unsupported pixel format");
+		return false;
+	}
+
+	void *p = wlr_texture_read_pixel_options_get_data(options);
+
+	pixman_image_t *dst = pixman_image_create_bits_no_clear(fmt,
+			src.width, src.height, p, options->stride);
+
+	pixman_image_composite32(PIXMAN_OP_SRC, texture->image, NULL, dst,
+			src.x, src.y, 0, 0, 0, 0, src.width, src.height);
+
+	pixman_image_unref(dst);
+
+	return true;
+}
+
+static uint32_t pixman_texture_preferred_read_format(struct wlr_texture *wlr_texture) {
+	struct wlr_pixman_texture *texture = get_texture(wlr_texture);
+
+	pixman_format_code_t pixman_format = pixman_image_get_format(texture->image);
+	return get_drm_format_from_pixman(pixman_format);
+}
+
 static const struct wlr_texture_impl texture_impl = {
+	.read_pixels = texture_read_pixels,
+	.preferred_read_format = pixman_texture_preferred_read_format,
 	.destroy = texture_destroy,
 };
 
@@ -159,177 +193,14 @@ error_buffer:
 	return NULL;
 }
 
-static bool pixman_begin(struct wlr_renderer *wlr_renderer, uint32_t width,
-		uint32_t height) {
+static const struct wlr_drm_format_set *pixman_get_texture_formats(
+		struct wlr_renderer *wlr_renderer, uint32_t buffer_caps) {
 	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-	renderer->width = width;
-	renderer->height = height;
-
-	struct wlr_pixman_buffer *buffer = renderer->current_buffer;
-	assert(buffer != NULL);
-
-	return begin_pixman_data_ptr_access(buffer->buffer, &buffer->image,
-		WLR_BUFFER_DATA_PTR_ACCESS_READ | WLR_BUFFER_DATA_PTR_ACCESS_WRITE);
-}
-
-static void pixman_end(struct wlr_renderer *wlr_renderer) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-
-	assert(renderer->current_buffer != NULL);
-
-	wlr_buffer_end_data_ptr_access(renderer->current_buffer->buffer);
-}
-
-static void pixman_clear(struct wlr_renderer *wlr_renderer,
-		const float color[static 4]) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-	struct wlr_pixman_buffer *buffer = renderer->current_buffer;
-
-	const struct pixman_color colour = {
-		.red = color[0] * 0xFFFF,
-		.green = color[1] * 0xFFFF,
-		.blue = color[2] * 0xFFFF,
-		.alpha = color[3] * 0xFFFF,
-	};
-
-	pixman_image_t *fill = pixman_image_create_solid_fill(&colour);
-
-	pixman_image_composite32(PIXMAN_OP_SRC, fill, NULL, buffer->image, 0, 0, 0,
-			0, 0, 0, renderer->width, renderer->height);
-
-	pixman_image_unref(fill);
-}
-
-static void pixman_scissor(struct wlr_renderer *wlr_renderer,
-		struct wlr_box *box) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-	struct wlr_pixman_buffer *buffer = renderer->current_buffer;
-
-	if (box != NULL) {
-		struct pixman_region32 region = {0};
-		pixman_region32_init_rect(&region, box->x, box->y, box->width,
-				box->height);
-		pixman_image_set_clip_region32(buffer->image, &region);
-		pixman_region32_fini(&region);
+	if (buffer_caps & WLR_BUFFER_CAP_DATA_PTR) {
+		return &renderer->drm_formats;
 	} else {
-		pixman_image_set_clip_region32(buffer->image, NULL);
+		return NULL;
 	}
-}
-
-static void matrix_to_pixman_transform(struct pixman_transform *transform,
-		const float mat[static 9]) {
-	struct pixman_f_transform ftr;
-	ftr.m[0][0] = mat[0];
-	ftr.m[0][1] = mat[1];
-	ftr.m[0][2] = mat[2];
-	ftr.m[1][0] = mat[3];
-	ftr.m[1][1] = mat[4];
-	ftr.m[1][2] = mat[5];
-	ftr.m[2][0] = mat[6];
-	ftr.m[2][1] = mat[7];
-	ftr.m[2][2] = mat[8];
-
-	pixman_transform_from_pixman_f_transform(transform, &ftr);
-}
-
-static bool pixman_render_subtexture_with_matrix(
-		struct wlr_renderer *wlr_renderer, struct wlr_texture *wlr_texture,
-		const struct wlr_fbox *fbox, const float matrix[static 9],
-		float alpha) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-	struct wlr_pixman_texture *texture = get_texture(wlr_texture);
-	struct wlr_pixman_buffer *buffer = renderer->current_buffer;
-
-	if (texture->buffer != NULL && !begin_pixman_data_ptr_access(texture->buffer,
-			&texture->image, WLR_BUFFER_DATA_PTR_ACCESS_READ)) {
-		return false;
-	}
-
-	pixman_image_t *mask = NULL;
-	if (alpha != 1.0) {
-		struct pixman_color mask_colour = {0};
-		mask_colour.alpha = 0xFFFF * alpha;
-		mask = pixman_image_create_solid_fill(&mask_colour);
-	}
-
-	float m[9];
-	memcpy(m, matrix, sizeof(m));
-	wlr_matrix_scale(m, 1.0 / fbox->width, 1.0 / fbox->height);
-
-	struct pixman_transform transform = {0};
-	matrix_to_pixman_transform(&transform, m);
-	pixman_transform_invert(&transform, &transform);
-
-	pixman_image_set_transform(texture->image, &transform);
-
-	// TODO clip properly with src_x and src_y
-	pixman_image_composite32(PIXMAN_OP_OVER, texture->image, mask,
-			buffer->image, 0, 0, 0, 0, 0, 0, renderer->width,
-			renderer->height);
-
-	if (texture->buffer != NULL) {
-		wlr_buffer_end_data_ptr_access(texture->buffer);
-	}
-
-	if (mask != NULL) {
-		pixman_image_unref(mask);
-	}
-
-	return true;
-}
-
-static void pixman_render_quad_with_matrix(struct wlr_renderer *wlr_renderer,
-		const float color[static 4], const float matrix[static 9]) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-	struct wlr_pixman_buffer *buffer = renderer->current_buffer;
-
-	struct pixman_color colour = {
-		.red = color[0] * 0xFFFF,
-		.green = color[1] * 0xFFFF,
-		.blue = color[2] * 0xFFFF,
-		.alpha = color[3] * 0xFFFF,
-	};
-
-	pixman_image_t *fill = pixman_image_create_solid_fill(&colour);
-
-	float m[9];
-	memcpy(m, matrix, sizeof(m));
-
-	// TODO get the width/height from the caller instead of extracting them
-	float width, height;
-	if (matrix[1] == 0.0 && matrix[3] == 0.0) {
-		width = fabs(matrix[0]);
-		height = fabs(matrix[4]);
-	} else {
-		width = sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1]);
-		height = sqrt(matrix[3] * matrix[3] + matrix[4] * matrix[4]);
-	}
-
-	wlr_matrix_scale(m, 1.0 / width, 1.0 / height);
-
-	pixman_image_t *image = pixman_image_create_bits(PIXMAN_a8r8g8b8, width,
-			height, NULL, 0);
-
-	// TODO find a way to fill the image without allocating 2 images
-	pixman_image_composite32(PIXMAN_OP_SRC, fill, NULL, image,
-		0, 0, 0, 0, 0, 0, width, height);
-	pixman_image_unref(fill);
-
-	struct pixman_transform transform = {0};
-	matrix_to_pixman_transform(&transform, m);
-	pixman_transform_invert(&transform, &transform);
-
-	pixman_image_set_transform(image, &transform);
-
-	pixman_image_composite32(PIXMAN_OP_OVER, image, NULL, buffer->image,
-			0, 0, 0, 0, 0, 0, renderer->width, renderer->height);
-
-	pixman_image_unref(image);
-}
-
-static const uint32_t *pixman_get_shm_texture_formats(
-		struct wlr_renderer *wlr_renderer, size_t *len) {
-	return get_pixman_drm_formats(len);
 }
 
 static const struct wlr_drm_format_set *pixman_get_render_formats(
@@ -403,33 +274,6 @@ static struct wlr_texture *pixman_texture_from_buffer(
 	return &texture->wlr_texture;
 }
 
-static bool pixman_bind_buffer(struct wlr_renderer *wlr_renderer,
-		struct wlr_buffer *wlr_buffer) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-
-	if (renderer->current_buffer != NULL) {
-		wlr_buffer_unlock(renderer->current_buffer->buffer);
-		renderer->current_buffer = NULL;
-	}
-
-	if (wlr_buffer == NULL) {
-		return true;
-	}
-
-	struct wlr_pixman_buffer *buffer = get_buffer(renderer, wlr_buffer);
-	if (buffer == NULL) {
-		buffer = create_buffer(renderer, wlr_buffer);
-	}
-	if (buffer == NULL) {
-		return false;
-	}
-
-	wlr_buffer_lock(wlr_buffer);
-	renderer->current_buffer = buffer;
-
-	return true;
-}
-
 static void pixman_destroy(struct wlr_renderer *wlr_renderer) {
 	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
 
@@ -446,49 +290,6 @@ static void pixman_destroy(struct wlr_renderer *wlr_renderer) {
 	wlr_drm_format_set_finish(&renderer->drm_formats);
 
 	free(renderer);
-}
-
-static uint32_t pixman_preferred_read_format(
-		struct wlr_renderer *wlr_renderer) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-	struct wlr_pixman_buffer *buffer = renderer->current_buffer;
-
-	pixman_format_code_t pixman_format = pixman_image_get_format(
-			buffer->image);
-
-	return get_drm_format_from_pixman(pixman_format);
-}
-
-static bool pixman_read_pixels(struct wlr_renderer *wlr_renderer,
-		uint32_t drm_format, uint32_t stride,
-		uint32_t width, uint32_t height, uint32_t src_x, uint32_t src_y,
-		uint32_t dst_x, uint32_t dst_y, void *data) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-	struct wlr_pixman_buffer *buffer = renderer->current_buffer;
-
-	pixman_format_code_t fmt = get_pixman_format_from_drm(drm_format);
-	if (fmt == 0) {
-		wlr_log(WLR_ERROR, "Cannot read pixels: unsupported pixel format");
-		return false;
-	}
-
-	const struct wlr_pixel_format_info *drm_fmt =
-		drm_get_pixel_format_info(drm_format);
-	assert(drm_fmt);
-
-	pixman_image_t *dst = pixman_image_create_bits_no_clear(fmt, width, height,
-			data, stride);
-
-	pixman_image_composite32(PIXMAN_OP_SRC, buffer->image, NULL, dst,
-			src_x, src_y, 0, 0, dst_x, dst_y, width, height);
-
-	pixman_image_unref(dst);
-
-	return true;
-}
-
-static uint32_t pixman_get_render_buffer_caps(struct wlr_renderer *renderer) {
-	return WLR_BUFFER_CAP_DATA_PTR;
 }
 
 static struct wlr_render_pass *pixman_begin_buffer_pass(struct wlr_renderer *wlr_renderer,
@@ -511,20 +312,10 @@ static struct wlr_render_pass *pixman_begin_buffer_pass(struct wlr_renderer *wlr
 }
 
 static const struct wlr_renderer_impl renderer_impl = {
-	.begin = pixman_begin,
-	.end = pixman_end,
-	.clear = pixman_clear,
-	.scissor = pixman_scissor,
-	.render_subtexture_with_matrix = pixman_render_subtexture_with_matrix,
-	.render_quad_with_matrix = pixman_render_quad_with_matrix,
-	.get_shm_texture_formats = pixman_get_shm_texture_formats,
+	.get_texture_formats = pixman_get_texture_formats,
 	.get_render_formats = pixman_get_render_formats,
 	.texture_from_buffer = pixman_texture_from_buffer,
-	.bind_buffer = pixman_bind_buffer,
 	.destroy = pixman_destroy,
-	.preferred_read_format = pixman_preferred_read_format,
-	.read_pixels = pixman_read_pixels,
-	.get_render_buffer_caps = pixman_get_render_buffer_caps,
 	.begin_buffer_pass = pixman_begin_buffer_pass,
 };
 
@@ -535,7 +326,8 @@ struct wlr_renderer *wlr_pixman_renderer_create(void) {
 	}
 
 	wlr_log(WLR_INFO, "Creating pixman renderer");
-	wlr_renderer_init(&renderer->wlr_renderer, &renderer_impl);
+	wlr_renderer_init(&renderer->wlr_renderer, &renderer_impl, WLR_BUFFER_CAP_DATA_PTR);
+	renderer->wlr_renderer.features.output_color_transform = false;
 	wl_list_init(&renderer->buffers);
 	wl_list_init(&renderer->textures);
 
@@ -552,14 +344,20 @@ struct wlr_renderer *wlr_pixman_renderer_create(void) {
 	return &renderer->wlr_renderer;
 }
 
+pixman_image_t *wlr_pixman_renderer_get_buffer_image(
+		struct wlr_renderer *wlr_renderer, struct wlr_buffer *wlr_buffer) {
+	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
+	struct wlr_pixman_buffer *buffer = get_buffer(renderer, wlr_buffer);
+	if (!buffer) {
+		buffer = create_buffer(renderer, wlr_buffer);
+	}
+	if (!buffer) {
+		return NULL;
+	}
+	return buffer->image;
+}
+
 pixman_image_t *wlr_pixman_texture_get_image(struct wlr_texture *wlr_texture) {
 	struct wlr_pixman_texture *texture = get_texture(wlr_texture);
 	return texture->image;
-}
-
-pixman_image_t *wlr_pixman_renderer_get_current_image(
-		struct wlr_renderer *wlr_renderer) {
-	struct wlr_pixman_renderer *renderer = get_renderer(wlr_renderer);
-	assert(renderer->current_buffer);
-	return renderer->current_buffer->image;
 }

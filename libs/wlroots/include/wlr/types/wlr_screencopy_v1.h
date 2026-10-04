@@ -14,17 +14,26 @@
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/util/box.h>
 
+/**
+ * Deprecated: this protocol is deprecated and superseded by ext-image-copy-capture-v1.
+ * The implementation will be dropped in a future wlroots version.
+ *
+ * Consider using `wlr_ext_image_capture_source_v1` instead.
+ */
+
 struct wlr_screencopy_manager_v1 {
 	struct wl_global *global;
 	struct wl_list frames; // wlr_screencopy_frame_v1.link
-
-	struct wl_listener display_destroy;
 
 	struct {
 		struct wl_signal destroy;
 	} events;
 
 	void *data;
+
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_screencopy_v1_client {
@@ -50,11 +59,13 @@ struct wlr_screencopy_frame_v1 {
 	struct wlr_buffer *buffer;
 
 	struct wlr_output *output;
-	struct wl_listener output_commit;
-	struct wl_listener output_destroy;
-	struct wl_listener output_enable;
 
 	void *data;
+
+	struct {
+		struct wl_listener output_commit;
+		struct wl_listener output_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_screencopy_manager_v1 *wlr_screencopy_manager_v1_create(

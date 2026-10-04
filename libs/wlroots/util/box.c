@@ -4,6 +4,14 @@
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 
+static int max(int a, int b) {
+	return a > b ? a : b;
+}
+
+static int min(int a, int b) {
+	return a < b ? a : b;
+}
+
 void wlr_box_closest_point(const struct wlr_box *box, double x, double y,
 		double *dest_x, double *dest_y) {
 	// if box is empty, then it contains no points, so no closest point either
@@ -14,29 +22,20 @@ void wlr_box_closest_point(const struct wlr_box *box, double x, double y,
 	}
 
 	// Note: the width and height of the box are exclusive; that is,
-	// for a 100x100 box at (0,0), the point (99,99) is inside it
+	// for a 100x100 box at (0,0), the point (99.9,99.9) is inside it
 	// while the point (100,100) is outside it.
 	//
-	// Mathematically, there exists no single closest point to the
-	// bottom-right corner of the box while remaining inside it. You
-	// can construct an infinite series approaching the limit, such
-	// as {(99,99), (99.9,99.9), (99.99,99.99)...}, but since the
-	// intervals are half-open, there is no "last" point.
-	//
-	// This function must therefore define an arbitrary "closest"
-	// point. For simplicity and consistency, this is defined to be
-	// (box.x + width - 1, box.y + height - 1).
-	//
-	// (The previous implementation was non-linear: with the example
-	// 100x100 box, it would return an input point of (99.9,99.9)
-	// unchanged, but for an input point (100.1,100.1) the returned
-	// point would jump back to (99.0,99.0). This is now fixed.)
+	// In order to be consistent with e.g. wlr_box_contains_point(),
+	// this function returns a point inside the bottom and right edges
+	// of the box by at least 1/256 of a unit (pixel). 1/256 is
+	// small enough to avoid a "dead zone" with high-resolution mice
+	// but large enough to avoid rounding to zero in wl_fixed_from_double().
 
 	// find the closest x point
 	if (x < box->x) {
 		*dest_x = box->x;
-	} else if (x > box->x + box->width - 1) {
-		*dest_x = box->x + box->width - 1;
+	} else if (x > box->x + box->width - 1/256.0) {
+		*dest_x = box->x + box->width - 1/256.0;
 	} else {
 		*dest_x = x;
 	}
@@ -44,8 +43,8 @@ void wlr_box_closest_point(const struct wlr_box *box, double x, double y,
 	// find closest y point
 	if (y < box->y) {
 		*dest_y = box->y;
-	} else if (y > box->y + box->height - 1) {
-		*dest_y = box->y + box->height - 1;
+	} else if (y > box->y + box->height - 1/256.0) {
+		*dest_y = box->y + box->height - 1/256.0;
 	} else {
 		*dest_y = y;
 	}
@@ -65,17 +64,22 @@ bool wlr_box_intersection(struct wlr_box *dest, const struct wlr_box *box_a,
 		return false;
 	}
 
-	int x1 = fmax(box_a->x, box_b->x);
-	int y1 = fmax(box_a->y, box_b->y);
-	int x2 = fmin(box_a->x + box_a->width, box_b->x + box_b->width);
-	int y2 = fmin(box_a->y + box_a->height, box_b->y + box_b->height);
+	int x1 = max(box_a->x, box_b->x);
+	int y1 = max(box_a->y, box_b->y);
+	int x2 = min(box_a->x + box_a->width, box_b->x + box_b->width);
+	int y2 = min(box_a->y + box_a->height, box_b->y + box_b->height);
 
 	dest->x = x1;
 	dest->y = y1;
 	dest->width = x2 - x1;
 	dest->height = y2 - y1;
 
-	return !wlr_box_empty(dest);
+	if (wlr_box_empty(dest)) {
+		*dest = (struct wlr_box){0};
+		return false;
+	}
+
+	return true;
 }
 
 bool wlr_box_contains_point(const struct wlr_box *box, double x, double y) {
@@ -85,6 +89,17 @@ bool wlr_box_contains_point(const struct wlr_box *box, double x, double y) {
 		return x >= box->x && x < box->x + box->width &&
 			y >= box->y && y < box->y + box->height;
 	}
+}
+
+bool wlr_box_contains_box(const struct wlr_box *bigger, const struct wlr_box *smaller) {
+	if (wlr_box_empty(bigger) || wlr_box_empty(smaller)) {
+		return false;
+	}
+
+	return smaller->x >= bigger->x &&
+		smaller->x + smaller->width <= bigger->x + bigger->width &&
+		smaller->y >= bigger->y &&
+		smaller->y + smaller->height <= bigger->y + bigger->height;
 }
 
 void wlr_box_transform(struct wlr_box *dest, const struct wlr_box *box,

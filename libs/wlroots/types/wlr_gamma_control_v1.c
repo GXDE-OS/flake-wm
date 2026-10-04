@@ -1,10 +1,10 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/interfaces/wlr_output.h>
+#include <wlr/render/color.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/util/log.h>
@@ -101,7 +101,6 @@ static void gamma_control_handle_set_gamma(struct wl_client *client,
 		goto error_table;
 	}
 	close(fd);
-	fd = -1;
 
 	free(gamma_control->table);
 	gamma_control->table = table;
@@ -158,6 +157,9 @@ static void gamma_control_manager_get_gamma_control(struct wl_client *client,
 	}
 
 	size_t gamma_size = wlr_output_get_gamma_size(output);
+	if (gamma_size == 0) {
+		gamma_size = manager->fallback_gamma_size;
+	}
 	if (gamma_size == 0) {
 		zwlr_gamma_control_v1_send_failed(resource);
 		return;
@@ -217,6 +219,10 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_gamma_control_manager_v1 *manager =
 		wl_container_of(listener, manager, display_destroy);
 	wl_signal_emit_mutable(&manager->events.destroy, manager);
+
+	assert(wl_list_empty(&manager->events.destroy.listener_list));
+	assert(wl_list_empty(&manager->events.set_gamma.listener_list));
+
 	wl_list_remove(&manager->display_destroy.link);
 	wl_global_destroy(manager->global);
 	free(manager);
@@ -239,6 +245,7 @@ struct wlr_gamma_control_manager_v1 *wlr_gamma_control_manager_v1_create(
 
 	wl_signal_init(&manager->events.destroy);
 	wl_signal_init(&manager->events.set_gamma);
+
 	wl_list_init(&manager->controls);
 
 	manager->display_destroy.notify = handle_display_destroy;
@@ -258,17 +265,31 @@ struct wlr_gamma_control_v1 *wlr_gamma_control_manager_v1_get_control(
 	return NULL;
 }
 
-bool wlr_gamma_control_v1_apply(struct wlr_gamma_control_v1 *gamma_control,
-		struct wlr_output_state *output_state) {
+struct wlr_color_transform *wlr_gamma_control_v1_get_color_transform(
+		struct wlr_gamma_control_v1 *gamma_control) {
 	if (gamma_control == NULL || gamma_control->table == NULL) {
-		return wlr_output_state_set_gamma_lut(output_state, 0, NULL, NULL, NULL);
+		return NULL;
 	}
 
 	const uint16_t *r = gamma_control->table;
 	const uint16_t *g = gamma_control->table + gamma_control->ramp_size;
 	const uint16_t *b = gamma_control->table + 2 * gamma_control->ramp_size;
-	return wlr_output_state_set_gamma_lut(output_state,
-		gamma_control->ramp_size, r, g, b);
+
+	return wlr_color_transform_init_lut_3x1d(gamma_control->ramp_size, r, g, b);
+}
+
+bool wlr_gamma_control_v1_apply(struct wlr_gamma_control_v1 *gamma_control,
+		struct wlr_output_state *output_state) {
+	struct wlr_color_transform *tr = NULL;
+	if (gamma_control != NULL && gamma_control->table != NULL) {
+		tr = wlr_gamma_control_v1_get_color_transform(gamma_control);
+		if (tr == NULL) {
+			return false;
+		}
+	}
+
+	wlr_output_state_set_color_transform(output_state, tr);
+	return true;
 }
 
 void wlr_gamma_control_v1_send_failed_and_destroy(struct wlr_gamma_control_v1 *gamma_control) {

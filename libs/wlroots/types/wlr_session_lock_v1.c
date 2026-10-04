@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdlib.h>
 #include <wayland-server-core.h>
@@ -38,7 +37,7 @@ static void lock_surface_destroy(struct wlr_session_lock_surface_v1 *lock_surfac
 	assert(wl_list_empty(&lock_surface->events.destroy.listener_list));
 
 	wl_list_remove(&lock_surface->output_destroy.link);
-
+	wlr_surface_synced_finish(&lock_surface->synced);
 	wl_resource_set_user_data(lock_surface->resource, NULL);
 	free(lock_surface);
 }
@@ -149,37 +148,42 @@ static const struct ext_session_lock_surface_v1_interface lock_surface_implement
 	.ack_configure = lock_surface_handle_ack_configure,
 };
 
-static void lock_surface_role_commit(struct wlr_surface *surface) {
+static void lock_surface_role_client_commit(struct wlr_surface *surface) {
 	struct wlr_session_lock_surface_v1 *lock_surface =
 		wlr_session_lock_surface_v1_try_from_wlr_surface(surface);
 	if (lock_surface == NULL) {
 		return;
 	}
 
-	if (!wlr_surface_has_buffer(surface)) {
-		wl_resource_post_error(lock_surface->resource,
+	if (!wlr_surface_state_has_buffer(&surface->pending)) {
+		wlr_surface_reject_pending(surface, lock_surface->resource,
 			EXT_SESSION_LOCK_SURFACE_V1_ERROR_NULL_BUFFER,
 			"session lock surface is committed with a null buffer");
 		return;
 	}
 
 	if (!lock_surface->configured) {
-		wl_resource_post_error(lock_surface->resource,
+		wlr_surface_reject_pending(surface, lock_surface->resource,
 			EXT_SESSION_LOCK_SURFACE_V1_ERROR_COMMIT_BEFORE_FIRST_ACK,
 			"session lock surface has never been configured");
 		return;
 	}
 
-	if (surface->current.width < 0 || surface->current.height < 0 ||
-			(uint32_t)surface->current.width != lock_surface->pending.width ||
-			(uint32_t)surface->current.height != lock_surface->pending.height) {
-		wl_resource_post_error(lock_surface->resource,
+	if ((uint32_t)surface->pending.width != lock_surface->pending.width ||
+			(uint32_t)surface->pending.height != lock_surface->pending.height) {
+		wlr_surface_reject_pending(surface, lock_surface->resource,
 			EXT_SESSION_LOCK_SURFACE_V1_ERROR_DIMENSIONS_MISMATCH,
 			"committed surface dimensions do not match last acked configure");
 		return;
 	}
+}
 
-	lock_surface->current = lock_surface->pending;
+static void lock_surface_role_commit(struct wlr_surface *surface) {
+	struct wlr_session_lock_surface_v1 *lock_surface =
+		wlr_session_lock_surface_v1_try_from_wlr_surface(surface);
+	if (lock_surface == NULL) {
+		return;
+	}
 
 	wlr_surface_map(surface);
 }
@@ -195,8 +199,13 @@ static void lock_surface_role_destroy(struct wlr_surface *surface) {
 
 static const struct wlr_surface_role lock_surface_role = {
 	.name = "ext_session_lock_surface_v1",
+	.client_commit = lock_surface_role_client_commit,
 	.commit = lock_surface_role_commit,
 	.destroy = lock_surface_role_destroy,
+};
+
+static const struct wlr_surface_synced_impl surface_synced_impl = {
+	.state_size = sizeof(struct wlr_session_lock_surface_v1_state),
 };
 
 static void lock_surface_handle_output_destroy(struct wl_listener *listener,
@@ -266,6 +275,13 @@ static void lock_handle_get_lock_surface(struct wl_client *client,
 	if (!wlr_surface_set_role(surface, &lock_surface_role,
 			lock_resource, EXT_SESSION_LOCK_V1_ERROR_ROLE)) {
 		free(lock_surface);
+		return;
+	}
+
+	if (!wlr_surface_synced_init(&lock_surface->synced, surface,
+			&surface_synced_impl, &lock_surface->pending, &lock_surface->current)) {
+		free(lock_surface);
+		wl_client_post_no_memory(client);
 		return;
 	}
 

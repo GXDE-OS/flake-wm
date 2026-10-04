@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200112L
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,7 +63,7 @@ static void output_frame_notify(struct wl_listener *listener, void *data) {
 
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
-	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &state, NULL, NULL);
+	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &state, NULL);
 	wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
 		.box = { .width = wlr_output->width, .height = wlr_output->height },
 		.color = {
@@ -181,7 +180,7 @@ int main(void) {
 		.last_frame = { 0 },
 		.display = display
 	};
-	struct wlr_backend *backend = wlr_backend_autocreate(display, NULL);
+	struct wlr_backend *backend = wlr_backend_autocreate(wl_display_get_event_loop(display), NULL);
 	if (!backend) {
 		exit(1);
 	}

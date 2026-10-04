@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 
 #include <libinput.h>
 #include <stdlib.h>
@@ -48,8 +47,8 @@ bool wlr_input_device_is_libinput(struct wlr_input_device *wlr_dev) {
 	case WLR_INPUT_DEVICE_TOUCH:
 		return wlr_touch_from_input_device(wlr_dev)->impl ==
 			&libinput_touch_impl;
-	case WLR_INPUT_DEVICE_TABLET_TOOL:
-		return wlr_tablet_from_input_device(wlr_dev)-> impl ==
+	case WLR_INPUT_DEVICE_TABLET:
+		return wlr_tablet_from_input_device(wlr_dev)->impl ==
 			&libinput_tablet_impl;
 	case WLR_INPUT_DEVICE_TABLET_PAD:
 		return wlr_tablet_pad_from_input_device(wlr_dev)->impl ==
@@ -124,11 +123,6 @@ static void handle_device_added(struct wlr_libinput_backend *backend,
 		wl_signal_emit_mutable(&backend->backend.events.new_input,
 			&dev->tablet_pad.base);
 	}
-
-	if (libinput_device_has_capability(
-			libinput_dev, LIBINPUT_DEVICE_CAP_GESTURE)) {
-		wlr_log(WLR_DEBUG, "libinput gesture not handled");
-	}
 }
 
 static void handle_device_removed(struct wlr_libinput_backend *backend,
@@ -173,25 +167,20 @@ void handle_libinput_event(struct wlr_libinput_backend *backend,
 		handle_pointer_button(event, &dev->pointer);
 		break;
 	case LIBINPUT_EVENT_POINTER_AXIS:
-#if !HAVE_LIBINPUT_SCROLL_VALUE120
 		/* This event must be ignored in favour of the SCROLL_* events */
-		handle_pointer_axis(event, &dev->pointer);
-#endif
 		break;
-#if HAVE_LIBINPUT_SCROLL_VALUE120
 	case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
 		handle_pointer_axis_value120(event, &dev->pointer,
-			WLR_AXIS_SOURCE_WHEEL);
+			WL_POINTER_AXIS_SOURCE_WHEEL);
 		break;
 	case LIBINPUT_EVENT_POINTER_SCROLL_FINGER:
 		handle_pointer_axis_value120(event, &dev->pointer,
-			WLR_AXIS_SOURCE_FINGER);
+			WL_POINTER_AXIS_SOURCE_FINGER);
 		break;
 	case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS:
 		handle_pointer_axis_value120(event, &dev->pointer,
-			WLR_AXIS_SOURCE_CONTINUOUS);
+			WL_POINTER_AXIS_SOURCE_CONTINUOUS);
 		break;
-#endif
 	case LIBINPUT_EVENT_TOUCH_DOWN:
 		handle_touch_down(event, &dev->touch);
 		break;
@@ -249,16 +238,26 @@ void handle_libinput_event(struct wlr_libinput_backend *backend,
 	case LIBINPUT_EVENT_GESTURE_PINCH_END:
 		handle_pointer_pinch_end(event, &dev->pointer);
 		break;
-#if HAVE_LIBINPUT_HOLD_GESTURES
 	case LIBINPUT_EVENT_GESTURE_HOLD_BEGIN:
 		handle_pointer_hold_begin(event, &dev->pointer);
 		break;
 	case LIBINPUT_EVENT_GESTURE_HOLD_END:
 		handle_pointer_hold_end(event, &dev->pointer);
 		break;
-#endif
 	default:
 		wlr_log(WLR_DEBUG, "Unknown libinput event %d", event_type);
 		break;
 	}
+}
+
+bool button_state_from_libinput(enum libinput_button_state state, enum wlr_button_state *out) {
+	switch (state) {
+	case LIBINPUT_BUTTON_STATE_RELEASED:
+		*out = WLR_BUTTON_RELEASED;
+		return true;
+	case LIBINPUT_BUTTON_STATE_PRESSED:
+		*out = WLR_BUTTON_PRESSED;
+		return true;
+	}
+	return false;
 }

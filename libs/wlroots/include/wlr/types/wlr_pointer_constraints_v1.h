@@ -11,9 +11,10 @@
 
 #include <stdint.h>
 #include <wayland-server-core.h>
+#include <wayland-protocols/pointer-constraints-unstable-v1-enum.h>
 #include <pixman.h>
+#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_seat.h>
-#include "pointer-constraints-unstable-v1-protocol.h"
 
 struct wlr_seat;
 
@@ -33,6 +34,7 @@ struct wlr_pointer_constraint_v1_state {
 
 	// only valid for locked_pointer
 	struct {
+		bool enabled;
 		double x, y;
 	} cursor_hint;
 };
@@ -49,22 +51,26 @@ struct wlr_pointer_constraint_v1 {
 
 	struct wlr_pointer_constraint_v1_state current, pending;
 
-	struct wl_listener surface_commit;
-	struct wl_listener surface_destroy;
-	struct wl_listener seat_destroy;
-
 	struct wl_list link; // wlr_pointer_constraints_v1.constraints
 
 	struct {
 		/**
-		 * Called when a pointer constraint's region is updated,
-		 * post-surface-commit.
+		 * Emitted when a pointer constraint's region is updated.
 		 */
 		struct wl_signal set_region;
 		struct wl_signal destroy;
 	} events;
 
 	void *data;
+
+	struct {
+		struct wl_listener surface_destroy;
+		struct wl_listener seat_destroy;
+
+		struct wlr_surface_synced synced;
+
+		bool destroying;
+	} WLR_PRIVATE;
 };
 
 struct wlr_pointer_constraints_v1 {
@@ -72,17 +78,15 @@ struct wlr_pointer_constraints_v1 {
 	struct wl_list constraints; // wlr_pointer_constraint_v1.link
 
 	struct {
-		/**
-		 * Called when a new pointer constraint is created.
-		 *
-		 * The data pointer is a struct wlr_pointer_constraint_v1.
-		 */
-		struct wl_signal new_constraint;
+		struct wl_signal destroy;
+		struct wl_signal new_constraint; // struct wlr_pointer_constraint_v1
 	} events;
 
-	struct wl_listener display_destroy;
-
 	void *data;
+
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_pointer_constraints_v1 *wlr_pointer_constraints_v1_create(

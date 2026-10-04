@@ -1,5 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
-
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -7,7 +5,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <wayland-client.h>
+#include <wayland-client-protocol.h>
 
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/interfaces/wlr_output.h>
@@ -29,12 +27,14 @@ static void keyboard_handle_enter(void *data, struct wl_keyboard *wl_keyboard,
 		uint32_t serial, struct wl_surface *surface, struct wl_array *keys) {
 	struct wlr_keyboard *keyboard = data;
 
+	int64_t time_msec = get_current_time_msec();
+
 	uint32_t *keycode_ptr;
 	wl_array_for_each(keycode_ptr, keys) {
 		struct wlr_keyboard_key_event event = {
 			.keycode = *keycode_ptr,
 			.state = WL_KEYBOARD_KEY_STATE_PRESSED,
-			.time_msec = get_current_time_msec(),
+			.time_msec = time_msec,
 			.update_state = false,
 		};
 		wlr_keyboard_notify_key(keyboard, &event);
@@ -45,18 +45,12 @@ static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
 		uint32_t serial, struct wl_surface *surface) {
 	struct wlr_keyboard *keyboard = data;
 
-	size_t num_keycodes = keyboard->num_keycodes;
-	uint32_t pressed[num_keycodes + 1];
-	memcpy(pressed, keyboard->keycodes,
-		num_keycodes * sizeof(uint32_t));
-
-	for (size_t i = 0; i < num_keycodes; ++i) {
-		uint32_t keycode = pressed[i];
-
+	int64_t time_msec = get_current_time_msec();
+	while (keyboard->num_keycodes > 0) {
 		struct wlr_keyboard_key_event event = {
-			.keycode = keycode,
+			.keycode = keyboard->keycodes[keyboard->num_keycodes - 1],
 			.state = WL_KEYBOARD_KEY_STATE_RELEASED,
-			.time_msec = get_current_time_msec(),
+			.time_msec = time_msec,
 			.update_state = false,
 		};
 		wlr_keyboard_notify_key(keyboard, &event);
@@ -252,7 +246,7 @@ void init_seat_touch(struct wlr_wl_seat *seat) {
 
 	struct wlr_wl_output *output;
 	wl_list_for_each(output, &seat->backend->outputs, link) {
-		/* Multi-output touch not supproted */
+		/* Multi-output touch not supported */
 		seat->wlr_touch.output_name = strdup(output->wlr_output.name);
 		break;
 	}
@@ -314,7 +308,7 @@ bool wlr_input_device_is_wl(struct wlr_input_device *dev) {
 		return wlr_pointer_from_input_device(dev)->impl == &wl_pointer_impl;
 	case WLR_INPUT_DEVICE_TOUCH:
 		return wlr_touch_from_input_device(dev)->impl == &touch_impl;
-	case WLR_INPUT_DEVICE_TABLET_TOOL:
+	case WLR_INPUT_DEVICE_TABLET:
 		return wlr_tablet_from_input_device(dev)-> impl == &wl_tablet_impl;
 	case WLR_INPUT_DEVICE_TABLET_PAD:
 		return wlr_tablet_pad_from_input_device(dev)->impl == &wl_tablet_pad_impl;

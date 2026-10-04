@@ -28,11 +28,11 @@ struct wlr_security_context_manager_v1 {
 
 	void *data;
 
-	// private state
+	struct {
+		struct wl_list contexts; // wlr_security_context_v1.link
 
-	struct wl_list contexts; // wlr_security_context_v1.link
-
-	struct wl_listener display_destroy;
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_security_context_v1_state {
@@ -50,6 +50,6 @@ struct wlr_security_context_v1_commit_event {
 struct wlr_security_context_manager_v1 *wlr_security_context_manager_v1_create(
 	struct wl_display *display);
 const struct wlr_security_context_v1_state *wlr_security_context_manager_v1_lookup_client(
-	struct wlr_security_context_manager_v1 *manager, struct wl_client *client);
+	struct wlr_security_context_manager_v1 *manager, const struct wl_client *client);
 
 #endif

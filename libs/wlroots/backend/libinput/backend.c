@@ -51,7 +51,7 @@ static int handle_libinput_readable(int fd, uint32_t mask, void *_backend) {
 	int ret = libinput_dispatch(backend->libinput_context);
 	if (ret != 0) {
 		wlr_log(WLR_ERROR, "Failed to dispatch libinput: %s", strerror(-ret));
-		wl_display_terminate(backend->display);
+		wlr_backend_destroy(&backend->backend);
 		return 0;
 	}
 	struct libinput_event *event;
@@ -113,12 +113,10 @@ static bool backend_start(struct wlr_backend *wlr_backend) {
 		return false;
 	}
 
-	struct wl_event_loop *event_loop =
-		wl_display_get_event_loop(backend->display);
 	if (backend->input_event) {
 		wl_event_source_remove(backend->input_event);
 	}
-	backend->input_event = wl_event_loop_add_fd(event_loop, libinput_fd,
+	backend->input_event = wl_event_loop_add_fd(backend->session->event_loop, libinput_fd,
 			WL_EVENT_READABLE, handle_libinput_readable, backend);
 	if (!backend->input_event) {
 		wlr_log(WLR_ERROR, "Failed to create input event on event loop");
@@ -142,7 +140,6 @@ static void backend_destroy(struct wlr_backend *wlr_backend) {
 
 	wlr_backend_finish(wlr_backend);
 
-	wl_list_remove(&backend->display_destroy.link);
 	wl_list_remove(&backend->session_destroy.link);
 	wl_list_remove(&backend->session_signal.link);
 
@@ -184,14 +181,7 @@ static void handle_session_destroy(struct wl_listener *listener, void *data) {
 	backend_destroy(&backend->backend);
 }
 
-static void handle_display_destroy(struct wl_listener *listener, void *data) {
-	struct wlr_libinput_backend *backend =
-		wl_container_of(listener, backend, display_destroy);
-	backend_destroy(&backend->backend);
-}
-
-struct wlr_backend *wlr_libinput_backend_create(struct wl_display *display,
-		struct wlr_session *session) {
+struct wlr_backend *wlr_libinput_backend_create(struct wlr_session *session) {
 	struct wlr_libinput_backend *backend = calloc(1, sizeof(*backend));
 	if (!backend) {
 		wlr_log(WLR_ERROR, "Allocation failed: %s", strerror(errno));
@@ -202,16 +192,12 @@ struct wlr_backend *wlr_libinput_backend_create(struct wl_display *display,
 	wl_list_init(&backend->devices);
 
 	backend->session = session;
-	backend->display = display;
 
 	backend->session_signal.notify = session_signal;
 	wl_signal_add(&session->events.active, &backend->session_signal);
 
 	backend->session_destroy.notify = handle_session_destroy;
 	wl_signal_add(&session->events.destroy, &backend->session_destroy);
-
-	backend->display_destroy.notify = handle_display_destroy;
-	wl_display_add_destroy_listener(display, &backend->display_destroy);
 
 	return &backend->backend;
 }
@@ -232,16 +218,28 @@ struct libinput_device *wlr_libinput_get_device_handle(
 	case WLR_INPUT_DEVICE_TOUCH:
 		dev = device_from_touch(wlr_touch_from_input_device(wlr_dev));
 		break;
-	case WLR_INPUT_DEVICE_TABLET_TOOL:
+	case WLR_INPUT_DEVICE_TABLET:
 		dev = device_from_tablet(wlr_tablet_from_input_device(wlr_dev));
 		break;
 	case WLR_INPUT_DEVICE_TABLET_PAD:
 		dev = device_from_tablet_pad(wlr_tablet_pad_from_input_device(wlr_dev));
 		break;
 	}
+
+	assert(dev);
 	return dev->handle;
 }
 
 uint32_t usec_to_msec(uint64_t usec) {
 	return (uint32_t)(usec / 1000);
+}
+
+const char *get_libinput_device_name(struct libinput_device *device) {
+	// libinput guarantees that the name is non-NULL, and an empty string if
+	// unset. However wlroots uses NULL to indicate that the name is unset.
+	const char *name = libinput_device_get_name(device);
+	if (name[0] == '\0') {
+		return NULL;
+	}
+	return name;
 }

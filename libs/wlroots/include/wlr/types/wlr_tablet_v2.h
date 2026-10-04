@@ -10,9 +10,8 @@
 #define WLR_TYPES_WLR_TABLET_V2_H
 
 #include <wayland-server-core.h>
+#include <wayland-protocols/tablet-v2-enum.h>
 #include <wlr/types/wlr_seat.h>
-
-#include "tablet-unstable-v2-protocol.h"
 
 /* This can probably be even lower,the tools don't have a lot of buttons */
 #define WLR_TABLET_V2_TOOL_BUTTONS_CAP 16
@@ -44,13 +43,15 @@ struct wlr_tablet_manager_v2 {
 	struct wl_list clients; // wlr_tablet_manager_client_v2.link
 	struct wl_list seats; // wlr_tablet_seat_v2.link
 
-	struct wl_listener display_destroy;
-
 	struct {
 		struct wl_signal destroy;
 	} events;
 
 	void *data;
+
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_tablet_v2_tablet {
@@ -59,9 +60,11 @@ struct wlr_tablet_v2_tablet {
 	struct wlr_input_device *wlr_device;
 	struct wl_list clients; // wlr_tablet_client_v2.tablet_link
 
-	struct wl_listener tool_destroy;
-
 	struct wlr_tablet_client_v2 *current_client;
+
+	struct {
+		struct wl_listener tablet_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_tablet_v2_tablet_tool {
@@ -69,11 +72,8 @@ struct wlr_tablet_v2_tablet_tool {
 	struct wlr_tablet_tool *wlr_tool;
 	struct wl_list clients; // wlr_tablet_tool_client_v2.tool_link
 
-	struct wl_listener tool_destroy;
-
 	struct wlr_tablet_tool_client_v2 *current_client;
 	struct wlr_surface *focused_surface;
-	struct wl_listener surface_destroy;
 
 	struct wlr_tablet_tool_v2_grab *grab;
 	struct wlr_tablet_tool_v2_grab default_grab;
@@ -88,6 +88,11 @@ struct wlr_tablet_v2_tablet_tool {
 	struct {
 		struct wl_signal set_cursor; // struct wlr_tablet_v2_event_cursor
 	} events;
+
+	struct {
+		struct wl_listener surface_destroy;
+		struct wl_listener tool_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_tablet_v2_tablet_pad {
@@ -99,8 +104,6 @@ struct wlr_tablet_v2_tablet_pad {
 	size_t group_count;
 	uint32_t *groups;
 
-	struct wl_listener pad_destroy;
-
 	struct wlr_tablet_pad_client_v2 *current_client;
 	struct wlr_tablet_pad_v2_grab *grab;
 	struct wlr_tablet_pad_v2_grab default_grab;
@@ -110,6 +113,10 @@ struct wlr_tablet_v2_tablet_pad {
 		struct wl_signal strip_feedback; // struct wlr_tablet_v2_event_feedback
 		struct wl_signal ring_feedback; // struct wlr_tablet_v2_event_feedback
 	} events;
+
+	struct {
+		struct wl_listener pad_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_tablet_v2_event_cursor {
@@ -327,6 +334,6 @@ struct wlr_tablet_pad_v2_grab_interface {
 void wlr_tablet_v2_end_grab(struct wlr_tablet_v2_tablet_pad *pad);
 void wlr_tablet_v2_start_grab(struct wlr_tablet_v2_tablet_pad *pad, struct wlr_tablet_pad_v2_grab *grab);
 
-bool wlr_surface_accepts_tablet_v2(struct wlr_tablet_v2_tablet *tablet,
-	struct wlr_surface *surface);
+bool wlr_surface_accepts_tablet_v2(struct wlr_surface *surface,
+		struct wlr_tablet_v2_tablet *tablet);
 #endif /* WLR_TYPES_WLR_TABLET_V2_H */

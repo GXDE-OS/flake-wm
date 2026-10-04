@@ -11,16 +11,15 @@
 
 #include <stdint.h>
 #include <wayland-server-core.h>
-#include <wayland-server-protocol.h>
+#include <wayland-protocols/tearing-control-v1-enum.h>
 #include <wlr/types/wlr_compositor.h>
 
-#include "tearing-control-v1-protocol.h"
-
 struct wlr_tearing_control_v1 {
-	uint32_t hint;
 	struct wl_client *client;
 	struct wl_list link;
 	struct wl_resource *resource;
+
+	enum wp_tearing_control_v1_presentation_hint current, pending;
 
 	struct {
 		struct wl_signal set_hint;
@@ -29,7 +28,13 @@ struct wlr_tearing_control_v1 {
 
 	struct wlr_surface *surface;
 
-	struct wlr_addon addon;
+	struct {
+		enum wp_tearing_control_v1_presentation_hint previous;
+		struct wlr_addon addon;
+		struct wlr_surface_synced synced;
+
+		struct wl_listener surface_commit;
+	} WLR_PRIVATE;
 };
 
 struct wlr_tearing_control_manager_v1 {
@@ -37,13 +42,16 @@ struct wlr_tearing_control_manager_v1 {
 
 	struct wl_list surface_hints;  // wlr_tearing_control_v1.link
 
-	struct wl_listener display_destroy;
 	struct {
 		struct wl_signal new_object;  // struct wlr_tearing_control_v1*
 		struct wl_signal destroy;
 	} events;
 
 	void *data;
+
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_tearing_control_manager_v1 *wlr_tearing_control_manager_v1_create(

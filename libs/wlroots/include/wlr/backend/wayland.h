@@ -1,7 +1,8 @@
 #ifndef WLR_BACKEND_WAYLAND_H
 #define WLR_BACKEND_WAYLAND_H
+
 #include <stdbool.h>
-#include <wayland-client.h>
+#include <wayland-client-protocol.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/types/wlr_output.h>
@@ -15,7 +16,7 @@ struct wlr_input_device;
  * The remote_display argument is an existing libwayland-client struct wl_display
  * to use. Leave it NULL to create a new connection to the compositor.
  */
-struct wlr_backend *wlr_wl_backend_create(struct wl_display *display,
+struct wlr_backend *wlr_wl_backend_create(struct wl_event_loop *loop,
 		struct wl_display *remote_display);
 
 /**
@@ -61,6 +62,11 @@ bool wlr_output_is_wl(struct wlr_output *output);
  * Sets the title of a struct wlr_output which is a Wayland toplevel.
  */
 void wlr_wl_output_set_title(struct wlr_output *output, const char *title);
+
+/**
+ * Sets the app_id of a struct wlr_output which is a Wayland toplevel.
+ */
+void wlr_wl_output_set_app_id(struct wlr_output *output, const char *app_id);
 
 /**
  * Returns the remote struct wl_surface used by the Wayland output.

@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <drm_fourcc.h>
 #include <limits.h>
@@ -8,6 +7,7 @@
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_input_device.h>
+#include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_pointer.h>
@@ -17,7 +17,6 @@
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
-#include "types/wlr_buffer.h"
 #include "types/wlr_output.h"
 
 struct wlr_cursor_device {
@@ -185,7 +184,8 @@ static void cursor_detach_output_layout(struct wlr_cursor *cur) {
 
 static void cursor_device_destroy(struct wlr_cursor_device *c_device) {
 	struct wlr_input_device *dev = c_device->device;
-	if (dev->type == WLR_INPUT_DEVICE_POINTER) {
+	switch (dev->type) {
+	case WLR_INPUT_DEVICE_POINTER:
 		wl_list_remove(&c_device->motion.link);
 		wl_list_remove(&c_device->motion_absolute.link);
 		wl_list_remove(&c_device->button.link);
@@ -199,17 +199,22 @@ static void cursor_device_destroy(struct wlr_cursor_device *c_device) {
 		wl_list_remove(&c_device->pinch_end.link);
 		wl_list_remove(&c_device->hold_begin.link);
 		wl_list_remove(&c_device->hold_end.link);
-	} else if (dev->type == WLR_INPUT_DEVICE_TOUCH) {
+		break;
+	case WLR_INPUT_DEVICE_TOUCH:
 		wl_list_remove(&c_device->touch_down.link);
 		wl_list_remove(&c_device->touch_up.link);
 		wl_list_remove(&c_device->touch_motion.link);
 		wl_list_remove(&c_device->touch_cancel.link);
 		wl_list_remove(&c_device->touch_frame.link);
-	} else if (dev->type == WLR_INPUT_DEVICE_TABLET_TOOL) {
+		break;
+	case WLR_INPUT_DEVICE_TABLET:
 		wl_list_remove(&c_device->tablet_tool_axis.link);
 		wl_list_remove(&c_device->tablet_tool_proximity.link);
 		wl_list_remove(&c_device->tablet_tool_tip.link);
 		wl_list_remove(&c_device->tablet_tool_button.link);
+		break;
+	default:
+		abort(); // unreachable
 	}
 
 	wl_list_remove(&c_device->link);
@@ -241,6 +246,34 @@ static void cursor_reset_image(struct wlr_cursor *cur) {
 }
 
 void wlr_cursor_destroy(struct wlr_cursor *cur) {
+	// pointer signals
+	assert(wl_list_empty(&cur->events.motion.listener_list));
+	assert(wl_list_empty(&cur->events.motion_absolute.listener_list));
+	assert(wl_list_empty(&cur->events.button.listener_list));
+	assert(wl_list_empty(&cur->events.axis.listener_list));
+	assert(wl_list_empty(&cur->events.frame.listener_list));
+	assert(wl_list_empty(&cur->events.swipe_begin.listener_list));
+	assert(wl_list_empty(&cur->events.swipe_update.listener_list));
+	assert(wl_list_empty(&cur->events.swipe_end.listener_list));
+	assert(wl_list_empty(&cur->events.pinch_begin.listener_list));
+	assert(wl_list_empty(&cur->events.pinch_update.listener_list));
+	assert(wl_list_empty(&cur->events.pinch_end.listener_list));
+	assert(wl_list_empty(&cur->events.hold_begin.listener_list));
+	assert(wl_list_empty(&cur->events.hold_end.listener_list));
+
+	// touch signals
+	assert(wl_list_empty(&cur->events.touch_up.listener_list));
+	assert(wl_list_empty(&cur->events.touch_down.listener_list));
+	assert(wl_list_empty(&cur->events.touch_motion.listener_list));
+	assert(wl_list_empty(&cur->events.touch_cancel.listener_list));
+	assert(wl_list_empty(&cur->events.touch_frame.listener_list));
+
+	// tablet tool signals
+	assert(wl_list_empty(&cur->events.tablet_tool_tip.listener_list));
+	assert(wl_list_empty(&cur->events.tablet_tool_axis.listener_list));
+	assert(wl_list_empty(&cur->events.tablet_tool_button.listener_list));
+	assert(wl_list_empty(&cur->events.tablet_tool_proximity.listener_list));
+
 	cursor_reset_image(cur);
 	cursor_detach_output_layout(cur);
 
@@ -465,13 +498,8 @@ static int handle_xcursor_timer(void *data) {
 static void output_cursor_set_xcursor_image(struct wlr_cursor_output_cursor *output_cursor, size_t i) {
 	struct wlr_xcursor_image *image = output_cursor->xcursor->images[i];
 
-	struct wlr_readonly_data_buffer *ro_buffer = readonly_data_buffer_create(
-		DRM_FORMAT_ARGB8888, 4 * image->width, image->width, image->height, image->buffer);
-	if (ro_buffer == NULL) {
-		return;
-	}
-	wlr_output_cursor_set_buffer(output_cursor->output_cursor, &ro_buffer->base, image->hotspot_x, image->hotspot_y);
-	wlr_buffer_drop(&ro_buffer->base);
+	struct wlr_buffer *buffer = wlr_xcursor_image_get_buffer(image);
+	wlr_output_cursor_set_buffer(output_cursor->output_cursor, buffer, image->hotspot_x, image->hotspot_y);
 
 	output_cursor->xcursor_index = i;
 
@@ -480,8 +508,7 @@ static void output_cursor_set_xcursor_image(struct wlr_cursor_output_cursor *out
 	}
 
 	if (output_cursor->xcursor_timer == NULL) {
-		struct wl_event_loop *event_loop =
-			wl_display_get_event_loop(output_cursor->output_cursor->output->display);
+		struct wl_event_loop *event_loop = output_cursor->output_cursor->output->event_loop;
 		output_cursor->xcursor_timer =
 			wl_event_loop_add_timer(event_loop, handle_xcursor_timer, output_cursor);
 		if (output_cursor->xcursor_timer == NULL) {
@@ -496,10 +523,6 @@ static void output_cursor_set_xcursor_image(struct wlr_cursor_output_cursor *out
 static void cursor_output_cursor_update(struct wlr_cursor_output_cursor *output_cursor) {
 	struct wlr_cursor *cur = output_cursor->cursor;
 	struct wlr_output *output = output_cursor->output_cursor->output;
-
-	if (!output->enabled) {
-		return;
-	}
 
 	cursor_output_cursor_reset_image(output_cursor);
 
@@ -530,7 +553,7 @@ static void cursor_output_cursor_update(struct wlr_cursor_output_cursor *output_
 
 		output_cursor_set_texture(output_cursor->output_cursor, texture, true,
 			&src_box, dst_width, dst_height, WL_OUTPUT_TRANSFORM_NORMAL,
-			hotspot_x, hotspot_y);
+			hotspot_x, hotspot_y, NULL, 0);
 	} else if (cur->state->surface != NULL) {
 		struct wlr_surface *surface = cur->state->surface;
 
@@ -543,9 +566,25 @@ static void cursor_output_cursor_update(struct wlr_cursor_output_cursor *output_
 		int dst_width = surface->current.width;
 		int dst_height = surface->current.height;
 
+		struct wlr_linux_drm_syncobj_surface_v1_state *syncobj_surface_state =
+			wlr_linux_drm_syncobj_v1_get_surface_state(surface);
+		struct wlr_drm_syncobj_timeline *wait_timeline = NULL;
+		uint64_t wait_point = 0;
+		if (syncobj_surface_state != NULL) {
+			wait_timeline = syncobj_surface_state->acquire_timeline;
+			wait_point = syncobj_surface_state->acquire_point;
+		}
+
 		output_cursor_set_texture(output_cursor->output_cursor, texture, false,
 			&src_box, dst_width, dst_height, surface->current.transform,
-			hotspot_x, hotspot_y);
+			hotspot_x, hotspot_y, wait_timeline, wait_point);
+
+		if (syncobj_surface_state != NULL &&
+				surface->buffer != NULL && surface->buffer->source != NULL &&
+				(surface->current.committed & WLR_SURFACE_STATE_BUFFER)) {
+			wlr_linux_drm_syncobj_v1_state_signal_release_with_buffer(syncobj_surface_state,
+				surface->buffer->source);
+		}
 
 		if (output_cursor->output_cursor->visible) {
 			wlr_surface_send_enter(surface, output);
@@ -570,9 +609,15 @@ static void cursor_output_cursor_update(struct wlr_cursor_output_cursor *output_
 		wlr_xcursor_manager_load(manager, scale);
 		struct wlr_xcursor *xcursor = wlr_xcursor_manager_get_xcursor(manager, name, scale);
 		if (xcursor == NULL) {
-			wlr_log(WLR_DEBUG, "XCursor theme is missing '%s' cursor", name);
-			wlr_output_cursor_set_buffer(output_cursor->output_cursor, NULL, 0, 0);
-			return;
+			/* Try the default cursor: better the wrong image than an invisible
+			 * (and therefore practically unusable) cursor */
+			wlr_log(WLR_DEBUG, "XCursor theme is missing '%s' cursor, falling back to 'default'", name);
+			xcursor = wlr_xcursor_manager_get_xcursor(manager, "default", scale);
+			if (xcursor == NULL) {
+				wlr_log(WLR_DEBUG, "XCursor theme is missing a 'default' cursor");
+				wlr_output_cursor_set_buffer(output_cursor->output_cursor, NULL, 0, 0);
+				return;
+			}
 		}
 
 		output_cursor->xcursor = xcursor;
@@ -589,14 +634,14 @@ static void output_cursor_output_handle_output_commit(
 	const struct wlr_output_event_commit *event = data;
 
 	if (event->state->committed & (WLR_OUTPUT_STATE_SCALE | WLR_OUTPUT_STATE_TRANSFORM
-				| WLR_OUTPUT_STATE_ENABLED)) {
+			| WLR_OUTPUT_STATE_ENABLED | WLR_OUTPUT_STATE_IMAGE_DESCRIPTION)) {
 		cursor_output_cursor_update(output_cursor);
 	}
 
 	struct wlr_surface *surface = output_cursor->cursor->state->surface;
 	if (surface && output_cursor->output_cursor->visible &&
 			(event->state->committed & WLR_OUTPUT_STATE_BUFFER)) {
-		wlr_surface_send_frame_done(surface, event->when);
+		wlr_surface_send_frame_done(surface, &event->when);
 	}
 }
 
@@ -911,7 +956,7 @@ static void handle_tablet_tool_axis(struct wl_listener *listener, void *data) {
 
 static void handle_tablet_tool_button(struct wl_listener *listener,
 		void *data) {
-	struct wlr_tablet_tool_button *event = data;
+	struct wlr_tablet_tool_button_event *event = data;
 	struct wlr_cursor_device *device;
 	device = wl_container_of(listener, device, tablet_tool_button);
 	wl_signal_emit_mutable(&device->cursor->events.tablet_tool_button, event);
@@ -952,7 +997,8 @@ static struct wlr_cursor_device *cursor_device_create(
 	wl_signal_add(&device->events.destroy, &c_device->destroy);
 	c_device->destroy.notify = handle_device_destroy;
 
-	if (device->type == WLR_INPUT_DEVICE_POINTER) {
+	switch (device->type) {
+	case WLR_INPUT_DEVICE_POINTER:;
 		struct wlr_pointer *pointer = wlr_pointer_from_input_device(device);
 
 		wl_signal_add(&pointer->events.motion, &c_device->motion);
@@ -994,7 +1040,9 @@ static struct wlr_cursor_device *cursor_device_create(
 
 		wl_signal_add(&pointer->events.hold_end, &c_device->hold_end);
 		c_device->hold_end.notify = handle_pointer_hold_end;
-	} else if (device->type == WLR_INPUT_DEVICE_TOUCH) {
+
+		break;
+	case WLR_INPUT_DEVICE_TOUCH:;
 		struct wlr_touch *touch = wlr_touch_from_input_device(device);
 
 		wl_signal_add(&touch->events.motion, &c_device->touch_motion);
@@ -1011,7 +1059,9 @@ static struct wlr_cursor_device *cursor_device_create(
 
 		wl_signal_add(&touch->events.frame, &c_device->touch_frame);
 		c_device->touch_frame.notify = handle_touch_frame;
-	} else if (device->type == WLR_INPUT_DEVICE_TABLET_TOOL) {
+
+		break;
+	case WLR_INPUT_DEVICE_TABLET:;
 		struct wlr_tablet *tablet = wlr_tablet_from_input_device(device);
 
 		wl_signal_add(&tablet->events.tip, &c_device->tablet_tool_tip);
@@ -1026,6 +1076,11 @@ static struct wlr_cursor_device *cursor_device_create(
 
 		wl_signal_add(&tablet->events.button, &c_device->tablet_tool_button);
 		c_device->tablet_tool_button.notify = handle_tablet_tool_button;
+
+		break;
+
+	default:
+		abort(); // unreachable
 	}
 
 	wl_list_insert(&cursor->state->devices, &c_device->link);
@@ -1035,9 +1090,12 @@ static struct wlr_cursor_device *cursor_device_create(
 
 void wlr_cursor_attach_input_device(struct wlr_cursor *cur,
 		struct wlr_input_device *dev) {
-	if (dev->type != WLR_INPUT_DEVICE_POINTER &&
-			dev->type != WLR_INPUT_DEVICE_TOUCH &&
-			dev->type != WLR_INPUT_DEVICE_TABLET_TOOL) {
+	switch (dev->type) {
+	case WLR_INPUT_DEVICE_POINTER:
+	case WLR_INPUT_DEVICE_TOUCH:
+	case WLR_INPUT_DEVICE_TABLET:
+		break;
+	default:
 		wlr_log(WLR_ERROR, "only device types of pointer, touch or tablet tool"
 				"are supported");
 		return;
@@ -1074,7 +1132,6 @@ static void handle_layout_output_destroy(struct wl_listener *listener,
 		void *data) {
 	struct wlr_cursor_output_cursor *output_cursor =
 		wl_container_of(listener, output_cursor, layout_output_destroy);
-	//struct wlr_output_layout_output *l_output = data;
 	output_cursor_destroy(output_cursor);
 }
 

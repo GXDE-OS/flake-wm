@@ -10,7 +10,7 @@
 #define WLR_TYPES_WLR_CONTENT_TYPE_V1_H
 
 #include <wayland-server-core.h>
-#include "content-type-v1-protocol.h"
+#include <wayland-protocols/content-type-v1-enum.h>
 
 struct wlr_surface;
 
@@ -23,9 +23,9 @@ struct wlr_content_type_manager_v1 {
 
 	void *data;
 
-	// private state
-
-	struct wl_listener display_destroy;
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_content_type_manager_v1 *wlr_content_type_manager_v1_create(

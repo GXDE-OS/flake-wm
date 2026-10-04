@@ -28,6 +28,7 @@ struct wlr_xdg_popup_configure *send_xdg_popup_configure(
 	}
 
 	struct wlr_box *geometry = &configure->geometry;
+	assert(geometry->width > 0 && geometry->height > 0);
 	xdg_popup_send_configure(popup->resource,
 		geometry->x, geometry->y,
 		geometry->width, geometry->height);
@@ -80,10 +81,11 @@ static uint32_t xdg_pointer_grab_button(struct wlr_seat_pointer_grab *grab,
 }
 
 static void xdg_pointer_grab_axis(struct wlr_seat_pointer_grab *grab,
-		uint32_t time, enum wlr_axis_orientation orientation, double value,
-		int32_t value_discrete, enum wlr_axis_source source) {
+		uint32_t time, enum wl_pointer_axis orientation, double value,
+		int32_t value_discrete, enum wl_pointer_axis_source source,
+		enum wl_pointer_axis_relative_direction relative_direction) {
 	wlr_seat_pointer_send_axis(grab->seat, time, orientation, value,
-		value_discrete, source);
+		value_discrete, source, relative_direction);
 }
 
 static void xdg_pointer_grab_frame(struct wlr_seat_pointer_grab *grab) {
@@ -149,9 +151,9 @@ static uint32_t xdg_touch_grab_down(struct wlr_seat_touch_grab *grab,
 			point->touch_id, point->sx, point->sy);
 }
 
-static void xdg_touch_grab_up(struct wlr_seat_touch_grab *grab,
+static uint32_t xdg_touch_grab_up(struct wlr_seat_touch_grab *grab,
 		uint32_t time, struct wlr_touch_point *point) {
-	wlr_seat_touch_send_up(grab->seat, time, point->touch_id);
+	return wlr_seat_touch_send_up(grab->seat, time, point->touch_id);
 }
 
 static void xdg_touch_grab_motion(struct wlr_seat_touch_grab *grab,
@@ -172,13 +174,19 @@ static void xdg_touch_grab_cancel(struct wlr_seat_touch_grab *grab) {
 	wlr_seat_touch_end_grab(grab->seat);
 }
 
+static void xdg_touch_grab_clear_focus(struct wlr_seat_touch_grab *grab, uint32_t time_msec,
+		struct wlr_touch_point *point) {
+	wlr_seat_touch_point_clear_focus(grab->seat, time_msec, point->touch_id);
+}
+
 static const struct wlr_touch_grab_interface xdg_touch_grab_impl = {
 	.down = xdg_touch_grab_down,
 	.up = xdg_touch_grab_up,
 	.motion = xdg_touch_grab_motion,
 	.enter = xdg_touch_grab_enter,
 	.frame = xdg_touch_grab_frame,
-	.cancel = xdg_touch_grab_cancel
+	.cancel = xdg_touch_grab_cancel,
+	.clear_focus = xdg_touch_grab_clear_focus,
 };
 
 static void destroy_xdg_popup_grab(struct wlr_xdg_popup_grab *xdg_grab) {
@@ -236,19 +244,11 @@ static struct wlr_xdg_popup_grab *get_xdg_shell_popup_grab_from_seat(
 	return xdg_grab;
 }
 
-void handle_xdg_popup_committed(struct wlr_xdg_popup *popup) {
+void handle_xdg_popup_client_commit(struct wlr_xdg_popup *popup) {
 	if (!popup->parent) {
-		wl_resource_post_error(popup->base->resource,
-			XDG_SURFACE_ERROR_NOT_CONSTRUCTED,
-			"xdg_popup has no parent");
+		wlr_surface_reject_pending(popup->base->surface, popup->base->resource,
+			XDG_SURFACE_ERROR_NOT_CONSTRUCTED, "xdg_popup has no parent");
 		return;
-	}
-
-	popup->current = popup->pending;
-
-	if (popup->base->initial_commit && !popup->sent_initial_configure) {
-		wlr_xdg_surface_schedule_configure(popup->base);
-		popup->sent_initial_configure = true;
 	}
 }
 
@@ -284,7 +284,7 @@ static void xdg_popup_handle_grab(struct wl_client *client,
 		wlr_xdg_popup_destroy(popup);
 		return;
 	}
-	if (popup->sent_initial_configure) {
+	if (popup->base->surface->mapped) {
 		wl_resource_post_error(popup->resource,
 			XDG_POPUP_ERROR_INVALID_GRAB,
 			"xdg_popup is already mapped");
@@ -363,14 +363,9 @@ static const struct xdg_popup_interface xdg_popup_implementation = {
 	.reposition = xdg_popup_handle_reposition,
 };
 
-static void xdg_popup_handle_resource_destroy(struct wl_resource *resource) {
-	struct wlr_xdg_popup *popup =
-		wlr_xdg_popup_from_resource(resource);
-	if (popup == NULL) {
-		return;
-	}
-	wlr_xdg_popup_destroy(popup);
-}
+static const struct wlr_surface_synced_impl surface_synced_impl = {
+	.state_size = sizeof(struct wlr_xdg_popup_state),
+};
 
 void create_xdg_popup(struct wlr_xdg_surface *surface, struct wlr_xdg_surface *parent,
 		struct wlr_xdg_positioner *positioner, uint32_t id) {
@@ -398,18 +393,20 @@ void create_xdg_popup(struct wlr_xdg_surface *surface, struct wlr_xdg_surface *p
 	}
 	surface->popup->base = surface;
 
+	if (!wlr_surface_synced_init(&surface->popup->synced, surface->surface,
+			&surface_synced_impl, &surface->popup->pending,
+			&surface->popup->current)) {
+		goto error_popup;
+	}
+
 	surface->popup->resource = wl_resource_create(
 		surface->client->client, &xdg_popup_interface,
 		wl_resource_get_version(surface->resource), id);
 	if (surface->popup->resource == NULL) {
-		free(surface->popup);
-		surface->popup = NULL;
-		wl_resource_post_no_memory(surface->resource);
-		return;
+		goto error_synced;
 	}
 	wl_resource_set_implementation(surface->popup->resource,
-		&xdg_popup_implementation, surface->popup,
-		xdg_popup_handle_resource_destroy);
+		&xdg_popup_implementation, surface->popup, NULL);
 
 	surface->role = WLR_XDG_SURFACE_ROLE_POPUP;
 
@@ -417,6 +414,7 @@ void create_xdg_popup(struct wlr_xdg_surface *surface, struct wlr_xdg_surface *p
 		&positioner->rules, &surface->popup->scheduled.geometry);
 	surface->popup->scheduled.rules = positioner->rules;
 
+	wl_signal_init(&surface->popup->events.destroy);
 	wl_signal_init(&surface->popup->events.reposition);
 
 	if (parent) {
@@ -428,9 +426,19 @@ void create_xdg_popup(struct wlr_xdg_surface *surface, struct wlr_xdg_surface *p
 
 	set_xdg_surface_role_object(surface, surface->popup->resource);
 
+	wl_signal_emit_mutable(&surface->client->shell->events.new_popup, surface->popup);
 	if (parent) {
 		wl_signal_emit_mutable(&parent->events.new_popup, surface->popup);
 	}
+
+	return;
+
+error_synced:
+	wlr_surface_synced_finish(&surface->popup->synced);
+error_popup:
+	free(surface->popup);
+	surface->popup = NULL;
+	wl_resource_post_no_memory(surface->resource);
 }
 
 void reset_xdg_popup(struct wlr_xdg_popup *popup) {
@@ -457,22 +465,19 @@ void reset_xdg_popup(struct wlr_xdg_popup *popup) {
 
 		popup->seat = NULL;
 	}
-
-	popup->sent_initial_configure = false;
 }
 
 void destroy_xdg_popup(struct wlr_xdg_popup *popup) {
 	wlr_surface_unmap(popup->base->surface);
 	reset_xdg_popup(popup);
 
-	// TODO: improve events
-	if (popup->base->added) {
-		wl_signal_emit_mutable(&popup->base->events.destroy, NULL);
-		popup->base->added = false;
-	}
+	wl_signal_emit_mutable(&popup->events.destroy, NULL);
 
+	assert(wl_list_empty(&popup->events.destroy.listener_list));
+	assert(wl_list_empty(&popup->events.reposition.listener_list));
+
+	wlr_surface_synced_finish(&popup->synced);
 	popup->base->popup = NULL;
-
 	wl_list_remove(&popup->link);
 	wl_resource_set_user_data(popup->resource, NULL);
 	free(popup);
@@ -502,8 +507,8 @@ void wlr_xdg_popup_get_toplevel_coords(struct wlr_xdg_popup *popup,
 			popup_sy += xdg_surface->popup->current.geometry.y;
 			parent = xdg_surface->popup->parent;
 		} else {
-			popup_sx += xdg_surface->current.geometry.x;
-			popup_sy += xdg_surface->current.geometry.y;
+			popup_sx += xdg_surface->geometry.x;
+			popup_sy += xdg_surface->geometry.y;
 			break;
 		}
 	}

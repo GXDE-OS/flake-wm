@@ -1,11 +1,13 @@
-#define _POSIX_C_SOURCE 199309L
 #include <stdlib.h>
 #include <assert.h>
 #include <pixman.h>
 #include <time.h>
-#include <wlr/types/wlr_matrix.h>
+#include <unistd.h>
+#include <wlr/render/drm_syncobj.h>
+#include <wlr/util/transform.h>
+#include "render/egl.h"
 #include "render/gles2.h"
-#include "types/wlr_matrix.h"
+#include "util/matrix.h"
 
 #define MAX_QUADS 86 // 4kb
 
@@ -21,6 +23,7 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 	struct wlr_gles2_render_pass *pass = get_render_pass(wlr_pass);
 	struct wlr_gles2_renderer *renderer = pass->buffer->renderer;
 	struct wlr_gles2_render_timer *timer = pass->timer;
+	bool ok = false;
 
 	push_gles2_debug(renderer);
 
@@ -36,15 +39,40 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 		clock_gettime(CLOCK_MONOTONIC, &timer->cpu_end);
 	}
 
-	glFlush();
+	if (pass->signal_timeline != NULL) {
+		EGLSyncKHR sync = wlr_egl_create_sync(renderer->egl, -1);
+		if (sync == EGL_NO_SYNC_KHR) {
+			goto out;
+		}
+
+		int sync_file_fd = wlr_egl_dup_fence_fd(renderer->egl, sync);
+		wlr_egl_destroy_sync(renderer->egl, sync);
+		if (sync_file_fd < 0) {
+			goto out;
+		}
+
+		ok = wlr_drm_syncobj_timeline_import_sync_file(pass->signal_timeline, pass->signal_point, sync_file_fd);
+		close(sync_file_fd);
+		if (!ok) {
+			goto out;
+		}
+	} else {
+		glFlush();
+	}
+
+	ok = true;
+
+out:
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	pop_gles2_debug(renderer);
+	wlr_egl_restore_context(&pass->prev_ctx);
 
+	wlr_drm_syncobj_timeline_unref(pass->signal_timeline);
 	wlr_buffer_unlock(pass->buffer->buffer);
 	free(pass);
 
-	return true;
+	return ok;
 }
 
 static void render(const struct wlr_box *box, const pixman_region32_t *clip, GLint attrib) {
@@ -174,6 +202,27 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
 	src_fbox.height /= options->texture->height;
 
 	push_gles2_debug(renderer);
+
+	if (options->wait_timeline != NULL) {
+		int sync_file_fd =
+			wlr_drm_syncobj_timeline_export_sync_file(options->wait_timeline, options->wait_point);
+		if (sync_file_fd < 0) {
+			return;
+		}
+
+		EGLSyncKHR sync = wlr_egl_create_sync(renderer->egl, sync_file_fd);
+		close(sync_file_fd);
+		if (sync == EGL_NO_SYNC_KHR) {
+			return;
+		}
+
+		bool ok = wlr_egl_wait_sync(renderer->egl, sync);
+		wlr_egl_destroy_sync(renderer->egl, sync);
+		if (!ok) {
+			return;
+		}
+	}
+
 	setup_blending(!texture->has_alpha && alpha == 1.0 ?
 		WLR_RENDER_BLEND_MODE_NONE : options->blend_mode);
 
@@ -211,17 +260,26 @@ static void render_pass_add_rect(struct wlr_render_pass *wlr_pass,
 
 	const struct wlr_render_color *color = &options->color;
 	struct wlr_box box;
-	wlr_render_rect_options_get_box(options, pass->buffer->buffer, &box);
+	struct wlr_buffer *wlr_buffer = pass->buffer->buffer;
+	wlr_render_rect_options_get_box(options, wlr_buffer, &box);
 
 	push_gles2_debug(renderer);
-	setup_blending(color->a == 1.0 ? WLR_RENDER_BLEND_MODE_NONE : options->blend_mode);
-
-	glUseProgram(renderer->shaders.quad.program);
-
-	set_proj_matrix(renderer->shaders.quad.proj, pass->projection_matrix, &box);
-	glUniform4f(renderer->shaders.quad.color, color->r, color->g, color->b, color->a);
-
-	render(&box, options->clip, renderer->shaders.quad.pos_attrib);
+	enum wlr_render_blend_mode blend_mode =
+		color->a == 1.0 ? WLR_RENDER_BLEND_MODE_NONE : options->blend_mode;
+	if (blend_mode == WLR_RENDER_BLEND_MODE_NONE &&
+			options->clip == NULL &&
+			box.x == 0 && box.y == 0 &&
+			box.width == wlr_buffer->width &&
+			box.height == wlr_buffer->height) {
+		glClearColor(color->r, color->g, color->b, color->a);
+		glClear(GL_COLOR_BUFFER_BIT);
+	} else {
+		setup_blending(blend_mode);
+		glUseProgram(renderer->shaders.quad.program);
+		set_proj_matrix(renderer->shaders.quad.proj, pass->projection_matrix, &box);
+		glUniform4f(renderer->shaders.quad.color, color->r, color->g, color->b, color->a);
+		render(&box, options->clip, renderer->shaders.quad.pos_attrib);
+	}
 
 	pop_gles2_debug(renderer);
 }
@@ -246,7 +304,8 @@ static const char *reset_status_str(GLenum status) {
 }
 
 struct wlr_gles2_render_pass *begin_gles2_buffer_pass(struct wlr_gles2_buffer *buffer,
-		struct wlr_gles2_render_timer *timer) {
+		struct wlr_egl_context *prev_ctx, struct wlr_gles2_render_timer *timer,
+		struct wlr_drm_syncobj_timeline *signal_timeline, uint64_t signal_point) {
 	struct wlr_gles2_renderer *renderer = buffer->renderer;
 	struct wlr_buffer *wlr_buffer = buffer->buffer;
 
@@ -259,6 +318,11 @@ struct wlr_gles2_render_pass *begin_gles2_buffer_pass(struct wlr_gles2_buffer *b
 		}
 	}
 
+	GLint fbo = gles2_buffer_get_fbo(buffer);
+	if (!fbo) {
+		return NULL;
+	}
+
 	struct wlr_gles2_render_pass *pass = calloc(1, sizeof(*pass));
 	if (pass == NULL) {
 		return NULL;
@@ -268,12 +332,17 @@ struct wlr_gles2_render_pass *begin_gles2_buffer_pass(struct wlr_gles2_buffer *b
 	wlr_buffer_lock(wlr_buffer);
 	pass->buffer = buffer;
 	pass->timer = timer;
+	pass->prev_ctx = *prev_ctx;
+	if (signal_timeline != NULL) {
+		pass->signal_timeline = wlr_drm_syncobj_timeline_ref(signal_timeline);
+		pass->signal_point = signal_point;
+	}
 
 	matrix_projection(pass->projection_matrix, wlr_buffer->width, wlr_buffer->height,
 		WL_OUTPUT_TRANSFORM_FLIPPED_180);
 
 	push_gles2_debug(renderer);
-	glBindFramebuffer(GL_FRAMEBUFFER, buffer->fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
 	glViewport(0, 0, wlr_buffer->width, wlr_buffer->height);
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);

@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <drm_fourcc.h>
 #include <stdlib.h>
@@ -35,11 +34,14 @@ static struct wlr_drm_buffer *drm_buffer_from_buffer(
 
 static void buffer_destroy(struct wlr_buffer *wlr_buffer) {
 	struct wlr_drm_buffer *buffer = drm_buffer_from_buffer(wlr_buffer);
+	wl_list_remove(&buffer->release.link);
+
+	wlr_buffer_finish(wlr_buffer);
+
 	if (buffer->resource != NULL) {
 		wl_resource_set_user_data(buffer->resource, NULL);
 	}
 	wlr_dmabuf_attributes_finish(&buffer->dmabuf);
-	wl_list_remove(&buffer->release.link);
 	free(buffer);
 }
 
@@ -187,6 +189,8 @@ static const struct wlr_buffer_resource_interface buffer_resource_interface = {
 static void drm_destroy(struct wlr_drm *drm) {
 	wl_signal_emit_mutable(&drm->events.destroy, NULL);
 
+	assert(wl_list_empty(&drm->events.destroy.listener_list));
+
 	wl_list_remove(&drm->display_destroy.link);
 
 	wlr_drm_format_set_finish(&drm->formats);
@@ -237,7 +241,8 @@ struct wlr_drm *wlr_drm_create(struct wl_display *display,
 	drm->node_name = node_name;
 	wl_signal_init(&drm->events.destroy);
 
-	const struct wlr_drm_format_set *formats = wlr_renderer_get_dmabuf_texture_formats(renderer);
+	const struct wlr_drm_format_set *formats =
+		wlr_renderer_get_texture_formats(renderer, WLR_BUFFER_CAP_DMABUF);
 	if (formats == NULL) {
 		goto error;
 	}

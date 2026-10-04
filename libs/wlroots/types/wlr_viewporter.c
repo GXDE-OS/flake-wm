@@ -3,6 +3,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/util/log.h>
+#include <wlr/util/transform.h>
 #include "viewporter-protocol.h"
 
 #define VIEWPORTER_VERSION 1
@@ -134,11 +135,7 @@ static void viewport_handle_resource_destroy(struct wl_resource *resource) {
 static bool check_src_buffer_bounds(const struct wlr_surface_state *state) {
 	int width = state->buffer_width / state->scale;
 	int height = state->buffer_height / state->scale;
-	if (state->transform & WL_OUTPUT_TRANSFORM_90) {
-		int tmp = width;
-		width = height;
-		height = tmp;
-	}
+	wlr_output_transform_coords(state->transform, &width, &height);
 
 	struct wlr_fbox box = state->viewport.src;
 	return box.x + box.width <= width && box.y + box.height <= height;
@@ -154,15 +151,17 @@ static void viewport_handle_surface_client_commit(struct wl_listener *listener,
 	if (!state->viewport.has_dst &&
 			(floor(state->viewport.src.width) != state->viewport.src.width ||
 			floor(state->viewport.src.height) != state->viewport.src.height)) {
-		wl_resource_post_error(viewport->resource, WP_VIEWPORT_ERROR_BAD_SIZE,
+		wlr_surface_reject_pending(viewport->surface,
+			viewport->resource, WP_VIEWPORT_ERROR_BAD_SIZE,
 			"wl_viewport.set_source width and height must be integers "
 			"when the destination rectangle is unset");
 		return;
 	}
 
-	if (state->viewport.has_src && state->buffer_width > 0 && state->buffer_height > 0 &&
+	if (state->viewport.has_src && wlr_surface_state_has_buffer(state) &&
 			!check_src_buffer_bounds(state)) {
-		wl_resource_post_error(viewport->resource, WP_VIEWPORT_ERROR_OUT_OF_BUFFER,
+		wlr_surface_reject_pending(viewport->surface,
+			viewport->resource, WP_VIEWPORT_ERROR_OUT_OF_BUFFER,
 			"source rectangle out of buffer bounds");
 		return;
 	}
@@ -231,6 +230,9 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_viewporter *viewporter =
 		wl_container_of(listener, viewporter, display_destroy);
 	wl_signal_emit_mutable(&viewporter->events.destroy, NULL);
+
+	assert(wl_list_empty(&viewporter->events.destroy.listener_list));
+
 	wl_global_destroy(viewporter->global);
 	free(viewporter);
 }

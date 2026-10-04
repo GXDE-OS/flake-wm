@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <wlr/backend.h>
 #include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/util/log.h>
 #include "wlr-output-management-unstable-v1-protocol.h"
@@ -254,8 +255,7 @@ static void config_head_handle_set_transform(struct wl_client *client,
 		return;
 	}
 
-	if (transform < WL_OUTPUT_TRANSFORM_NORMAL ||
-			transform > WL_OUTPUT_TRANSFORM_FLIPPED_270) {
+	if (!wl_output_transform_is_valid(transform, 1)) {
 		wl_resource_post_error(config_head_resource,
 			ZWLR_OUTPUT_CONFIGURATION_HEAD_V1_ERROR_INVALID_TRANSFORM,
 			"invalid transform");
@@ -647,6 +647,11 @@ static void manager_handle_display_destroy(struct wl_listener *listener,
 	struct wlr_output_manager_v1 *manager =
 		wl_container_of(listener, manager, display_destroy);
 	wl_signal_emit_mutable(&manager->events.destroy, manager);
+
+	assert(wl_list_empty(&manager->events.destroy.listener_list));
+	assert(wl_list_empty(&manager->events.apply.listener_list));
+	assert(wl_list_empty(&manager->events.test.listener_list));
+
 	wl_list_remove(&manager->display_destroy.link);
 	struct wlr_output_head_v1 *head, *tmp;
 	wl_list_for_each_safe(head, tmp, &manager->heads, link) {
@@ -666,6 +671,7 @@ struct wlr_output_manager_v1 *wlr_output_manager_v1_create(
 
 	wl_list_init(&manager->resources);
 	wl_list_init(&manager->heads);
+
 	wl_signal_init(&manager->events.destroy);
 	wl_signal_init(&manager->events.apply);
 	wl_signal_init(&manager->events.test);
@@ -866,7 +872,7 @@ static void manager_send_head(struct wlr_output_manager_v1 *manager,
 		head_send_mode(head, head_resource, mode);
 	}
 
-	if (output->current_mode == NULL) {
+	if (head->state.mode == NULL && head->state.enabled) {
 		// Output doesn't have a fixed mode set. Send a virtual one.
 		head_send_mode(head, head_resource, NULL);
 	}
@@ -926,7 +932,7 @@ static bool manager_update_head(struct wlr_output_manager_v1 *manager,
 		}
 	}
 
-	if (next->mode == NULL && !head_has_custom_mode_resources(head)) {
+	if (next->mode == NULL && next->enabled && !head_has_custom_mode_resources(head)) {
 		struct wl_resource *resource;
 		wl_resource_for_each(resource, &head->resources) {
 			head_send_mode(head, resource, NULL);
@@ -1026,4 +1032,26 @@ void wlr_output_head_v1_state_apply(
 	wlr_output_state_set_transform(output_state, head_state->transform);
 	wlr_output_state_set_adaptive_sync_enabled(output_state,
 		head_state->adaptive_sync_enabled);
+}
+
+struct wlr_backend_output_state *wlr_output_configuration_v1_build_state(
+		const struct wlr_output_configuration_v1 *config, size_t *states_len) {
+	*states_len = wl_list_length(&config->heads);
+	struct wlr_backend_output_state *states = calloc(*states_len, sizeof(states[0]));
+	if (states == NULL) {
+		return NULL;
+	}
+
+	size_t i = 0;
+	const struct wlr_output_configuration_head_v1 *config_head;
+	wl_list_for_each(config_head, &config->heads, link) {
+		struct wlr_backend_output_state *state = &states[i];
+		i++;
+
+		state->output = config_head->state.output;
+		wlr_output_state_init(&state->base);
+		wlr_output_head_v1_state_apply(&config_head->state, &state->base);
+	}
+
+	return states;
 }

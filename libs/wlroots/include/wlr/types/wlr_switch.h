@@ -15,13 +15,19 @@
 
 struct wlr_switch_impl;
 
+/**
+ * A switch input device. Typically a switch input device can indicate whether
+ * a laptop lid is opened or closed, or whether tablet mode is enabled.
+ *
+ * See https://wayland.freedesktop.org/libinput/doc/latest/switches.html
+ */
 struct wlr_switch {
 	struct wlr_input_device base;
 
 	const struct wlr_switch_impl *impl;
 
 	struct {
-		struct wl_signal toggle;
+		struct wl_signal toggle; // struct wlr_switch_toggle_event
 	} events;
 
 	void *data;
@@ -30,6 +36,7 @@ struct wlr_switch {
 enum wlr_switch_type {
 	WLR_SWITCH_TYPE_LID,
 	WLR_SWITCH_TYPE_TABLET_MODE,
+	WLR_SWITCH_TYPE_KEYPAD_SLIDE,
 };
 
 enum wlr_switch_state {

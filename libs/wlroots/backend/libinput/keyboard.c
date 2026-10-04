@@ -2,6 +2,7 @@
 #include <libinput.h>
 #include <stdlib.h>
 #include <wlr/interfaces/wlr_keyboard.h>
+#include <wlr/util/log.h>
 #include "backend/libinput.h"
 
 struct wlr_libinput_input_device *device_from_keyboard(
@@ -23,13 +24,23 @@ const struct wlr_keyboard_impl libinput_keyboard_impl = {
 };
 
 void init_device_keyboard(struct wlr_libinput_input_device *dev) {
-	const char *name = libinput_device_get_name(dev->handle);
+	const char *name = get_libinput_device_name(dev->handle);
 	struct wlr_keyboard *wlr_kb = &dev->keyboard;
 	wlr_keyboard_init(wlr_kb, &libinput_keyboard_impl, name);
-	wlr_kb->base.vendor = libinput_device_get_id_vendor(dev->handle);
-	wlr_kb->base.product = libinput_device_get_id_product(dev->handle);
 
 	libinput_device_led_update(dev->handle, 0);
+}
+
+static bool key_state_from_libinput(enum libinput_key_state state, enum wl_keyboard_key_state *out) {
+	switch (state) {
+	case LIBINPUT_KEY_STATE_RELEASED:
+		*out = WL_KEYBOARD_KEY_STATE_RELEASED;
+		return true;
+	case LIBINPUT_KEY_STATE_PRESSED:
+		*out = WL_KEYBOARD_KEY_STATE_PRESSED;
+		return true;
+	}
+	return false;
 }
 
 void handle_keyboard_key(struct libinput_event *event,
@@ -41,13 +52,9 @@ void handle_keyboard_key(struct libinput_event *event,
 		.keycode = libinput_event_keyboard_get_key(kbevent),
 		.update_state = true,
 	};
-	switch (libinput_event_keyboard_get_key_state(kbevent)) {
-	case LIBINPUT_KEY_STATE_RELEASED:
-		wlr_event.state = WL_KEYBOARD_KEY_STATE_RELEASED;
-		break;
-	case LIBINPUT_KEY_STATE_PRESSED:
-		wlr_event.state = WL_KEYBOARD_KEY_STATE_PRESSED;
-		break;
+	if (!key_state_from_libinput(libinput_event_keyboard_get_key_state(kbevent), &wlr_event.state)) {
+		wlr_log(WLR_DEBUG, "Unhandled libinput key state");
+		return;
 	}
 	wlr_keyboard_notify_key(kb, &wlr_event);
 }

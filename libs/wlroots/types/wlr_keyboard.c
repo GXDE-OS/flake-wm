@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <linux/input-event-codes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -48,7 +49,7 @@ bool keyboard_modifier_update(struct wlr_keyboard *keyboard) {
 		XKB_STATE_MODS_LATCHED);
 	xkb_mod_mask_t locked = xkb_state_serialize_mods(keyboard->xkb_state,
 		XKB_STATE_MODS_LOCKED);
-	xkb_mod_mask_t group = xkb_state_serialize_layout(keyboard->xkb_state,
+	xkb_layout_index_t group = xkb_state_serialize_layout(keyboard->xkb_state,
 		XKB_STATE_LAYOUT_EFFECTIVE);
 	if (depressed == keyboard->modifiers.depressed &&
 			latched == keyboard->modifiers.latched &&
@@ -83,6 +84,16 @@ void wlr_keyboard_notify_modifiers(struct wlr_keyboard *keyboard,
 		uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked,
 		uint32_t group) {
 	if (keyboard->xkb_state == NULL) {
+		if (keyboard->modifiers.depressed != mods_depressed ||
+				keyboard->modifiers.latched != mods_latched ||
+				keyboard->modifiers.locked != mods_locked ||
+				keyboard->modifiers.group != group) {
+			keyboard->modifiers.depressed = mods_depressed;
+			keyboard->modifiers.latched = mods_latched;
+			keyboard->modifiers.locked = mods_locked;
+			keyboard->modifiers.group = group;
+			wl_signal_emit_mutable(&keyboard->events.modifiers, keyboard);
+		}
 		return;
 	}
 	xkb_state_update_mask(keyboard->xkb_state, mods_depressed, mods_latched,
@@ -153,12 +164,11 @@ static void keyboard_unset_keymap(struct wlr_keyboard *kb) {
 
 void wlr_keyboard_finish(struct wlr_keyboard *kb) {
 	/* Release pressed keys */
-	size_t orig_num_keycodes = kb->num_keycodes;
-	for (size_t i = 0; i < orig_num_keycodes; ++i) {
-		assert(kb->num_keycodes == orig_num_keycodes - i);
+	int64_t time_msec = get_current_time_msec();
+	while (kb->num_keycodes > 0) {
 		struct wlr_keyboard_key_event event = {
-			.time_msec = get_current_time_msec(),
-			.keycode = kb->keycodes[orig_num_keycodes - i - 1],
+			.time_msec = time_msec,
+			.keycode = kb->keycodes[kb->num_keycodes - 1],
 			.update_state = false,
 			.state = WL_KEYBOARD_KEY_STATE_RELEASED,
 		};
@@ -166,6 +176,11 @@ void wlr_keyboard_finish(struct wlr_keyboard *kb) {
 	}
 
 	wlr_input_device_finish(&kb->base);
+
+	assert(wl_list_empty(&kb->events.key.listener_list));
+	assert(wl_list_empty(&kb->events.modifiers.listener_list));
+	assert(wl_list_empty(&kb->events.keymap.listener_list));
+	assert(wl_list_empty(&kb->events.repeat_info.listener_list));
 
 	keyboard_unset_keymap(kb);
 }
@@ -230,6 +245,8 @@ bool wlr_keyboard_set_keymap(struct wlr_keyboard *kb, struct xkb_keymap *keymap)
 		XKB_LED_NAME_NUM,
 		XKB_LED_NAME_CAPS,
 		XKB_LED_NAME_SCROLL,
+		XKB_LED_NAME_COMPOSE,
+		XKB_LED_NAME_KANA,
 	};
 	for (size_t i = 0; i < WLR_LED_COUNT; ++i) {
 		kb->led_indexes[i] = xkb_map_led_get_index(kb->keymap, led_names[i]);
@@ -304,4 +321,47 @@ bool wlr_keyboard_keymaps_match(struct xkb_keymap *km1,
 	free(km1_str);
 	free(km2_str);
 	return result;
+}
+
+uint32_t wlr_keyboard_keysym_to_pointer_button(xkb_keysym_t keysym) {
+	switch (keysym) {
+	case XKB_KEY_Pointer_Button1:
+		return BTN_LEFT;
+	case XKB_KEY_Pointer_Button2:
+		return BTN_MIDDLE;
+	case XKB_KEY_Pointer_Button3:
+		return BTN_RIGHT;
+	default:
+		return 0;
+	}
+}
+
+void wlr_keyboard_keysym_to_pointer_motion(xkb_keysym_t keysym, int *dx, int *dy) {
+	*dx = 0;
+	switch (keysym) {
+	case XKB_KEY_Pointer_Right:
+	case XKB_KEY_Pointer_DownRight:
+	case XKB_KEY_Pointer_UpRight:
+		*dx = 1;
+		break;
+	case XKB_KEY_Pointer_Left:
+	case XKB_KEY_Pointer_DownLeft:
+	case XKB_KEY_Pointer_UpLeft:
+		*dx = -1;
+		break;
+	}
+
+	*dy = 0;
+	switch (keysym) {
+	case XKB_KEY_Pointer_Down:
+	case XKB_KEY_Pointer_DownLeft:
+	case XKB_KEY_Pointer_DownRight:
+		*dy = 1;
+		break;
+	case XKB_KEY_Pointer_Up:
+	case XKB_KEY_Pointer_UpLeft:
+	case XKB_KEY_Pointer_UpRight:
+		*dy = -1;
+		break;
+	}
 }

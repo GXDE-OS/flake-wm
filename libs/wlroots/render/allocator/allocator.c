@@ -1,22 +1,24 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <wlr/backend.h>
 #include <wlr/config.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/render/allocator.h>
 #include <wlr/util/log.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-#include "backend/backend.h"
-#include "render/allocator/allocator.h"
 #include "render/allocator/drm_dumb.h"
 #include "render/allocator/shm.h"
 #include "render/wlr_renderer.h"
 
 #if WLR_HAS_GBM_ALLOCATOR
 #include "render/allocator/gbm.h"
+#endif
+
+#if WLR_HAS_UDMABUF_ALLOCATOR
+#include "render/allocator/udmabuf.h"
 #endif
 
 void wlr_allocator_init(struct wlr_allocator *alloc,
@@ -26,6 +28,7 @@ void wlr_allocator_init(struct wlr_allocator *alloc,
 		.impl = impl,
 		.buffer_caps = buffer_caps,
 	};
+
 	wl_signal_init(&alloc->events.destroy);
 }
 
@@ -92,11 +95,16 @@ static int reopen_drm_node(int drm_fd, bool allow_render_node) {
 	return new_fd;
 }
 
-struct wlr_allocator *allocator_autocreate_with_drm_fd(
-		struct wlr_backend *backend, struct wlr_renderer *renderer,
-		int drm_fd) {
-	uint32_t backend_caps = backend_get_buffer_caps(backend);
-	uint32_t renderer_caps = renderer_get_render_buffer_caps(renderer);
+struct wlr_allocator *wlr_allocator_autocreate(struct wlr_backend *backend,
+		struct wlr_renderer *renderer) {
+	uint32_t backend_caps = backend->buffer_caps;
+	uint32_t renderer_caps = renderer->render_buffer_caps;
+
+	// Note, drm_fd may be negative if unavailable
+	int drm_fd = wlr_backend_get_drm_fd(backend);
+	if (drm_fd < 0) {
+		drm_fd = wlr_renderer_get_drm_fd(renderer);
+	}
 
 	struct wlr_allocator *alloc = NULL;
 
@@ -143,18 +151,22 @@ struct wlr_allocator *allocator_autocreate_with_drm_fd(
 		wlr_log(WLR_DEBUG, "Failed to create drm dumb allocator");
 	}
 
+	uint32_t udmabuf_caps = WLR_BUFFER_CAP_DMABUF | WLR_BUFFER_CAP_SHM;
+	if ((backend_caps & udmabuf_caps) && (renderer_caps & udmabuf_caps) &&
+			drm_fd < 0) {
+#if WLR_HAS_UDMABUF_ALLOCATOR
+		wlr_log(WLR_DEBUG, "Trying udmabuf allocator");
+		if ((alloc = wlr_udmabuf_allocator_create()) != NULL) {
+			return alloc;
+		}
+		wlr_log(WLR_DEBUG, "Failed to create udmabuf allocator");
+#else
+		wlr_log(WLR_DEBUG, "Skipping udmabuf allocator: disabled at compile-time");
+#endif
+	}
+
 	wlr_log(WLR_ERROR, "Failed to create allocator");
 	return NULL;
-}
-
-struct wlr_allocator *wlr_allocator_autocreate(struct wlr_backend *backend,
-		struct wlr_renderer *renderer) {
-	// Note, drm_fd may be negative if unavailable
-	int drm_fd = wlr_backend_get_drm_fd(backend);
-	if (drm_fd < 0) {
-		drm_fd = wlr_renderer_get_drm_fd(renderer);
-	}
-	return allocator_autocreate_with_drm_fd(backend, renderer, drm_fd);
 }
 
 void wlr_allocator_destroy(struct wlr_allocator *alloc) {
@@ -162,6 +174,9 @@ void wlr_allocator_destroy(struct wlr_allocator *alloc) {
 		return;
 	}
 	wl_signal_emit_mutable(&alloc->events.destroy, NULL);
+
+	assert(wl_list_empty(&alloc->events.destroy.listener_list));
+
 	alloc->impl->destroy(alloc);
 }
 

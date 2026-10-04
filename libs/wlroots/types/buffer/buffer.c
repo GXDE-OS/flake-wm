@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <drm_fourcc.h>
 #include <string.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include "render/pixel_format.h"
@@ -16,9 +17,19 @@ void wlr_buffer_init(struct wlr_buffer *buffer,
 		.width = width,
 		.height = height,
 	};
+
 	wl_signal_init(&buffer->events.destroy);
 	wl_signal_init(&buffer->events.release);
+
 	wlr_addon_set_init(&buffer->addons);
+}
+
+void wlr_buffer_finish(struct wlr_buffer *buffer) {
+	wl_signal_emit_mutable(&buffer->events.destroy, NULL);
+	wlr_addon_set_finish(&buffer->addons);
+
+	assert(wl_list_empty(&buffer->events.destroy.listener_list));
+	assert(wl_list_empty(&buffer->events.release.listener_list));
 }
 
 static void buffer_consider_destroy(struct wlr_buffer *buffer) {
@@ -27,9 +38,6 @@ static void buffer_consider_destroy(struct wlr_buffer *buffer) {
 	}
 
 	assert(!buffer->accessing_data_ptr);
-
-	wl_signal_emit_mutable(&buffer->events.destroy, NULL);
-	wlr_addon_set_finish(&buffer->addons);
 
 	buffer->impl->destroy(buffer);
 }
@@ -99,28 +107,40 @@ bool wlr_buffer_get_shm(struct wlr_buffer *buffer,
 	return buffer->impl->get_shm(buffer, attribs);
 }
 
-bool buffer_is_opaque(struct wlr_buffer *buffer) {
+bool wlr_buffer_is_opaque(struct wlr_buffer *buffer) {
 	void *data;
-	uint32_t format;
+	uint32_t format = buffer_get_drm_format(buffer);
 	size_t stride;
+
+	if (format != DRM_FORMAT_INVALID) {
+		// pass
+	} else if (wlr_buffer_begin_data_ptr_access(buffer,
+			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
+		bool opaque = false;
+		if (buffer->width == 1 && buffer->height == 1 && format == DRM_FORMAT_ARGB8888) {
+			// Special case for single-pixel-buffer-v1
+			const uint8_t *argb8888 = data; // little-endian byte order
+			opaque = argb8888[3] == 0xFF;
+		}
+		wlr_buffer_end_data_ptr_access(buffer);
+		if (opaque) {
+			return true;
+		}
+	} else {
+		return false;
+	}
+
+	return !pixel_format_has_alpha(format);
+}
+
+uint32_t buffer_get_drm_format(struct wlr_buffer *buffer) {
+	uint32_t format = DRM_FORMAT_INVALID;
 	struct wlr_dmabuf_attributes dmabuf;
 	struct wlr_shm_attributes shm;
 	if (wlr_buffer_get_dmabuf(buffer, &dmabuf)) {
 		format = dmabuf.format;
 	} else if (wlr_buffer_get_shm(buffer, &shm)) {
 		format = shm.format;
-	} else if (wlr_buffer_begin_data_ptr_access(buffer,
-			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
-		wlr_buffer_end_data_ptr_access(buffer);
-	} else {
-		return false;
 	}
-
-	const struct wlr_pixel_format_info *format_info =
-		drm_get_pixel_format_info(format);
-	if (format_info == NULL) {
-		return false;
-	}
-
-	return !format_info->has_alpha;
+	return format;
 }

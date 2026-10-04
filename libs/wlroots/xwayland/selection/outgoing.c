@@ -33,7 +33,7 @@ static void xwm_selection_send_notify(struct wlr_xwm *xwm,
 		XCB_EVENT_MASK_NO_EVENT,
 		&selection_notify,
 		sizeof(selection_notify));
-	xcb_flush(xwm->xcb_conn);
+	xwm_schedule_flush(xwm);
 }
 
 static int xwm_selection_flush_source_data(
@@ -46,7 +46,7 @@ static int xwm_selection_flush_source_data(
 		8, // format
 		transfer->source_data.size,
 		transfer->source_data.data);
-	xcb_flush(transfer->selection->xwm->xcb_conn);
+	xwm_schedule_flush(transfer->selection->xwm);
 	transfer->property_set = true;
 	size_t length = transfer->source_data.size;
 	transfer->source_data.size = 0;
@@ -283,6 +283,8 @@ static bool xwm_selection_send_data(struct wlr_xwm_selection *selection,
 	int p[2];
 	if (pipe(p) == -1) {
 		wlr_log_errno(WLR_ERROR, "pipe() failed");
+		wl_array_release(&transfer->source_data);
+		free(transfer);
 		return false;
 	}
 
@@ -334,7 +336,11 @@ static void xwm_selection_send_targets(struct wlr_xwm_selection *selection,
 	}
 
 	size_t n = 2 + mime_types->size / sizeof(char *);
-	xcb_atom_t targets[n];
+	xcb_atom_t *targets = malloc(n * sizeof(targets[0]));
+	if (targets == NULL) {
+		wlr_log(WLR_ERROR, "Allocation failure");
+		return;
+	}
 	targets[0] = xwm->atoms[TIMESTAMP];
 	targets[1] = xwm->atoms[TARGETS];
 
@@ -353,6 +359,8 @@ static void xwm_selection_send_targets(struct wlr_xwm_selection *selection,
 		XCB_ATOM_ATOM,
 		32, // format
 		n, targets);
+
+	free(targets);
 
 	xwm_selection_send_notify(selection->xwm, req, true);
 }
@@ -410,8 +418,11 @@ void xwm_handle_selection_request(struct wlr_xwm *xwm,
 		return;
 	}
 
+	bool dnd_allowed = selection == &xwm->dnd_selection
+		&& (xwm->drag_focus != NULL || xwm->drop_focus != NULL);
+
 	// No xwayland surface focused, deny access to clipboard
-	if (xwm->focus_surface == NULL && xwm->drag_focus == NULL) {
+	if (xwm->focus_surface == NULL && !dnd_allowed) {
 		if (wlr_log_get_verbosity() >= WLR_DEBUG) {
 			char *selection_name = xwm_get_atom_name(xwm, selection->atom);
 			wlr_log(WLR_DEBUG, "denying read access to selection %u (%s): "

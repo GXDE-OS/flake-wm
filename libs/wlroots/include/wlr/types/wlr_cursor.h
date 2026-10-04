@@ -11,9 +11,9 @@
 
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_output_layout.h>
-#include <wlr/types/wlr_output.h>
 
 struct wlr_input_device;
+struct wlr_surface;
 struct wlr_xcursor_manager;
 
 /**
@@ -49,30 +49,30 @@ struct wlr_cursor {
 	 * your responsibility.
 	 */
 	struct {
-		struct wl_signal motion;
-		struct wl_signal motion_absolute;
-		struct wl_signal button;
-		struct wl_signal axis;
+		struct wl_signal motion; // struct wlr_pointer_motion_event
+		struct wl_signal motion_absolute; // struct wlr_pointer_motion_absolute_event
+		struct wl_signal button; // struct wlr_pointer_button_event
+		struct wl_signal axis; // struct wlr_pointer_axis_event
 		struct wl_signal frame;
-		struct wl_signal swipe_begin;
-		struct wl_signal swipe_update;
-		struct wl_signal swipe_end;
-		struct wl_signal pinch_begin;
-		struct wl_signal pinch_update;
-		struct wl_signal pinch_end;
-		struct wl_signal hold_begin;
-		struct wl_signal hold_end;
+		struct wl_signal swipe_begin; // struct wlr_pointer_swipe_begin_event
+		struct wl_signal swipe_update; // struct wlr_pointer_swipe_update_event
+		struct wl_signal swipe_end; // struct wlr_pointer_swipe_end_event
+		struct wl_signal pinch_begin; // struct wlr_pointer_pinch_begin_event
+		struct wl_signal pinch_update; // struct wlr_pointer_pinch_update_event
+		struct wl_signal pinch_end; // struct wlr_pointer_pinch_end_event
+		struct wl_signal hold_begin; // struct wlr_pointer_hold_begin_event
+		struct wl_signal hold_end; // struct wlr_pointer_hold_end_event
 
-		struct wl_signal touch_up;
-		struct wl_signal touch_down;
-		struct wl_signal touch_motion;
-		struct wl_signal touch_cancel;
+		struct wl_signal touch_up; // struct wlr_touch_up_event
+		struct wl_signal touch_down; // struct wlr_touch_down_event
+		struct wl_signal touch_motion; // struct wlr_touch_motion_event
+		struct wl_signal touch_cancel; // struct wlr_touch_cancel_event
 		struct wl_signal touch_frame;
 
-		struct wl_signal tablet_tool_axis;
-		struct wl_signal tablet_tool_proximity;
-		struct wl_signal tablet_tool_tip;
-		struct wl_signal tablet_tool_button;
+		struct wl_signal tablet_tool_axis; // struct wlr_tablet_tool_axis_event
+		struct wl_signal tablet_tool_proximity; // struct wlr_tablet_tool_proximity_event
+		struct wl_signal tablet_tool_tip; // struct wlr_tablet_tool_tip_event
+		struct wl_signal tablet_tool_button; // struct wlr_tablet_tool_button_event
 	} events;
 
 	void *data;
@@ -171,7 +171,7 @@ void wlr_cursor_set_surface(struct wlr_cursor *cur, struct wlr_surface *surface,
  *
  * - WLR_INPUT_DEVICE_POINTER
  * - WLR_INPUT_DEVICE_TOUCH
- * - WLR_INPUT_DEVICE_TABLET_TOOL
+ * - WLR_INPUT_DEVICE_TABLET
  */
 void wlr_cursor_attach_input_device(struct wlr_cursor *cur,
 		struct wlr_input_device *dev);

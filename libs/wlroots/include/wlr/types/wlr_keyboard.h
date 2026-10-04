@@ -16,12 +16,14 @@
 #include <wlr/types/wlr_input_device.h>
 #include <xkbcommon/xkbcommon.h>
 
-#define WLR_LED_COUNT 3
+#define WLR_LED_COUNT 5
 
 enum wlr_keyboard_led {
 	WLR_LED_NUM_LOCK = 1 << 0,
 	WLR_LED_CAPS_LOCK = 1 << 1,
 	WLR_LED_SCROLL_LOCK = 1 << 2,
+	WLR_LED_COMPOSE = 1 << 3,
+	WLR_LED_KANA = 1 << 4,
 };
 
 #define WLR_MODIFIER_COUNT 8
@@ -45,7 +47,7 @@ struct wlr_keyboard_modifiers {
 	xkb_mod_mask_t depressed;
 	xkb_mod_mask_t latched;
 	xkb_mod_mask_t locked;
-	xkb_mod_mask_t group;
+	xkb_layout_index_t group;
 };
 
 struct wlr_keyboard {
@@ -114,6 +116,23 @@ bool wlr_keyboard_set_keymap(struct wlr_keyboard *kb,
 	struct xkb_keymap *keymap);
 
 bool wlr_keyboard_keymaps_match(struct xkb_keymap *km1, struct xkb_keymap *km2);
+
+/**
+ * Interpret pointer button key symbols.
+ *
+ * Returns a button code (BTN_*) if the key symbol is a pointer button
+ * (XKB_KEY_Pointer_Button*), 0 otherwise.
+ */
+uint32_t wlr_keyboard_keysym_to_pointer_button(xkb_keysym_t keysym);
+
+/**
+ * Interpret pointer motion key symbols.
+ *
+ * Sets dx and dy to horizontal and vertical motion deltas (0, 1 or -1) if the
+ * key symbol is a pointer motion (XKB_KEY_Pointer_*). Otherwise, sets both dx
+ * and dy to 0.
+ */
+void wlr_keyboard_keysym_to_pointer_motion(xkb_keysym_t keysym, int *dx, int *dy);
 
 /**
  * Set the keyboard repeat info.

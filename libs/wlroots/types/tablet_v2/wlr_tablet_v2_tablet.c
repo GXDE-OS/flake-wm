@@ -1,7 +1,3 @@
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include <assert.h>
 #include <stdlib.h>
 #include <types/wlr_tablet_v2.h>
@@ -11,7 +7,7 @@
 #include <wlr/types/wlr_tablet_v2.h>
 #include <wlr/util/log.h>
 
-#include "tablet-unstable-v2-protocol.h"
+#include "tablet-v2-protocol.h"
 
 void destroy_tablet_v2(struct wl_resource *resource) {
 	struct wlr_tablet_client_v2 *tablet = tablet_client_from_resource(resource);
@@ -37,7 +33,7 @@ static const struct zwp_tablet_v2_interface tablet_impl = {
 
 static void handle_wlr_tablet_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_tablet_v2_tablet *tablet =
-		wl_container_of(listener, tablet, tool_destroy);
+		wl_container_of(listener, tablet, tablet_destroy);
 
 	struct wlr_tablet_client_v2 *pos;
 	struct wlr_tablet_client_v2 *tmp;
@@ -47,7 +43,7 @@ static void handle_wlr_tablet_destroy(struct wl_listener *listener, void *data) 
 
 	wl_list_remove(&tablet->clients);
 	wl_list_remove(&tablet->link);
-	wl_list_remove(&tablet->tool_destroy.link);
+	wl_list_remove(&tablet->tablet_destroy.link);
 	free(tablet);
 }
 
@@ -55,7 +51,7 @@ struct wlr_tablet_v2_tablet *wlr_tablet_create(
 		struct wlr_tablet_manager_v2 *manager,
 		struct wlr_seat *wlr_seat,
 		struct wlr_input_device *wlr_device) {
-	assert(wlr_device->type == WLR_INPUT_DEVICE_TABLET_TOOL);
+	assert(wlr_device->type == WLR_INPUT_DEVICE_TABLET);
 	struct wlr_tablet_seat_v2 *seat = get_or_create_tablet_seat(manager, wlr_seat);
 	if (!seat) {
 		return NULL;
@@ -71,8 +67,8 @@ struct wlr_tablet_v2_tablet *wlr_tablet_create(
 	wl_list_init(&tablet->clients);
 
 
-	tablet->tool_destroy.notify = handle_wlr_tablet_destroy;
-	wl_signal_add(&wlr_device->events.destroy, &tablet->tool_destroy);
+	tablet->tablet_destroy.notify = handle_wlr_tablet_destroy;
+	wl_signal_add(&wlr_device->events.destroy, &tablet->tablet_destroy);
 	wl_list_insert(&seat->tablets, &tablet->link);
 
 	// We need to create a tablet client for all clients on the seat
@@ -106,13 +102,14 @@ void add_tablet_client(struct wlr_tablet_seat_client_v2 *seat,
 		client, destroy_tablet_v2);
 	zwp_tablet_seat_v2_send_tablet_added(seat->resource, client->resource);
 
-	// Send the expected events
 	if (tablet->wlr_tablet->base.name) {
 		zwp_tablet_v2_send_name(client->resource,
 			tablet->wlr_tablet->base.name);
 	}
-	zwp_tablet_v2_send_id(client->resource,
-		tablet->wlr_device->vendor, tablet->wlr_device->product);
+	if (tablet->wlr_tablet->usb_vendor_id != 0) {
+		zwp_tablet_v2_send_id(client->resource,
+			tablet->wlr_tablet->usb_vendor_id, tablet->wlr_tablet->usb_product_id);
+	}
 
 	const char **path_ptr;
 	wl_array_for_each(path_ptr, &tablet->wlr_tablet->paths) {

@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <drm_fourcc.h>
 #include <fcntl.h>
@@ -6,6 +5,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <wlr/backend.h>
+#include <wlr/config.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
@@ -13,11 +13,15 @@
 #include <wlr/types/wlr_output_layer.h>
 #include <wlr/util/log.h>
 #include <xf86drm.h>
-#include "linux-dmabuf-unstable-v1-protocol.h"
+#include "linux-dmabuf-v1-protocol.h"
 #include "render/drm_format_set.h"
 #include "util/shm.h"
 
-#define LINUX_DMABUF_VERSION 4
+#if WLR_HAS_DRM_BACKEND
+#include <wlr/backend/drm.h>
+#endif
+
+#define LINUX_DMABUF_VERSION 5
 
 struct wlr_linux_buffer_params_v1 {
 	struct wl_resource *resource;
@@ -47,9 +51,7 @@ struct wlr_linux_dmabuf_feedback_v1_table_entry {
 	uint64_t modifier;
 };
 
-// TODO: switch back to static_assert once this fix propagates in stable trees:
-// https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=255290
-_Static_assert(sizeof(struct wlr_linux_dmabuf_feedback_v1_table_entry) == 16,
+static_assert(sizeof(struct wlr_linux_dmabuf_feedback_v1_table_entry) == 16,
 	"Expected wlr_linux_dmabuf_feedback_v1_table_entry to be tightly packed");
 
 struct wlr_linux_dmabuf_v1_surface {
@@ -98,11 +100,14 @@ static struct wlr_dmabuf_v1_buffer *dmabuf_v1_buffer_from_buffer(
 static void buffer_destroy(struct wlr_buffer *wlr_buffer) {
 	struct wlr_dmabuf_v1_buffer *buffer =
 		dmabuf_v1_buffer_from_buffer(wlr_buffer);
+	wl_list_remove(&buffer->release.link);
+
+	wlr_buffer_finish(wlr_buffer);
+
 	if (buffer->resource != NULL) {
 		wl_resource_set_user_data(buffer->resource, NULL);
 	}
 	wlr_dmabuf_attributes_finish(&buffer->attributes);
-	wl_list_remove(&buffer->release.link);
 	free(buffer);
 }
 
@@ -200,8 +205,9 @@ static void buffer_handle_resource_destroy(struct wl_resource *buffer_resource) 
 	wlr_buffer_drop(&buffer->base);
 }
 
-static bool check_import_dmabuf(struct wlr_linux_dmabuf_v1 *linux_dmabuf,
-		struct wlr_dmabuf_attributes *attribs) {
+static bool check_import_dmabuf(struct wlr_dmabuf_attributes *attribs, void *data) {
+	struct wlr_linux_dmabuf_v1 *linux_dmabuf = data;
+
 	if (linux_dmabuf->main_device_fd < 0) {
 		return true;
 	}
@@ -210,11 +216,11 @@ static bool check_import_dmabuf(struct wlr_linux_dmabuf_v1 *linux_dmabuf,
 	for (int i = 0; i < attribs->n_planes; i++) {
 		uint32_t handle = 0;
 		if (drmPrimeFDToHandle(linux_dmabuf->main_device_fd, attribs->fd[i], &handle) != 0) {
-			wlr_log_errno(WLR_DEBUG, "Failed to import DMA-BUF FD");
+			wlr_log_errno(WLR_ERROR, "Failed to import DMA-BUF FD for plane %d", i);
 			return false;
 		}
 		if (drmCloseBufferHandle(linux_dmabuf->main_device_fd, handle) != 0) {
-			wlr_log_errno(WLR_ERROR, "Failed to close buffer handle");
+			wlr_log_errno(WLR_ERROR, "Failed to close buffer handle for plane %d", i);
 			return false;
 		}
 	}
@@ -263,10 +269,8 @@ static void params_create_common(struct wl_resource *params_resource,
 	}
 
 	/* reject unknown flags */
-	uint32_t all_flags = ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_Y_INVERT |
-		ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_INTERLACED |
-		ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_BOTTOM_FIRST;
-	if (flags & ~all_flags) {
+	uint32_t version = wl_resource_get_version(params_resource);
+	if (!zwp_linux_buffer_params_v1_flags_is_valid(flags, version)) {
 		wl_resource_post_error(params_resource,
 			ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT,
 			"Unknown dmabuf flags %"PRIu32, flags);
@@ -339,7 +343,8 @@ static void params_create_common(struct wl_resource *params_resource,
 	}
 
 	/* Check if dmabuf is usable */
-	if (!check_import_dmabuf(linux_dmabuf, &attribs)) {
+	if (!linux_dmabuf->check_dmabuf_callback(&attribs,
+				linux_dmabuf->check_dmabuf_callback_data)) {
 		goto err_failed;
 	}
 
@@ -854,6 +859,8 @@ static const struct wlr_buffer_resource_interface buffer_resource_interface = {
 static void linux_dmabuf_v1_destroy(struct wlr_linux_dmabuf_v1 *linux_dmabuf) {
 	wl_signal_emit_mutable(&linux_dmabuf->events.destroy, linux_dmabuf);
 
+	assert(wl_list_empty(&linux_dmabuf->events.destroy.listener_list));
+
 	struct wlr_linux_dmabuf_v1_surface *surface, *surface_tmp;
 	wl_list_for_each_safe(surface, surface_tmp, &linux_dmabuf->surfaces, link) {
 		surface_destroy(surface);
@@ -953,6 +960,7 @@ struct wlr_linux_dmabuf_v1 *wlr_linux_dmabuf_v1_create(struct wl_display *displa
 	linux_dmabuf->main_device_fd = -1;
 
 	wl_list_init(&linux_dmabuf->surfaces);
+
 	wl_signal_init(&linux_dmabuf->events.destroy);
 
 	linux_dmabuf->global = wl_global_create(display, &zwp_linux_dmabuf_v1_interface,
@@ -968,6 +976,9 @@ struct wlr_linux_dmabuf_v1 *wlr_linux_dmabuf_v1_create(struct wl_display *displa
 
 	linux_dmabuf->display_destroy.notify = handle_display_destroy;
 	wl_display_add_destroy_listener(display, &linux_dmabuf->display_destroy);
+
+	wlr_linux_dmabuf_v1_set_check_dmabuf_callback(linux_dmabuf,
+		check_import_dmabuf, linux_dmabuf);
 
 	wlr_buffer_register_resource_interface(&buffer_resource_interface);
 
@@ -993,6 +1004,13 @@ struct wlr_linux_dmabuf_v1 *wlr_linux_dmabuf_v1_create_with_renderer(struct wl_d
 		wlr_linux_dmabuf_v1_create(display, version, &feedback);
 	wlr_linux_dmabuf_feedback_v1_finish(&feedback);
 	return linux_dmabuf;
+}
+
+void wlr_linux_dmabuf_v1_set_check_dmabuf_callback(struct wlr_linux_dmabuf_v1 *linux_dmabuf,
+		bool (*callback)(struct wlr_dmabuf_attributes *attribs, void *data), void *data) {
+	assert(callback);
+	linux_dmabuf->check_dmabuf_callback = callback;
+	linux_dmabuf->check_dmabuf_callback_data = data;
 }
 
 bool wlr_linux_dmabuf_v1_set_surface_feedback(
@@ -1054,6 +1072,15 @@ static bool devid_from_fd(int fd, dev_t *devid) {
 	return true;
 }
 
+static bool is_secondary_drm_backend(struct wlr_backend *backend) {
+#if WLR_HAS_DRM_BACKEND
+	return wlr_backend_is_drm(backend) &&
+		wlr_drm_backend_get_parent(backend) != NULL;
+#else
+	return false;
+#endif
+}
+
 bool wlr_linux_dmabuf_feedback_v1_init_with_options(struct wlr_linux_dmabuf_feedback_v1 *feedback,
 		const struct wlr_linux_dmabuf_feedback_v1_init_options *options) {
 	assert(options->main_renderer != NULL);
@@ -1075,7 +1102,7 @@ bool wlr_linux_dmabuf_feedback_v1_init_with_options(struct wlr_linux_dmabuf_feed
 	feedback->main_device = renderer_dev;
 
 	const struct wlr_drm_format_set *renderer_formats =
-		wlr_renderer_get_dmabuf_texture_formats(options->main_renderer);
+		wlr_renderer_get_texture_formats(options->main_renderer, WLR_BUFFER_CAP_DMABUF);
 	if (renderer_formats == NULL) {
 		wlr_log(WLR_ERROR, "Failed to get renderer DMA-BUF texture formats");
 		goto error;
@@ -1096,7 +1123,8 @@ bool wlr_linux_dmabuf_feedback_v1_init_with_options(struct wlr_linux_dmabuf_feed
 			wlr_log(WLR_ERROR, "Failed to intersect renderer and scanout formats");
 			goto error;
 		}
-	} else if (options->scanout_primary_output != NULL) {
+	} else if (options->scanout_primary_output != NULL &&
+			!is_secondary_drm_backend(options->scanout_primary_output->backend)) {
 		int backend_drm_fd = wlr_backend_get_drm_fd(options->scanout_primary_output->backend);
 		if (backend_drm_fd < 0) {
 			wlr_log(WLR_ERROR, "Failed to get backend DRM FD");

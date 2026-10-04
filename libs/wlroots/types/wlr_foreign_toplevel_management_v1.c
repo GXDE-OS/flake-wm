@@ -1,5 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
-
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
@@ -10,6 +8,8 @@
 #include "wlr-foreign-toplevel-management-unstable-v1-protocol.h"
 
 #define FOREIGN_TOPLEVEL_MANAGEMENT_V1_VERSION 3
+
+#define FOREIGN_TOPLEVEL_HANDLE_V1_STATE_COUNT 32
 
 static const struct zwlr_foreign_toplevel_handle_v1_interface toplevel_handle_impl;
 
@@ -273,12 +273,27 @@ static void toplevel_handle_output_bind(struct wl_listener *listener,
 	toplevel_update_idle_source(toplevel_output->toplevel);
 }
 
+static void toplevel_output_destroy(
+		struct wlr_foreign_toplevel_handle_v1_output *toplevel_output) {
+	wl_list_remove(&toplevel_output->link);
+	wl_list_remove(&toplevel_output->output_bind.link);
+	wl_list_remove(&toplevel_output->output_destroy.link);
+	free(toplevel_output);
+}
+
+static void toplevel_output_leave(
+		struct wlr_foreign_toplevel_handle_v1_output *toplevel_output) {
+	struct wlr_foreign_toplevel_handle_v1 *toplevel = toplevel_output->toplevel;
+	struct wlr_output *output = toplevel_output->output;
+	toplevel_send_output(toplevel, output, false);
+	toplevel_output_destroy(toplevel_output);
+}
+
 static void toplevel_handle_output_destroy(struct wl_listener *listener,
 		void *data) {
 	struct wlr_foreign_toplevel_handle_v1_output *toplevel_output =
 		wl_container_of(listener, toplevel_output, output_destroy);
-	wlr_foreign_toplevel_handle_v1_output_leave(toplevel_output->toplevel,
-		toplevel_output->output);
+	toplevel_output_leave(toplevel_output);
 }
 
 void wlr_foreign_toplevel_handle_v1_output_enter(
@@ -310,146 +325,88 @@ void wlr_foreign_toplevel_handle_v1_output_enter(
 	toplevel_send_output(toplevel, output, true);
 }
 
-static void toplevel_output_destroy(
-		struct wlr_foreign_toplevel_handle_v1_output *toplevel_output) {
-	wl_list_remove(&toplevel_output->link);
-	wl_list_remove(&toplevel_output->output_bind.link);
-	wl_list_remove(&toplevel_output->output_destroy.link);
-	free(toplevel_output);
-}
-
 void wlr_foreign_toplevel_handle_v1_output_leave(
 		struct wlr_foreign_toplevel_handle_v1 *toplevel,
 		struct wlr_output *output) {
 	struct wlr_foreign_toplevel_handle_v1_output *toplevel_output_iterator;
-	struct wlr_foreign_toplevel_handle_v1_output *toplevel_output = NULL;
-
 	wl_list_for_each(toplevel_output_iterator, &toplevel->outputs, link) {
 		if (toplevel_output_iterator->output == output) {
-			toplevel_output = toplevel_output_iterator;
-			break;
+			toplevel_output_leave(toplevel_output_iterator);
+			return;
 		}
 	}
 
-	if (toplevel_output) {
-		toplevel_send_output(toplevel, output, false);
-		toplevel_output_destroy(toplevel_output);
-	} else {
-		// XXX: log an error? crash?
-	}
+	// XXX: log an error? crash?
 }
 
-static bool fill_array_from_toplevel_state(struct wl_array *array,
-		uint32_t state) {
+static void fill_array_from_toplevel_state(struct wl_array *states,
+		uint32_t data[], uint32_t state, uint32_t version) {
+	size_t nstates = 0;
 	if (state & WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED) {
-		uint32_t *index = wl_array_add(array, sizeof(uint32_t));
-		if (index == NULL) {
-			return false;
-		}
-		*index = ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED;
+		data[nstates++] = ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED;
 	}
 	if (state & WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED) {
-		uint32_t *index = wl_array_add(array, sizeof(uint32_t));
-		if (index == NULL) {
-			return false;
-		}
-		*index = ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED;
+		data[nstates++] = ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED;
 	}
 	if (state & WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED) {
-		uint32_t *index = wl_array_add(array, sizeof(uint32_t));
-		if (index == NULL) {
-			return false;
-		}
-		*index = ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED;
+		data[nstates++] = ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED;
 	}
-	if (state & WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN) {
-		uint32_t *index = wl_array_add(array, sizeof(uint32_t));
-		if (index == NULL) {
-			return false;
-		}
-		*index = ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN;
+	if (version >= ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN_SINCE_VERSION
+			&& (state & WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN)) {
+		data[nstates++] = ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN;
 	}
+	assert(nstates <= FOREIGN_TOPLEVEL_HANDLE_V1_STATE_COUNT);
 
-	return true;
+	*states = (struct wl_array){
+		.data = data,
+		.size = nstates * sizeof(data[0])
+	};
 }
 
 static void toplevel_send_state(struct wlr_foreign_toplevel_handle_v1 *toplevel) {
-	struct wl_array states;
-	wl_array_init(&states);
-	bool r = fill_array_from_toplevel_state(&states, toplevel->state);
-	if (!r) {
-		struct wl_resource *resource;
-		wl_resource_for_each(resource, &toplevel->resources) {
-			wl_resource_post_no_memory(resource);
-		}
-
-		wl_array_release(&states);
-		return;
-	}
+	struct wl_array state_array;
+	uint32_t states[FOREIGN_TOPLEVEL_HANDLE_V1_STATE_COUNT];
 
 	struct wl_resource *resource;
 	wl_resource_for_each(resource, &toplevel->resources) {
-		zwlr_foreign_toplevel_handle_v1_send_state(resource, &states);
+		fill_array_from_toplevel_state(&state_array, states,
+			toplevel->state, wl_resource_get_version(resource));
+		zwlr_foreign_toplevel_handle_v1_send_state(resource, &state_array);
 	}
-
-	wl_array_release(&states);
 	toplevel_update_idle_source(toplevel);
+}
+
+static void set_state(struct wlr_foreign_toplevel_handle_v1 *toplevel,
+		bool new_state_val, enum wlr_foreign_toplevel_handle_v1_state state) {
+	if (new_state_val == !!(toplevel->state & state)) {
+		return;
+	}
+	if (new_state_val) {
+		toplevel->state |= state;
+	} else {
+		toplevel->state &= ~state;
+	}
+	toplevel_send_state(toplevel);
 }
 
 void wlr_foreign_toplevel_handle_v1_set_maximized(
 		struct wlr_foreign_toplevel_handle_v1 *toplevel, bool maximized) {
-	if (maximized == !!(toplevel->state &
-			WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED)) {
-		return;
-	}
-	if (maximized) {
-		toplevel->state |= WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED;
-	} else {
-		toplevel->state &= ~WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED;
-	}
-	toplevel_send_state(toplevel);
+	set_state(toplevel, maximized, WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED);
 }
 
 void wlr_foreign_toplevel_handle_v1_set_minimized(
 		struct wlr_foreign_toplevel_handle_v1 *toplevel, bool minimized) {
-	if (minimized == !!(toplevel->state &
-			WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED)) {
-		return;
-	}
-	if (minimized) {
-		toplevel->state |= WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED;
-	} else {
-		toplevel->state &= ~WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED;
-	}
-	toplevel_send_state(toplevel);
+	set_state(toplevel, minimized, WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED);
 }
 
 void wlr_foreign_toplevel_handle_v1_set_activated(
 		struct wlr_foreign_toplevel_handle_v1 *toplevel, bool activated) {
-	if (activated == !!(toplevel->state &
-			WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED)) {
-		return;
-	}
-	if (activated) {
-		toplevel->state |= WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED;
-	} else {
-		toplevel->state &= ~WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED;
-	}
-	toplevel_send_state(toplevel);
+	set_state(toplevel, activated, WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED);
 }
 
 void wlr_foreign_toplevel_handle_v1_set_fullscreen(
 		struct wlr_foreign_toplevel_handle_v1 * toplevel, bool fullscreen) {
-	if (fullscreen == !!(toplevel->state &
-			WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN)) {
-		return;
-	}
-	if (fullscreen) {
-		toplevel->state |= WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN;
-	} else {
-		toplevel->state &= ~WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN;
-	}
-	toplevel_send_state(toplevel);
+	set_state(toplevel, fullscreen, WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN);
 }
 
 static void toplevel_resource_send_parent(
@@ -460,16 +417,17 @@ static void toplevel_resource_send_parent(
 		return;
 	}
 	struct wl_client *client = wl_resource_get_client(toplevel_resource);
-	struct wl_resource *parent_resource = NULL;
 	if (parent) {
-		parent_resource = wl_resource_find_for_client(&parent->resources, client);
-		if (!parent_resource) {
-			/* don't send an event if this client destroyed the parent handle */
-			return;
+		struct wl_resource *parent_resource;
+		wl_resource_for_each(parent_resource, &parent->resources) {
+			if (wl_resource_get_client(parent_resource) == client) {
+				zwlr_foreign_toplevel_handle_v1_send_parent(
+					toplevel_resource, parent_resource);
+			}
 		}
+	} else {
+		zwlr_foreign_toplevel_handle_v1_send_parent(toplevel_resource, NULL);
 	}
-	zwlr_foreign_toplevel_handle_v1_send_parent(toplevel_resource,
-		parent_resource);
 }
 
 void wlr_foreign_toplevel_handle_v1_set_parent(
@@ -494,6 +452,14 @@ void wlr_foreign_toplevel_handle_v1_destroy(
 	}
 
 	wl_signal_emit_mutable(&toplevel->events.destroy, toplevel);
+
+	assert(wl_list_empty(&toplevel->events.request_maximize.listener_list));
+	assert(wl_list_empty(&toplevel->events.request_minimize.listener_list));
+	assert(wl_list_empty(&toplevel->events.request_activate.listener_list));
+	assert(wl_list_empty(&toplevel->events.request_fullscreen.listener_list));
+	assert(wl_list_empty(&toplevel->events.request_close.listener_list));
+	assert(wl_list_empty(&toplevel->events.set_rectangle.listener_list));
+	assert(wl_list_empty(&toplevel->events.destroy.listener_list));
 
 	struct wl_resource *resource, *tmp;
 	wl_resource_for_each_safe(resource, tmp, &toplevel->resources) {
@@ -564,7 +530,7 @@ wlr_foreign_toplevel_handle_v1_create(
 		return NULL;
 	}
 
-	wl_list_insert(&manager->toplevels, &toplevel->link);
+	wl_list_insert(manager->toplevels.prev, &toplevel->link);
 	toplevel->manager = manager;
 
 	wl_list_init(&toplevel->resources);
@@ -624,17 +590,11 @@ static void toplevel_send_details_to_toplevel_resource(
 		send_output_to_resource(resource, output->output, true);
 	}
 
-	struct wl_array states;
-	wl_array_init(&states);
-	bool r = fill_array_from_toplevel_state(&states, toplevel->state);
-	if (!r) {
-		wl_resource_post_no_memory(resource);
-		wl_array_release(&states);
-		return;
-	}
-
-	zwlr_foreign_toplevel_handle_v1_send_state(resource, &states);
-	wl_array_release(&states);
+	struct wl_array state_array;
+	uint32_t states[FOREIGN_TOPLEVEL_HANDLE_V1_STATE_COUNT];
+	fill_array_from_toplevel_state(&state_array, states,
+		toplevel->state, wl_resource_get_version(resource));
+	zwlr_foreign_toplevel_handle_v1_send_state(resource, &state_array);
 
 	toplevel_resource_send_parent(resource, toplevel->parent);
 
@@ -665,10 +625,13 @@ static void foreign_toplevel_manager_bind(struct wl_client *client, void *data,
 	}
 	/* Second loop: send details about each toplevel. */
 	wl_list_for_each_safe(toplevel, tmp, &manager->toplevels, link) {
-		struct wl_resource *toplevel_resource =
-			wl_resource_find_for_client(&toplevel->resources, client);
-		toplevel_send_details_to_toplevel_resource(toplevel,
-			toplevel_resource);
+		struct wl_resource *toplevel_resource;
+		wl_resource_for_each(toplevel_resource, &toplevel->resources) {
+			if (wl_resource_get_client(toplevel_resource) == client) {
+				toplevel_send_details_to_toplevel_resource(toplevel,
+					toplevel_resource);
+			}
+		}
 	}
 }
 
@@ -676,6 +639,9 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_foreign_toplevel_manager_v1 *manager =
 		wl_container_of(listener, manager, display_destroy);
 	wl_signal_emit_mutable(&manager->events.destroy, manager);
+
+	assert(wl_list_empty(&manager->events.destroy.listener_list));
+
 	wl_list_remove(&manager->display_destroy.link);
 	wl_global_destroy(manager->global);
 	free(manager);
@@ -699,6 +665,7 @@ struct wlr_foreign_toplevel_manager_v1 *wlr_foreign_toplevel_manager_v1_create(
 	}
 
 	wl_signal_init(&manager->events.destroy);
+
 	wl_list_init(&manager->resources);
 	wl_list_init(&manager->toplevels);
 

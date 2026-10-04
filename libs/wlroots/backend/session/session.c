@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <libudev.h>
 #include <stdarg.h>
@@ -37,9 +36,18 @@ static void handle_disable_seat(struct libseat *seat, void *data) {
 
 static int libseat_event(int fd, uint32_t mask, void *data) {
 	struct wlr_session *session = data;
+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
+		if (mask & WL_EVENT_ERROR) {
+			wlr_log(WLR_ERROR, "Failed to wait for libseat event");
+		} else {
+			wlr_log(WLR_INFO, "Failed to wait for libseat event");
+		}
+		wlr_session_destroy(session);
+		return 0;
+	}
 	if (libseat_dispatch(session->seat_handle, 0) == -1) {
 		wlr_log_errno(WLR_ERROR, "Failed to dispatch libseat");
-		wl_display_terminate(session->display);
+		wlr_session_destroy(session);
 	}
 	return 1;
 }
@@ -71,7 +79,8 @@ static void log_libseat(enum libseat_log_level level,
 	_wlr_vlog(importance, wlr_fmt, args);
 }
 
-static int libseat_session_init(struct wlr_session *session, struct wl_display *disp) {
+static int libseat_session_init(struct wlr_session *session,
+		struct wl_event_loop *event_loop) {
 	libseat_set_log_handler(log_libseat);
 	libseat_set_log_level(LIBSEAT_LOG_LEVEL_INFO);
 
@@ -91,7 +100,6 @@ static int libseat_session_init(struct wlr_session *session, struct wl_display *
 	}
 	snprintf(session->seat, sizeof(session->seat), "%s", seat_name);
 
-	struct wl_event_loop *event_loop = wl_display_get_event_loop(disp);
 	session->libseat_event = wl_event_loop_add_fd(event_loop, libseat_get_fd(session->seat_handle),
 		WL_EVENT_READABLE, libseat_event, session);
 	if (session->libseat_event == NULL) {
@@ -192,32 +200,40 @@ static int handle_udev_event(int fd, uint32_t mask, void *data) {
 		goto out;
 	}
 
+	dev_t devnum = udev_device_get_devnum(udev_dev);
 	if (strcmp(action, "add") == 0) {
+		struct wlr_device *dev;
+		wl_list_for_each(dev, &session->devices, link) {
+			if (dev->dev == devnum) {
+				wlr_log(WLR_DEBUG, "Skipping duplicate device %s", sysname);
+				goto out;
+			}
+		}
+
 		wlr_log(WLR_DEBUG, "DRM device %s added", sysname);
 		struct wlr_session_add_event event = {
 			.path = devnode,
 		};
 		wl_signal_emit_mutable(&session->events.add_drm_card, &event);
-	} else if (strcmp(action, "change") == 0 || strcmp(action, "remove") == 0) {
-		dev_t devnum = udev_device_get_devnum(udev_dev);
+	} else if (strcmp(action, "change") == 0) {
 		struct wlr_device *dev;
 		wl_list_for_each(dev, &session->devices, link) {
-			if (dev->dev != devnum) {
-				continue;
-			}
-
-			if (strcmp(action, "change") == 0) {
+			if (dev->dev == devnum) {
 				wlr_log(WLR_DEBUG, "DRM device %s changed", sysname);
 				struct wlr_device_change_event event = {0};
 				read_udev_change_event(&event, udev_dev);
 				wl_signal_emit_mutable(&dev->events.change, &event);
-			} else if (strcmp(action, "remove") == 0) {
+				break;
+			}
+		}
+	} else if (strcmp(action, "remove") == 0) {
+		struct wlr_device *dev;
+		wl_list_for_each(dev, &session->devices, link) {
+			if (dev->dev == devnum) {
 				wlr_log(WLR_DEBUG, "DRM device %s removed", sysname);
 				wl_signal_emit_mutable(&dev->events.remove, NULL);
-			} else {
-				assert(0);
+				break;
 			}
-			break;
 		}
 	}
 
@@ -226,25 +242,26 @@ out:
 	return 1;
 }
 
-static void handle_display_destroy(struct wl_listener *listener, void *data) {
+static void handle_event_loop_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_session *session =
-		wl_container_of(listener, session, display_destroy);
+		wl_container_of(listener, session, event_loop_destroy);
 	wlr_session_destroy(session);
 }
 
-struct wlr_session *wlr_session_create(struct wl_display *disp) {
+struct wlr_session *wlr_session_create(struct wl_event_loop *event_loop) {
 	struct wlr_session *session = calloc(1, sizeof(*session));
 	if (!session) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		return NULL;
 	}
 
+	session->event_loop = event_loop;
 	wl_signal_init(&session->events.active);
 	wl_signal_init(&session->events.add_drm_card);
 	wl_signal_init(&session->events.destroy);
 	wl_list_init(&session->devices);
 
-	if (libseat_session_init(session, disp) == -1) {
+	if (libseat_session_init(session, event_loop) == -1) {
 		wlr_log(WLR_ERROR, "Failed to load session backend");
 		goto error_open;
 	}
@@ -264,7 +281,6 @@ struct wlr_session *wlr_session_create(struct wl_display *disp) {
 	udev_monitor_filter_add_match_subsystem_devtype(session->mon, "drm", NULL);
 	udev_monitor_enable_receiving(session->mon);
 
-	struct wl_event_loop *event_loop = wl_display_get_event_loop(disp);
 	int fd = udev_monitor_get_fd(session->mon);
 
 	session->udev_event = wl_event_loop_add_fd(event_loop, fd,
@@ -274,10 +290,8 @@ struct wlr_session *wlr_session_create(struct wl_display *disp) {
 		goto error_mon;
 	}
 
-	session->display = disp;
-
-	session->display_destroy.notify = handle_display_destroy;
-	wl_display_add_destroy_listener(disp, &session->display_destroy);
+	session->event_loop_destroy.notify = handle_event_loop_destroy;
+	wl_event_loop_add_destroy_listener(event_loop, &session->event_loop_destroy);
 
 	return session;
 
@@ -298,7 +312,12 @@ void wlr_session_destroy(struct wlr_session *session) {
 	}
 
 	wl_signal_emit_mutable(&session->events.destroy, session);
-	wl_list_remove(&session->display_destroy.link);
+
+	assert(wl_list_empty(&session->events.active.listener_list));
+	assert(wl_list_empty(&session->events.add_drm_card.listener_list));
+	assert(wl_list_empty(&session->events.destroy.listener_list));
+
+	wl_list_remove(&session->event_loop_destroy.link);
 
 	wl_event_source_remove(session->udev_event);
 	udev_monitor_unref(session->mon);
@@ -355,6 +374,13 @@ void wlr_session_close_file(struct wlr_session *session,
 	if (libseat_close_device(session->seat_handle, dev->device_id) == -1) {
 		wlr_log_errno(WLR_ERROR, "Failed to close device %d", dev->device_id);
 	}
+
+	assert(wl_list_empty(&dev->events.change.listener_list));
+	// TODO: assert that the "remove" listener list is empty as well. Listeners
+	// will typically call wlr_session_close_file() in response, and
+	// wl_signal_emit_mutable() installs two phantom listeners, so we'd count
+	// these two.
+
 	close(dev->fd);
 	wl_list_remove(&dev->link);
 	free(dev);
@@ -407,7 +433,7 @@ static ssize_t explicit_find_gpus(struct wlr_session *session,
 
 		ret[i] = session_open_if_kms(session, ptr);
 		if (!ret[i]) {
-			wlr_log(WLR_ERROR, "Unable to open %s as DRM device", ptr);
+			wlr_log(WLR_ERROR, "Unable to open %s as KMS device", ptr);
 		} else {
 			++i;
 		}
@@ -447,13 +473,11 @@ static void find_gpus_handle_add(struct wl_listener *listener, void *data) {
 	handler->added = true;
 }
 
-/* Tries to find the primary GPU by checking for the "boot_vga" attribute.
- * If it's not found, it returns the first valid GPU it finds.
- */
 ssize_t wlr_session_find_gpus(struct wlr_session *session,
 		size_t ret_len, struct wlr_device **ret) {
 	const char *explicit = getenv("WLR_DRM_DEVICES");
 	if (explicit) {
+		wlr_log(WLR_INFO, "Opening fixed list of KMS devices from WLR_DRM_DEVICES: %s", explicit);
 		return explicit_find_gpus(session, ret_len, ret, explicit);
 	}
 
@@ -464,7 +488,8 @@ ssize_t wlr_session_find_gpus(struct wlr_session *session,
 
 	if (udev_enumerate_get_list_entry(en) == NULL) {
 		udev_enumerate_unref(en);
-		wlr_log(WLR_INFO, "Waiting for a DRM card device");
+		en = NULL;
+		wlr_log(WLR_INFO, "Waiting for a KMS device");
 
 		struct find_gpus_add_handler handler = {0};
 		handler.listener.notify = find_gpus_handle_add;
@@ -472,14 +497,11 @@ ssize_t wlr_session_find_gpus(struct wlr_session *session,
 
 		int64_t started_at = get_current_time_msec();
 		int64_t timeout = WAIT_GPU_TIMEOUT;
-		struct wl_event_loop *event_loop =
-			wl_display_get_event_loop(session->display);
 		while (!handler.added) {
-			int ret = wl_event_loop_dispatch(event_loop, (int)timeout);
+			int ret = wl_event_loop_dispatch(session->event_loop, (int)timeout);
 			if (ret < 0) {
-				wlr_log_errno(WLR_ERROR, "Failed to wait for DRM card device: "
+				wlr_log_errno(WLR_ERROR, "Failed to wait for KMS device: "
 					"wl_event_loop_dispatch failed");
-				udev_enumerate_unref(en);
 				return -1;
 			}
 
@@ -506,8 +528,6 @@ ssize_t wlr_session_find_gpus(struct wlr_session *session,
 			break;
 		}
 
-		bool is_boot_vga = false;
-
 		const char *path = udev_list_entry_get_name(entry);
 		struct udev_device *dev = udev_device_new_from_syspath(session->udev, path);
 		if (!dev) {
@@ -523,28 +543,32 @@ ssize_t wlr_session_find_gpus(struct wlr_session *session,
 			continue;
 		}
 
-		// This is owned by 'dev', so we don't need to free it
-		struct udev_device *pci =
-			udev_device_get_parent_with_subsystem_devtype(dev, "pci", NULL);
+		bool is_primary = false;
+		const char *boot_display = udev_device_get_sysattr_value(dev, "boot_display");
+		if (boot_display && strcmp(boot_display, "1") == 0) {
+		    is_primary = true;
+		} else {
+			// This is owned by 'dev', so we don't need to free it
+			struct udev_device *pci =
+				udev_device_get_parent_with_subsystem_devtype(dev, "pci", NULL);
 
-		if (pci) {
-			const char *id = udev_device_get_sysattr_value(pci, "boot_vga");
-			if (id && strcmp(id, "1") == 0) {
-				is_boot_vga = true;
+			if (pci) {
+				const char *id = udev_device_get_sysattr_value(pci, "boot_vga");
+				if (id && strcmp(id, "1") == 0) {
+					is_primary = true;
+				}
 			}
 		}
 
 		struct wlr_device *wlr_dev =
 			session_open_if_kms(session, udev_device_get_devnode(dev));
+		udev_device_unref(dev);
 		if (!wlr_dev) {
-			udev_device_unref(dev);
 			continue;
 		}
 
-		udev_device_unref(dev);
-
 		ret[i] = wlr_dev;
-		if (is_boot_vga) {
+		if (is_primary) {
 			struct wlr_device *tmp = ret[0];
 			ret[0] = ret[i];
 			ret[i] = tmp;

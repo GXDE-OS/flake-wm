@@ -1,7 +1,3 @@
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include <assert.h>
 #include <stdlib.h>
 #include <types/wlr_tablet_v2.h>
@@ -12,7 +8,7 @@
 #include <wlr/util/log.h>
 #include "util/set.h"
 #include "util/time.h"
-#include "tablet-unstable-v2-protocol.h"
+#include "tablet-v2-protocol.h"
 
 static const struct wlr_tablet_tool_v2_grab_interface default_tool_grab_interface;
 
@@ -107,7 +103,10 @@ void destroy_tablet_tool_v2(struct wl_resource *resource) {
 	}
 
 	if (client->tool && client->tool->current_client == client) {
+		wl_list_remove(&client->tool->surface_destroy.link);
+		wl_list_init(&client->tool->surface_destroy.link);
 		client->tool->current_client = NULL;
+		client->tool->focused_surface = NULL;
 	}
 
 	wl_list_remove(&client->seat_link);

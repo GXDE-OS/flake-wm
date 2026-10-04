@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -38,7 +37,7 @@ xwm_selection_transfer_create_incoming(struct wlr_xwm_selection *selection) {
 			XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | XCB_EVENT_MASK_PROPERTY_CHANGE
 		}
 	);
-	xcb_flush(xwm->xcb_conn);
+	xwm_schedule_flush(xwm);
 
 	return transfer;
 }
@@ -90,7 +89,7 @@ static void xwm_notify_ready_for_next_incr_chunk(
 	wlr_log(WLR_DEBUG, "deleting property");
 	xcb_delete_property(xwm->xcb_conn, transfer->incoming_window,
 		xwm->atoms[WL_SELECTION]);
-	xcb_flush(xwm->xcb_conn);
+	xwm_schedule_flush(xwm);
 
 	xwm_selection_transfer_remove_event_source(transfer);
 	xwm_selection_transfer_destroy_property_reply(transfer);
@@ -104,7 +103,7 @@ static int write_selection_property_to_wl_client(int fd, uint32_t mask,
 		void *data) {
 	struct wlr_xwm_selection_transfer *transfer = data;
 
-	char *property = xcb_get_property_value(transfer->property_reply);
+	const char *property = xcb_get_property_value(transfer->property_reply);
 	int remainder = xcb_get_property_value_length(transfer->property_reply) -
 		transfer->property_start;
 
@@ -235,7 +234,7 @@ static void source_send(struct wlr_xwm_selection *selection,
 		xwm->atoms[WL_SELECTION],
 		XCB_TIME_CURRENT_TIME);
 
-	xcb_flush(xwm->xcb_conn);
+	xwm_schedule_flush(xwm);
 
 	fcntl(fd, F_SETFL, O_WRONLY | O_NONBLOCK);
 	transfer->wl_client_fd = fd;
@@ -344,8 +343,9 @@ static bool source_get_targets(struct wlr_xwm_selection *selection,
 		return false;
 	}
 
-	xcb_atom_t *value = xcb_get_property_value(reply);
-	for (uint32_t i = 0; i < reply->value_len; i++) {
+	const xcb_atom_t *value = xcb_get_property_value(reply);
+	uint32_t value_len = xcb_get_property_value_length(reply) / sizeof(value[0]);
+	for (uint32_t i = 0; i < value_len; i++) {
 		char *mime_type = NULL;
 
 		if (value[i] == xwm->atoms[UTF8_STRING]) {
@@ -382,13 +382,15 @@ static bool source_get_targets(struct wlr_xwm_selection *selection,
 				free(mime_type);
 				break;
 			}
-			*mime_type_ptr = mime_type;
 
 			xcb_atom_t *atom_ptr =
 				wl_array_add(mime_types_atoms, sizeof(*atom_ptr));
 			if (atom_ptr == NULL) {
+				mime_types->size -= sizeof(*mime_type_ptr);
+				free(mime_type);
 				break;
 			}
+			*mime_type_ptr = mime_type;
 			*atom_ptr = value[i];
 		}
 	}
@@ -534,7 +536,7 @@ int xwm_handle_xfixes_selection_notify(struct wlr_xwm *xwm,
 		xwm->atoms[WL_SELECTION],
 		event->timestamp
 	);
-	xcb_flush(xwm->xcb_conn);
+	xwm_schedule_flush(xwm);
 
 	return 1;
 }

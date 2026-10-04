@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -667,6 +666,10 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_data_control_manager_v1 *manager =
 		wl_container_of(listener, manager, display_destroy);
 	wl_signal_emit_mutable(&manager->events.destroy, manager);
+
+	assert(wl_list_empty(&manager->events.destroy.listener_list));
+	assert(wl_list_empty(&manager->events.new_device.listener_list));
+
 	wl_list_remove(&manager->display_destroy.link);
 	wl_global_destroy(manager->global);
 	free(manager);
@@ -679,6 +682,7 @@ struct wlr_data_control_manager_v1 *wlr_data_control_manager_v1_create(
 		return NULL;
 	}
 	wl_list_init(&manager->devices);
+
 	wl_signal_init(&manager->events.destroy);
 	wl_signal_init(&manager->events.new_device);
 

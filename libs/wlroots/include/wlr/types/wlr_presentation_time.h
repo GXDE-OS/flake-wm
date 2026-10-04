@@ -11,7 +11,6 @@
 
 #include <stdbool.h>
 #include <stddef.h>
-#include <time.h>
 #include <wayland-server-core.h>
 
 struct wlr_surface;
@@ -26,7 +25,9 @@ struct wlr_presentation {
 		struct wl_signal destroy;
 	} events;
 
-	struct wl_listener display_destroy;
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_presentation_feedback {
@@ -39,9 +40,11 @@ struct wlr_presentation_feedback {
 	uint32_t output_commit_seq;
 	bool zero_copy;
 
-	struct wl_listener output_commit;
-	struct wl_listener output_present;
-	struct wl_listener output_destroy;
+	struct {
+		struct wl_listener output_commit;
+		struct wl_listener output_present;
+		struct wl_listener output_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_presentation_event {
@@ -56,7 +59,7 @@ struct wlr_presentation_event {
 struct wlr_backend;
 
 struct wlr_presentation *wlr_presentation_create(struct wl_display *display,
-	struct wlr_backend *backend);
+	struct wlr_backend *backend, uint32_t version);
 /**
  * Mark the current surface's buffer as sampled.
  *
@@ -71,7 +74,7 @@ struct wlr_presentation *wlr_presentation_create(struct wl_display *display,
  * this surface.
  */
 struct wlr_presentation_feedback *wlr_presentation_surface_sampled(
-	struct wlr_presentation *presentation, struct wlr_surface *surface);
+	struct wlr_surface *surface);
 void wlr_presentation_feedback_send_presented(
 	struct wlr_presentation_feedback *feedback,
 	const struct wlr_presentation_event *event);
@@ -89,11 +92,10 @@ void wlr_presentation_event_from_output(struct wlr_presentation_event *event,
  *
  * Instead of calling wlr_presentation_surface_sampled() and managing the
  * struct wlr_presentation_feedback itself, the compositor can call this function
- * before a wlr_output_commit() call to indicate that the surface's current
+ * before a wlr_output_commit_state() call to indicate that the surface's current
  * contents have been copied to a buffer which will be displayed on the output.
  */
-void wlr_presentation_surface_textured_on_output(
-	struct wlr_presentation *presentation, struct wlr_surface *surface,
+void wlr_presentation_surface_textured_on_output(struct wlr_surface *surface,
 	struct wlr_output *output);
 /**
  * Mark the current surface's buffer as scanned out on the given output.
@@ -101,8 +103,7 @@ void wlr_presentation_surface_textured_on_output(
  * Same as wlr_presentation_surface_textured_on_output(), but indicates direct
  * scan-out.
  */
-void wlr_presentation_surface_scanned_out_on_output(
-	struct wlr_presentation *presentation, struct wlr_surface *surface,
+void wlr_presentation_surface_scanned_out_on_output(struct wlr_surface *surface,
 	struct wlr_output *output);
 
 #endif

@@ -29,14 +29,14 @@ static void send_key_event(struct wlr_x11_backend *x11, uint32_t key,
 }
 
 static void send_button_event(struct wlr_x11_output *output, uint32_t key,
-		enum wlr_button_state st, xcb_timestamp_t time) {
+		enum wl_pointer_button_state st, xcb_timestamp_t time) {
 	struct wlr_pointer_button_event ev = {
 		.pointer = &output->pointer,
 		.time_msec = time,
 		.button = key,
 		.state = st,
 	};
-	wl_signal_emit_mutable(&output->pointer.events.button, &ev);
+	wlr_pointer_notify_button(&output->pointer, &ev);
 	wl_signal_emit_mutable(&output->pointer.events.frame, &output->pointer);
 }
 
@@ -45,8 +45,8 @@ static void send_axis_event(struct wlr_x11_output *output, int32_t delta,
 	struct wlr_pointer_axis_event ev = {
 		.pointer = &output->pointer,
 		.time_msec = time,
-		.source = WLR_AXIS_SOURCE_WHEEL,
-		.orientation = WLR_AXIS_ORIENTATION_VERTICAL,
+		.source = WL_POINTER_AXIS_SOURCE_WHEEL,
+		.orientation = WL_POINTER_AXIS_VERTICAL_SCROLL,
 		// Most mice use a 15 degree angle per scroll click
 		.delta = delta * 15,
 		.delta_discrete = delta * WLR_POINTER_AXIS_DISCRETE_STEP,
@@ -155,15 +155,15 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 
 		switch (ev->detail) {
 		case XCB_BUTTON_INDEX_1:
-			send_button_event(output, BTN_LEFT, WLR_BUTTON_PRESSED,
+			send_button_event(output, BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED,
 				ev->time);
 			break;
 		case XCB_BUTTON_INDEX_2:
-			send_button_event(output, BTN_MIDDLE, WLR_BUTTON_PRESSED,
+			send_button_event(output, BTN_MIDDLE, WL_POINTER_BUTTON_STATE_PRESSED,
 				ev->time);
 			break;
 		case XCB_BUTTON_INDEX_3:
-			send_button_event(output, BTN_RIGHT, WLR_BUTTON_PRESSED,
+			send_button_event(output, BTN_RIGHT, WL_POINTER_BUTTON_STATE_PRESSED,
 				ev->time);
 			break;
 		case XCB_BUTTON_INDEX_4:
@@ -188,15 +188,15 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 
 		switch (ev->detail) {
 		case XCB_BUTTON_INDEX_1:
-			send_button_event(output, BTN_LEFT, WLR_BUTTON_RELEASED,
+			send_button_event(output, BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED,
 				ev->time);
 			break;
 		case XCB_BUTTON_INDEX_2:
-			send_button_event(output, BTN_MIDDLE, WLR_BUTTON_RELEASED,
+			send_button_event(output, BTN_MIDDLE, WL_POINTER_BUTTON_STATE_RELEASED,
 				ev->time);
 			break;
 		case XCB_BUTTON_INDEX_3:
-			send_button_event(output, BTN_RIGHT, WLR_BUTTON_RELEASED,
+			send_button_event(output, BTN_RIGHT, WL_POINTER_BUTTON_STATE_RELEASED,
 				ev->time);
 			break;
 		}
@@ -233,6 +233,10 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 		}
 
 		struct wlr_x11_touchpoint *touchpoint = calloc(1, sizeof(*touchpoint));
+		if (!touchpoint) {
+			return;
+		}
+
 		touchpoint->x11_id = ev->detail;
 		touchpoint->wayland_id = id;
 		wl_list_init(&touchpoint->link);

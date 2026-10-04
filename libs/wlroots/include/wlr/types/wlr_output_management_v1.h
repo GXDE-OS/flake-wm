@@ -39,9 +39,11 @@ struct wlr_output_manager_v1 {
 		struct wl_signal destroy;
 	} events;
 
-	struct wl_listener display_destroy;
-
 	void *data;
+
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_output_head_v1_state {
@@ -67,7 +69,9 @@ struct wlr_output_head_v1 {
 	struct wl_list resources; // wl_resource_get_link()
 	struct wl_list mode_resources; // wl_resource_get_link()
 
-	struct wl_listener output_destroy;
+	struct {
+		struct wl_listener output_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_output_configuration_v1 {
@@ -89,7 +93,9 @@ struct wlr_output_configuration_head_v1 {
 	// client state
 	struct wl_resource *resource; // can be NULL if finalized or disabled
 
-	struct wl_listener output_destroy;
+	struct {
+		struct wl_listener output_destroy;
+	} WLR_PRIVATE;
 };
 
 /**
@@ -153,5 +159,17 @@ struct wlr_output_configuration_head_v1 *
 void wlr_output_head_v1_state_apply(
 	const struct wlr_output_head_v1_state *head_state,
 	struct wlr_output_state *output_state);
+
+/**
+ * Build an array of struct wlr_output_state reflecting the new configuration.
+ *
+ * The states_len pointer will be populated with the number of elements in the
+ * array. The caller is responsible for freeing the array.
+ *
+ * The returned array can be passed to wlr_backend_test() and
+ * wlr_backend_commit().
+ */
+struct wlr_backend_output_state *wlr_output_configuration_v1_build_state(
+	const struct wlr_output_configuration_v1 *config, size_t *states_len);
 
 #endif

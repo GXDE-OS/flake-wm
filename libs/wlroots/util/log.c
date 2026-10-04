@@ -1,4 +1,3 @@
-#define _XOPEN_SOURCE 700 // for snprintf
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>

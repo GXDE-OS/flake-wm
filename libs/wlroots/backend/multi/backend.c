@@ -1,12 +1,11 @@
-#define _POSIX_C_SOURCE 200112L
 #include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <time.h>
 #include <wlr/backend/interface.h>
 #include <wlr/types/wlr_buffer.h>
+#include <wlr/types/wlr_output.h>
 #include <wlr/util/log.h>
-#include "backend/backend.h"
 #include "backend/multi.h"
 
 struct subbackend_state {
@@ -48,7 +47,12 @@ static void subbackend_state_destroy(struct subbackend_state *sub) {
 static void multi_backend_destroy(struct wlr_backend *wlr_backend) {
 	struct wlr_multi_backend *backend = multi_backend_from_backend(wlr_backend);
 
-	wl_list_remove(&backend->display_destroy.link);
+	wl_list_remove(&backend->event_loop_destroy.link);
+
+	wlr_backend_finish(wlr_backend);
+
+	assert(wl_list_empty(&backend->events.backend_add.listener_list));
+	assert(wl_list_empty(&backend->events.backend_remove.listener_list));
 
 	// Some backends may depend on other backends, ie. destroying a backend may
 	// also destroy other backends
@@ -58,8 +62,6 @@ static void multi_backend_destroy(struct wlr_backend *wlr_backend) {
 		wlr_backend_destroy(sub->backend);
 	}
 
-	// Destroy this backend only after removing all sub-backends
-	wlr_backend_finish(wlr_backend);
 	free(backend);
 }
 
@@ -76,42 +78,83 @@ static int multi_backend_get_drm_fd(struct wlr_backend *backend) {
 	return -1;
 }
 
-static uint32_t multi_backend_get_buffer_caps(struct wlr_backend *backend) {
-	struct wlr_multi_backend *multi = multi_backend_from_backend(backend);
+static int compare_output_state_backend(const void *data_a, const void *data_b) {
+	const struct wlr_backend_output_state *a = data_a;
+	const struct wlr_backend_output_state *b = data_b;
 
-	if (wl_list_empty(&multi->backends)) {
+	uintptr_t ptr_a = (uintptr_t)a->output->backend;
+	uintptr_t ptr_b = (uintptr_t)b->output->backend;
+
+	if (ptr_a == ptr_b) {
 		return 0;
+	} else if (ptr_a < ptr_b) {
+		return -1;
+	} else {
+		return 1;
 	}
+}
 
-	uint32_t caps = WLR_BUFFER_CAP_DATA_PTR | WLR_BUFFER_CAP_DMABUF
-			| WLR_BUFFER_CAP_SHM;
+static bool commit(struct wlr_backend *backend,
+		const struct wlr_backend_output_state *states, size_t states_len,
+		bool test_only) {
+	// Group states by backend, then perform one commit per backend
+	struct wlr_backend_output_state *by_backend = malloc(states_len * sizeof(by_backend[0]));
+	if (by_backend == NULL) {
+		return false;
+	}
+	memcpy(by_backend, states, states_len * sizeof(by_backend[0]));
+	qsort(by_backend, states_len, sizeof(by_backend[0]), compare_output_state_backend);
 
-	struct subbackend_state *sub;
-	wl_list_for_each(sub, &multi->backends, link) {
-		uint32_t backend_caps = backend_get_buffer_caps(sub->backend);
-		if (backend_caps != 0) {
-			// only count backend capable of presenting a buffer
-			caps = caps & backend_caps;
+	bool ok = true;
+	for (size_t i = 0; i < states_len;) {
+		struct wlr_backend *sub = by_backend[i].output->backend;
+
+		size_t len = 1;
+		while (i + len < states_len &&
+				by_backend[i + len].output->backend == sub) {
+			len++;
 		}
+
+		if (test_only) {
+			ok = wlr_backend_test(sub, &by_backend[i], len);
+		} else {
+			ok = wlr_backend_commit(sub, &by_backend[i], len);
+		}
+		if (!ok) {
+			break;
+		}
+		i += len;
 	}
 
-	return caps;
+	free(by_backend);
+	return ok;
+}
+
+static bool multi_backend_test(struct wlr_backend *backend,
+		const struct wlr_backend_output_state *states, size_t states_len) {
+	return commit(backend, states, states_len, true);
+}
+
+static bool multi_backend_commit(struct wlr_backend *backend,
+		const struct wlr_backend_output_state *states, size_t states_len) {
+	return commit(backend, states, states_len, false);
 }
 
 static const struct wlr_backend_impl backend_impl = {
 	.start = multi_backend_start,
 	.destroy = multi_backend_destroy,
 	.get_drm_fd = multi_backend_get_drm_fd,
-	.get_buffer_caps = multi_backend_get_buffer_caps,
+	.test = multi_backend_test,
+	.commit = multi_backend_commit,
 };
 
-static void handle_display_destroy(struct wl_listener *listener, void *data) {
+static void handle_event_loop_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_multi_backend *backend =
-		wl_container_of(listener, backend, display_destroy);
+		wl_container_of(listener, backend, event_loop_destroy);
 	multi_backend_destroy((struct wlr_backend*)backend);
 }
 
-struct wlr_backend *wlr_multi_backend_create(struct wl_display *display) {
+struct wlr_backend *wlr_multi_backend_create(struct wl_event_loop *loop) {
 	struct wlr_multi_backend *backend = calloc(1, sizeof(*backend));
 	if (!backend) {
 		wlr_log(WLR_ERROR, "Backend allocation failed");
@@ -124,8 +167,8 @@ struct wlr_backend *wlr_multi_backend_create(struct wl_display *display) {
 	wl_signal_init(&backend->events.backend_add);
 	wl_signal_init(&backend->events.backend_remove);
 
-	backend->display_destroy.notify = handle_display_destroy;
-	wl_display_add_destroy_listener(display, &backend->display_destroy);
+	backend->event_loop_destroy.notify = handle_event_loop_destroy;
+	wl_event_loop_add_destroy_listener(loop, &backend->event_loop_destroy);
 
 	return &backend->backend;
 }
@@ -163,6 +206,33 @@ static struct subbackend_state *multi_backend_get_subbackend(struct wlr_multi_ba
 	return NULL;
 }
 
+static void multi_backend_refresh_features(struct wlr_multi_backend *multi) {
+	multi->backend.buffer_caps = 0;
+	multi->backend.features.timeline = true;
+
+	bool has_buffer_cap = false;
+	uint32_t buffer_caps_intersection =
+		WLR_BUFFER_CAP_DATA_PTR | WLR_BUFFER_CAP_DMABUF | WLR_BUFFER_CAP_SHM;
+	struct subbackend_state *sub = NULL;
+	wl_list_for_each(sub, &multi->backends, link) {
+		// Only take into account backends capable of presenting a buffer
+		if (sub->backend->buffer_caps != 0) {
+			has_buffer_cap = true;
+			buffer_caps_intersection &= sub->backend->buffer_caps;
+		}
+
+		// timeline is only applicable to backends that support DMABUFs
+		if (sub->backend->buffer_caps & WLR_BUFFER_CAP_DMABUF) {
+			multi->backend.features.timeline = multi->backend.features.timeline &&
+				sub->backend->features.timeline;
+		}
+	}
+
+	if (has_buffer_cap) {
+		multi->backend.buffer_caps = buffer_caps_intersection;
+	}
+}
+
 bool wlr_multi_backend_add(struct wlr_backend *_multi,
 		struct wlr_backend *backend) {
 	assert(_multi && backend);
@@ -194,6 +264,7 @@ bool wlr_multi_backend_add(struct wlr_backend *_multi,
 	wl_signal_add(&backend->events.new_output, &sub->new_output);
 	sub->new_output.notify = new_output_reemit;
 
+	multi_backend_refresh_features(multi);
 	wl_signal_emit_mutable(&multi->events.backend_add, backend);
 	return true;
 }
@@ -208,6 +279,7 @@ void wlr_multi_backend_remove(struct wlr_backend *_multi,
 	if (sub) {
 		wl_signal_emit_mutable(&multi->events.backend_remove, backend);
 		subbackend_state_destroy(sub);
+		multi_backend_refresh_features(multi);
 	}
 }
 

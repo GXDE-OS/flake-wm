@@ -6,8 +6,8 @@
 #error "Add -DWLR_USE_UNSTABLE to enable unstable wlroots features"
 #endif
 
-#ifndef WLR_TYPES_WLR_LINUX_DMABUF_H
-#define WLR_TYPES_WLR_LINUX_DMABUF_H
+#ifndef WLR_TYPES_WLR_LINUX_DMABUF_V1_H
+#define WLR_TYPES_WLR_LINUX_DMABUF_V1_H
 
 #include <stdint.h>
 #include <sys/stat.h>
@@ -24,9 +24,9 @@ struct wlr_dmabuf_v1_buffer {
 	struct wl_resource *resource; // can be NULL if the client destroyed it
 	struct wlr_dmabuf_attributes attributes;
 
-	// private state
-
-	struct wl_listener release;
+	struct {
+		struct wl_listener release;
+	} WLR_PRIVATE;
 };
 
 /**
@@ -55,19 +55,22 @@ struct wlr_linux_dmabuf_v1 {
 		struct wl_signal destroy;
 	} events;
 
-	// private state
+	struct {
+		struct wlr_linux_dmabuf_feedback_v1_compiled *default_feedback;
+		struct wlr_drm_format_set default_formats; // for legacy clients
+		struct wl_list surfaces; // wlr_linux_dmabuf_v1_surface.link
 
-	struct wlr_linux_dmabuf_feedback_v1_compiled *default_feedback;
-	struct wlr_drm_format_set default_formats; // for legacy clients
-	struct wl_list surfaces; // wlr_linux_dmabuf_v1_surface.link
+		int main_device_fd; // to sanity check FDs sent by clients, -1 if unavailable
 
-	int main_device_fd; // to sanity check FDs sent by clients, -1 if unavailable
+		struct wl_listener display_destroy;
 
-	struct wl_listener display_destroy;
+		bool (*check_dmabuf_callback)(struct wlr_dmabuf_attributes *attribs, void *data);
+		void *check_dmabuf_callback_data;
+	} WLR_PRIVATE;
 };
 
 /**
- * Create the linux-dmabuf-unstable-v1 global.
+ * Create the linux-dmabuf-v1 global.
  *
  * Compositors using struct wlr_renderer should use
  * wlr_linux_dmabuf_v1_create_with_renderer() instead.
@@ -76,12 +79,21 @@ struct wlr_linux_dmabuf_v1 *wlr_linux_dmabuf_v1_create(struct wl_display *displa
 	uint32_t version, const struct wlr_linux_dmabuf_feedback_v1 *default_feedback);
 
 /**
- * Create the linux-dmabuf-unstable-v1 global.
+ * Create the linux-dmabuf-v1 global.
  *
  * The default DMA-BUF feedback is initialized from the struct wlr_renderer.
  */
 struct wlr_linux_dmabuf_v1 *wlr_linux_dmabuf_v1_create_with_renderer(struct wl_display *display,
 	uint32_t version, struct wlr_renderer *renderer);
+
+/**
+ * Set the dmabuf import check callback
+ *
+ * This can be used by consumers who want to implement specific dmabuf checks. Useful for
+ * users such as gamescope who do not use the rendering logic of wlroots.
+ */
+void wlr_linux_dmabuf_v1_set_check_dmabuf_callback(struct wlr_linux_dmabuf_v1 *linux_dmabuf,
+	bool (*callback)(struct wlr_dmabuf_attributes *attribs, void *data), void *data);
 
 /**
  * Set a surface's DMA-BUF feedback.

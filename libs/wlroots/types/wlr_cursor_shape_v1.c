@@ -1,18 +1,26 @@
 #include <assert.h>
 #include <stdlib.h>
+#include <wayland-server-core.h>
+#include <wayland-util.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_tablet_tool.h>
+
+#include "cursor-shape-v1-protocol.h"
 #include "types/wlr_tablet_v2.h"
 
-#define CURSOR_SHAPE_MANAGER_V1_VERSION 1
+#define CURSOR_SHAPE_MANAGER_V1_VERSION 2
 
 struct wlr_cursor_shape_device_v1 {
 	struct wl_resource *resource;
 	struct wlr_cursor_shape_manager_v1 *manager;
 	enum wlr_cursor_shape_manager_v1_device_type type;
 	struct wlr_seat_client *seat_client;
+	// NULL if device_type is not TABLET_TOOL
+	struct wlr_tablet_v2_tablet_tool *tablet_tool;
 
 	struct wl_listener seat_client_destroy;
+	struct wl_listener tablet_tool_destroy;
 };
 
 static const struct wp_cursor_shape_device_v1_interface device_impl;
@@ -40,7 +48,8 @@ static void device_handle_set_shape(struct wl_client *client, struct wl_resource
 		return;
 	}
 
-	if (shape == 0 || shape > WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_OUT) {
+	uint32_t version = wl_resource_get_version(device_resource);
+	if (!wp_cursor_shape_device_v1_shape_is_valid(shape, version)) {
 		wl_resource_post_error(device_resource, WP_CURSOR_SHAPE_DEVICE_V1_ERROR_INVALID_SHAPE,
 			"Invalid shape %"PRIu32, shape);
 		return;
@@ -49,6 +58,7 @@ static void device_handle_set_shape(struct wl_client *client, struct wl_resource
 	struct wlr_cursor_shape_manager_v1_request_set_shape_event event = {
 		.seat_client = device->seat_client,
 		.device_type = device->type,
+		.tablet_tool = device->tablet_tool,
 		.serial = serial,
 		.shape = shape,
 	};
@@ -65,6 +75,7 @@ static void device_destroy(struct wlr_cursor_shape_device_v1 *device) {
 		return;
 	}
 	wl_list_remove(&device->seat_client_destroy.link);
+	wl_list_remove(&device->tablet_tool_destroy.link);
 	wl_resource_set_user_data(device->resource, NULL); // make inert
 	free(device);
 }
@@ -79,9 +90,15 @@ static void device_handle_seat_client_destroy(struct wl_listener *listener, void
 	device_destroy(device);
 }
 
+static void device_handle_tablet_tool_destroy(struct wl_listener *listener, void *data) {
+	struct wlr_cursor_shape_device_v1 *device = wl_container_of(listener, device, tablet_tool_destroy);
+	device_destroy(device);
+}
+
 static void create_device(struct wl_resource *manager_resource, uint32_t id,
 		struct wlr_seat_client *seat_client,
-		enum wlr_cursor_shape_manager_v1_device_type type) {
+		enum wlr_cursor_shape_manager_v1_device_type type,
+		struct wlr_tablet_v2_tablet_tool *tablet_tool) {
 	struct wlr_cursor_shape_manager_v1 *manager = manager_from_resource(manager_resource);
 
 	struct wl_client *client = wl_resource_get_client(manager_resource);
@@ -105,13 +122,24 @@ static void create_device(struct wl_resource *manager_resource, uint32_t id,
 		return;
 	}
 
+	assert((type == WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_TABLET_TOOL) ==
+		(tablet_tool != NULL));
+
 	device->resource = device_resource;
 	device->manager = manager;
 	device->type = type;
+	device->tablet_tool = tablet_tool;
 	device->seat_client = seat_client;
 
 	device->seat_client_destroy.notify = device_handle_seat_client_destroy;
 	wl_signal_add(&seat_client->events.destroy, &device->seat_client_destroy);
+
+	if (tablet_tool != NULL) {
+	    device->tablet_tool_destroy.notify = device_handle_tablet_tool_destroy;
+	    wl_signal_add(&tablet_tool->wlr_tool->events.destroy, &device->tablet_tool_destroy);
+	} else {
+	    wl_list_init(&device->tablet_tool_destroy.link);
+	}
 
 	wl_resource_set_user_data(device_resource, device);
 }
@@ -120,18 +148,22 @@ static void manager_handle_get_pointer(struct wl_client *client, struct wl_resou
 		uint32_t id, struct wl_resource *pointer_resource) {
 	struct wlr_seat_client *seat_client = wlr_seat_client_from_pointer_resource(pointer_resource);
 	create_device(manager_resource, id, seat_client,
-		WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_POINTER);
+		WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_POINTER, NULL);
 }
 
 static void manager_handle_get_tablet_tool_v2(struct wl_client *client, struct wl_resource *manager_resource,
 		uint32_t id, struct wl_resource *tablet_tool_resource) {
 	struct wlr_tablet_tool_client_v2 *tablet_tool_client = tablet_tool_client_from_resource(tablet_tool_resource);
+
 	struct wlr_seat_client *seat_client = NULL;
-	if (tablet_tool_client != NULL) {
+	struct wlr_tablet_v2_tablet_tool *tablet_tool = NULL;
+	if (tablet_tool_client != NULL && tablet_tool_client->tool != NULL) {
 		seat_client = tablet_tool_client->seat->seat_client;
+		tablet_tool = tablet_tool_client->tool;
 	}
+
 	create_device(manager_resource, id, seat_client,
-		WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_TABLET_TOOL);
+		WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_TABLET_TOOL, tablet_tool);
 }
 
 static const struct wp_cursor_shape_manager_v1_interface manager_impl = {
@@ -158,6 +190,8 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 		wl_container_of(listener, manager, display_destroy);
 
 	wl_signal_emit_mutable(&manager->events.destroy, NULL);
+
+	assert(wl_list_empty(&manager->events.request_set_shape.listener_list));
 	assert(wl_list_empty(&manager->events.destroy.listener_list));
 
 	wl_global_destroy(manager->global);
@@ -225,6 +259,8 @@ static const char *const shape_names[] = {
 	[WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_SCROLL] = "all-scroll",
 	[WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_IN] = "zoom-in",
 	[WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_OUT] = "zoom-out",
+	[WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DND_ASK] = "dnd-ask",
+	[WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_RESIZE] = "all-resize",
 };
 
 const char *wlr_cursor_shape_v1_name(enum wp_cursor_shape_device_v1_shape shape) {

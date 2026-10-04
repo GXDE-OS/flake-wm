@@ -6,6 +6,8 @@
 #include <wlr/types/wlr_pointer.h>
 
 #include "interfaces/wlr_input_device.h"
+#include "util/set.h"
+#include "util/time.h"
 
 struct wlr_pointer *wlr_pointer_from_input_device(
 		struct wlr_input_device *input_device) {
@@ -36,7 +38,45 @@ void wlr_pointer_init(struct wlr_pointer *pointer,
 }
 
 void wlr_pointer_finish(struct wlr_pointer *pointer) {
+	int64_t time_msec = get_current_time_msec();
+	while (pointer->button_count > 0) {
+		struct wlr_pointer_button_event event = {
+			.pointer = pointer,
+			.time_msec = time_msec,
+			.button = pointer->buttons[pointer->button_count - 1],
+			.state = WL_POINTER_BUTTON_STATE_RELEASED,
+		};
+		wlr_pointer_notify_button(pointer, &event);
+	}
+
 	wlr_input_device_finish(&pointer->base);
 
+	assert(wl_list_empty(&pointer->events.motion.listener_list));
+	assert(wl_list_empty(&pointer->events.motion_absolute.listener_list));
+	assert(wl_list_empty(&pointer->events.button.listener_list));
+	assert(wl_list_empty(&pointer->events.axis.listener_list));
+	assert(wl_list_empty(&pointer->events.frame.listener_list));
+	assert(wl_list_empty(&pointer->events.swipe_begin.listener_list));
+	assert(wl_list_empty(&pointer->events.swipe_update.listener_list));
+	assert(wl_list_empty(&pointer->events.swipe_end.listener_list));
+	assert(wl_list_empty(&pointer->events.pinch_begin.listener_list));
+	assert(wl_list_empty(&pointer->events.pinch_update.listener_list));
+	assert(wl_list_empty(&pointer->events.pinch_end.listener_list));
+	assert(wl_list_empty(&pointer->events.hold_begin.listener_list));
+	assert(wl_list_empty(&pointer->events.hold_end.listener_list));
+
 	free(pointer->output_name);
+}
+
+void wlr_pointer_notify_button(struct wlr_pointer *pointer,
+		struct wlr_pointer_button_event *event) {
+	if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		set_add(pointer->buttons, &pointer->button_count,
+			WLR_POINTER_BUTTONS_CAP, event->button);
+	} else {
+		set_remove(pointer->buttons, &pointer->button_count,
+			WLR_POINTER_BUTTONS_CAP, event->button);
+	}
+
+	wl_signal_emit_mutable(&pointer->events.button, event);
 }

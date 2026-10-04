@@ -20,6 +20,14 @@ static void drag_handle_seat_client_destroy(struct wl_listener *listener,
 }
 
 static void drag_set_focus(struct wlr_drag *drag,
+	struct wlr_surface *surface, double sx, double sy);
+
+static void drag_handle_focus_destroy(struct wl_listener *listener, void *data) {
+	struct wlr_drag *drag = wl_container_of(listener, drag, focus_destroy);
+	drag_set_focus(drag, NULL, 0, 0);
+}
+
+static void drag_set_focus(struct wlr_drag *drag,
 		struct wlr_surface *surface, double sx, double sy) {
 	if (drag->focus == surface) {
 		return;
@@ -48,8 +56,11 @@ static void drag_set_focus(struct wlr_drag *drag,
 		}
 
 		drag->focus_client = NULL;
-		drag->focus = NULL;
 	}
+
+	wl_list_remove(&drag->focus_destroy.link);
+	wl_list_init(&drag->focus_destroy.link);
+	drag->focus = NULL;
 
 	if (!surface) {
 		goto out;
@@ -99,6 +110,8 @@ static void drag_set_focus(struct wlr_drag *drag,
 
 	drag->focus = surface;
 	drag->focus_client = focus_client;
+	drag->focus_destroy.notify = drag_handle_focus_destroy;
+	wl_signal_add(&surface->events.destroy, &drag->focus_destroy);
 	drag->seat_client_destroy.notify = drag_handle_seat_client_destroy;
 	wl_signal_add(&focus_client->events.destroy, &drag->seat_client_destroy);
 
@@ -110,6 +123,9 @@ static void drag_icon_destroy(struct wlr_drag_icon *icon) {
 	icon->drag->icon = NULL;
 	wl_list_remove(&icon->surface_destroy.link);
 	wl_signal_emit_mutable(&icon->events.destroy, icon);
+
+	assert(wl_list_empty(&icon->events.destroy.listener_list));
+
 	free(icon);
 }
 
@@ -147,9 +163,15 @@ static void drag_destroy(struct wlr_drag *drag) {
 	// signal handler.
 	wl_signal_emit_mutable(&drag->events.destroy, drag);
 
+	assert(wl_list_empty(&drag->events.focus.listener_list));
+	assert(wl_list_empty(&drag->events.motion.listener_list));
+	assert(wl_list_empty(&drag->events.drop.listener_list));
+	assert(wl_list_empty(&drag->events.destroy.listener_list));
+
 	if (drag->source) {
 		wl_list_remove(&drag->source_destroy.link);
 	}
+	wl_list_remove(&drag->focus_destroy.link);
 
 	if (drag->icon != NULL) {
 		drag_icon_destroy(drag->icon);
@@ -234,8 +256,9 @@ static uint32_t drag_handle_pointer_button(struct wlr_seat_pointer_grab *grab,
 }
 
 static void drag_handle_pointer_axis(struct wlr_seat_pointer_grab *grab,
-		uint32_t time, enum wlr_axis_orientation orientation, double value,
-		int32_t value_discrete, enum wlr_axis_source source) {
+		uint32_t time, enum wl_pointer_axis orientation, double value,
+		int32_t value_discrete, enum wl_pointer_axis_source source,
+		enum wl_pointer_axis_relative_direction relative_direction) {
 	// This space is intentionally left blank
 }
 
@@ -260,18 +283,24 @@ static uint32_t drag_handle_touch_down(struct wlr_seat_touch_grab *grab,
 	return 0;
 }
 
-static void drag_handle_touch_up(struct wlr_seat_touch_grab *grab,
+static uint32_t drag_handle_touch_up(struct wlr_seat_touch_grab *grab,
 		uint32_t time, struct wlr_touch_point *point) {
 	struct wlr_drag *drag = grab->data;
 	if (drag->grab_touch_id != point->touch_id) {
-		return;
+		return 0;
 	}
 
-	if (drag->focus_client) {
+	if (drag->focus_client && drag->source->current_dnd_action &&
+			drag->source->accepted) {
 		drag_drop(drag, time);
+	} else if (drag->source->impl->dnd_finish) {
+		// This will end the grab and free `drag`
+		wlr_data_source_destroy(drag->source);
+		return 0;
 	}
 
 	drag_destroy(drag);
+	return 0;
 }
 
 static void drag_handle_touch_motion(struct wlr_seat_touch_grab *grab,
@@ -284,6 +313,14 @@ static void drag_handle_touch_motion(struct wlr_seat_touch_grab *grab,
 				wl_fixed_from_double(point->sx),
 				wl_fixed_from_double(point->sy));
 		}
+
+		struct wlr_drag_motion_event event = {
+			.drag = drag,
+			.time = time,
+			.sx = point->sx,
+			.sy = point->sy,
+		};
+		wl_signal_emit_mutable(&drag->events.motion, &event);
 	}
 }
 
@@ -298,6 +335,12 @@ static void drag_handle_touch_cancel(struct wlr_seat_touch_grab *grab) {
 	drag_destroy(drag);
 }
 
+static void drag_handle_clear_focus(struct wlr_seat_touch_grab *grab, uint32_t time_msec,
+		struct wlr_touch_point *point) {
+	struct wlr_drag *drag = grab->data;
+	drag_set_focus(drag, NULL, 0, 0);
+}
+
 static const struct wlr_touch_grab_interface
 		data_device_touch_drag_interface = {
 	.down = drag_handle_touch_down,
@@ -305,6 +348,7 @@ static const struct wlr_touch_grab_interface
 	.motion = drag_handle_touch_motion,
 	.enter = drag_handle_touch_enter,
 	.cancel = drag_handle_touch_cancel,
+	.clear_focus = drag_handle_clear_focus,
 };
 
 static void drag_handle_keyboard_enter(struct wlr_seat_keyboard_grab *grab,
@@ -346,6 +390,7 @@ static const struct wlr_keyboard_grab_interface
 static void drag_handle_icon_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_drag *drag = wl_container_of(listener, drag, icon_destroy);
 	drag->icon = NULL;
+	wl_list_remove(&drag->icon_destroy.link);
 }
 
 static void drag_handle_drag_source_destroy(struct wl_listener *listener,
@@ -407,6 +452,8 @@ struct wlr_drag *wlr_drag_create(struct wlr_seat_client *seat_client,
 	wl_signal_init(&drag->events.motion);
 	wl_signal_init(&drag->events.drop);
 	wl_signal_init(&drag->events.destroy);
+
+	wl_list_init(&drag->focus_destroy.link);
 
 	drag->seat = seat_client->seat;
 	drag->seat_client = seat_client;

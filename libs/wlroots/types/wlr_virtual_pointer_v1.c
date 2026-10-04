@@ -71,9 +71,9 @@ static void virtual_pointer_button(struct wl_client *client,
 		.pointer = &pointer->pointer,
 		.time_msec = time,
 		.button = button,
-		.state = state ? WLR_BUTTON_PRESSED : WLR_BUTTON_RELEASED
+		.state = state ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED,
 	};
-	wl_signal_emit_mutable(&pointer->pointer.events.button, &event);
+	wlr_pointer_notify_button(&pointer->pointer, &event);
 }
 
 static void virtual_pointer_axis(struct wl_client *client,
@@ -134,8 +134,11 @@ static void virtual_pointer_axis_source(struct wl_client *client,
 	if (pointer == NULL) {
 		return;
 	}
-	pointer->axis_event[pointer->axis].pointer = &pointer->pointer;
-	pointer->axis_event[pointer->axis].source = source;
+	int n_axis = sizeof(pointer->axis_event) / sizeof(pointer->axis_event[0]);
+	for (int i = 0; i < n_axis; i++) {
+		pointer->axis_event[i].pointer = &pointer->pointer;
+		pointer->axis_event[i].source = source;
+	}
 }
 
 static void virtual_pointer_axis_stop(struct wl_client *client,
@@ -308,6 +311,10 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_virtual_pointer_manager_v1 *manager =
 		wl_container_of(listener, manager, display_destroy);
 	wl_signal_emit_mutable(&manager->events.destroy, manager);
+
+	assert(wl_list_empty(&manager->events.new_virtual_pointer.listener_list));
+	assert(wl_list_empty(&manager->events.destroy.listener_list));
+
 	wl_list_remove(&manager->display_destroy.link);
 	wl_global_destroy(manager->global);
 	struct wlr_virtual_pointer_v1 *pointer, *pointer_tmp;
@@ -329,6 +336,7 @@ struct wlr_virtual_pointer_manager_v1* wlr_virtual_pointer_manager_v1_create(
 
 	wl_signal_init(&manager->events.new_virtual_pointer);
 	wl_signal_init(&manager->events.destroy);
+
 	manager->global = wl_global_create(display,
 		&zwlr_virtual_pointer_manager_v1_interface, 2, manager,
 		virtual_pointer_manager_bind);

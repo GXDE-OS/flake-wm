@@ -21,7 +21,9 @@ struct wlr_drm_buffer {
 	struct wl_resource *resource; // can be NULL if the client destroyed it
 	struct wlr_dmabuf_attributes dmabuf;
 
-	struct wl_listener release;
+	struct {
+		struct wl_listener release;
+	} WLR_PRIVATE;
 };
 
 /**
@@ -29,6 +31,9 @@ struct wlr_drm_buffer {
  *
  * It only implements the minimum necessary for modern clients to behave
  * properly. In particular, flink handles are left unimplemented.
+ *
+ * Deprecated: this protocol is legacy and superseded by linux-dmabuf. The
+ * implementation will be dropped in a future wlroots version.
  */
 struct wlr_drm {
 	struct wl_global *global;
@@ -37,12 +42,12 @@ struct wlr_drm {
 		struct wl_signal destroy;
 	} events;
 
-	// private state
+	struct {
+		char *node_name;
+		struct wlr_drm_format_set formats;
 
-	char *node_name;
-	struct wlr_drm_format_set formats;
-
-	struct wl_listener display_destroy;
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_drm_buffer *wlr_drm_buffer_try_from_resource(

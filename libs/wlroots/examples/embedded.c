@@ -1,13 +1,12 @@
-#define _POSIX_C_SOURCE 200112L
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <wayland-client.h>
+#include <wayland-client-protocol.h>
 #include <wayland-egl.h>
-#include <wayland-server.h>
+#include <wayland-server-core.h>
 #include <wlr/backend/wayland.h>
 #include <wlr/render/allocator.h>
 #include <wlr/types/wlr_compositor.h>
@@ -16,6 +15,12 @@
 #include <wlr/util/log.h>
 
 #include "xdg-shell-client-protocol.h"
+
+struct surface {
+	struct wlr_surface *wlr;
+	struct wl_listener commit;
+	struct wl_listener destroy;
+};
 
 static struct wl_display *remote_display = NULL;
 static struct wl_compositor *compositor = NULL;
@@ -120,8 +125,34 @@ static void output_handle_frame(struct wl_listener *listener, void *data) {
 	wlr_scene_output_send_frame_done(scene_output, &now);
 }
 
+static void surface_handle_commit(struct wl_listener *listener, void *data) {
+	struct surface *surface = wl_container_of(listener, surface, commit);
+	struct wlr_xdg_toplevel *xdg_toplevel =
+		wlr_xdg_toplevel_try_from_wlr_surface(surface->wlr);
+	if (xdg_toplevel != NULL && xdg_toplevel->base->initial_commit) {
+		wlr_xdg_toplevel_set_size(xdg_toplevel, 0, 0);
+	}
+}
+
+static void surface_handle_destroy(struct wl_listener *listener, void *data) {
+	struct surface *surface = wl_container_of(listener, surface, destroy);
+	wl_list_remove(&surface->commit.link);
+	wl_list_remove(&surface->destroy.link);
+	free(surface);
+}
+
 static void handle_new_surface(struct wl_listener *listener, void *data) {
 	struct wlr_surface *wlr_surface = data;
+
+	struct surface *surface = calloc(1, sizeof(*surface));
+	surface->wlr = wlr_surface;
+
+	surface->commit.notify = surface_handle_commit;
+	wl_signal_add(&wlr_surface->events.commit, &surface->commit);
+
+	surface->destroy.notify = surface_handle_destroy;
+	wl_signal_add(&wlr_surface->events.destroy, &surface->destroy);
+
 	wlr_scene_surface_create(&scene->tree, wlr_surface);
 }
 
@@ -159,7 +190,8 @@ int main(int argc, char *argv[]) {
 	init_egl(remote_display);
 
 	struct wl_display *local_display = wl_display_create();
-	struct wlr_backend *backend = wlr_wl_backend_create(local_display, remote_display);
+	struct wl_event_loop *event_loop = wl_display_get_event_loop(local_display);
+	struct wlr_backend *backend = wlr_wl_backend_create(event_loop, remote_display);
 	struct wlr_renderer *renderer = wlr_renderer_autocreate(backend);
 	wlr_renderer_init_wl_display(renderer, local_display);
 	struct wlr_allocator *allocator = wlr_allocator_autocreate(backend, renderer);

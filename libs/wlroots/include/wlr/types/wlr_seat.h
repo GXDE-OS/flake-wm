@@ -78,15 +78,17 @@ struct wlr_touch_point {
 	struct wlr_seat_client *focus_client;
 	double sx, sy;
 
-	struct wl_listener surface_destroy;
-	struct wl_listener focus_surface_destroy;
-	struct wl_listener client_destroy;
-
 	struct {
 		struct wl_signal destroy;
 	} events;
 
 	struct wl_list link;
+
+	struct {
+		struct wl_listener surface_destroy;
+		struct wl_listener focus_surface_destroy;
+		struct wl_listener client_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_seat_pointer_grab;
@@ -98,10 +100,11 @@ struct wlr_pointer_grab_interface {
 	void (*motion)(struct wlr_seat_pointer_grab *grab, uint32_t time_msec,
 			double sx, double sy);
 	uint32_t (*button)(struct wlr_seat_pointer_grab *grab, uint32_t time_msec,
-			uint32_t button, enum wlr_button_state state);
+			uint32_t button, enum wl_pointer_button_state state);
 	void (*axis)(struct wlr_seat_pointer_grab *grab, uint32_t time_msec,
-			enum wlr_axis_orientation orientation, double value,
-			int32_t value_discrete, enum wlr_axis_source source);
+			enum wl_pointer_axis orientation, double value,
+			int32_t value_discrete, enum wl_pointer_axis_source source,
+			enum wl_pointer_axis_relative_direction relative_direction);
 	void (*frame)(struct wlr_seat_pointer_grab *grab);
 	void (*cancel)(struct wlr_seat_pointer_grab *grab);
 };
@@ -125,7 +128,7 @@ struct wlr_seat_touch_grab;
 struct wlr_touch_grab_interface {
 	uint32_t (*down)(struct wlr_seat_touch_grab *grab, uint32_t time_msec,
 			struct wlr_touch_point *point);
-	void (*up)(struct wlr_seat_touch_grab *grab, uint32_t time_msec,
+	uint32_t (*up)(struct wlr_seat_touch_grab *grab, uint32_t time_msec,
 			struct wlr_touch_point *point);
 	void (*motion)(struct wlr_seat_touch_grab *grab, uint32_t time_msec,
 			struct wlr_touch_point *point);
@@ -136,7 +139,9 @@ struct wlr_touch_grab_interface {
 	void (*cancel)(struct wlr_seat_touch_grab *grab);
 	// Send wl_touch.cancel
 	void (*wl_cancel)(struct wlr_seat_touch_grab *grab,
-			struct wlr_surface *surface);
+			struct wlr_seat_client *seat_client);
+	void (*clear_focus)(struct wlr_seat_touch_grab *grab, uint32_t time_msec,
+			struct wlr_touch_point *point);
 };
 
 /**
@@ -169,7 +174,10 @@ struct wlr_seat_pointer_grab {
 	void *data;
 };
 
-#define WLR_POINTER_BUTTONS_CAP 16
+struct wlr_seat_pointer_button {
+	uint32_t button;
+	size_t n_pressed;
+};
 
 struct wlr_seat_pointer_state {
 	struct wlr_seat *seat;
@@ -181,19 +189,23 @@ struct wlr_seat_pointer_state {
 	struct wlr_seat_pointer_grab *default_grab;
 
 	bool sent_axis_source;
-	enum wlr_axis_source cached_axis_source;
+	enum wl_pointer_axis_source cached_axis_source;
 
-	uint32_t buttons[WLR_POINTER_BUTTONS_CAP];
+	struct wlr_seat_pointer_button buttons[WLR_POINTER_BUTTONS_CAP];
 	size_t button_count;
+
 	uint32_t grab_button;
 	uint32_t grab_serial;
 	uint32_t grab_time;
 
-	struct wl_listener surface_destroy;
 
 	struct {
 		struct wl_signal focus_change; // struct wlr_seat_pointer_focus_change_event
 	} events;
+
+	struct {
+		struct wl_listener surface_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_seat_keyboard_state {
@@ -203,18 +215,20 @@ struct wlr_seat_keyboard_state {
 	struct wlr_seat_client *focused_client;
 	struct wlr_surface *focused_surface;
 
-	struct wl_listener keyboard_destroy;
-	struct wl_listener keyboard_keymap;
-	struct wl_listener keyboard_repeat_info;
-
-	struct wl_listener surface_destroy;
-
 	struct wlr_seat_keyboard_grab *grab;
 	struct wlr_seat_keyboard_grab *default_grab;
 
 	struct {
 		struct wl_signal focus_change; // struct wlr_seat_keyboard_focus_change_event
 	} events;
+
+	struct {
+		struct wl_listener keyboard_destroy;
+		struct wl_listener keyboard_keymap;
+		struct wl_listener keyboard_repeat_info;
+
+		struct wl_listener surface_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_seat_touch_state {
@@ -238,7 +252,6 @@ struct wlr_seat {
 	char *name;
 	uint32_t capabilities;
 	uint32_t accumulated_capabilities;
-	struct timespec last_event;
 
 	struct wlr_data_source *selection_source;
 	uint32_t selection_serial;
@@ -256,11 +269,6 @@ struct wlr_seat {
 	struct wlr_seat_pointer_state pointer_state;
 	struct wlr_seat_keyboard_state keyboard_state;
 	struct wlr_seat_touch_state touch_state;
-
-	struct wl_listener display_destroy;
-	struct wl_listener selection_source_destroy;
-	struct wl_listener primary_selection_source_destroy;
-	struct wl_listener drag_source_destroy;
 
 	struct {
 		struct wl_signal pointer_grab_begin;
@@ -297,6 +305,13 @@ struct wlr_seat {
 	} events;
 
 	void *data;
+
+	struct {
+		struct wl_listener display_destroy;
+		struct wl_listener selection_source_destroy;
+		struct wl_listener primary_selection_source_destroy;
+		struct wl_listener drag_source_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_seat_pointer_request_set_cursor_event {
@@ -398,7 +413,7 @@ void wlr_seat_pointer_send_motion(struct wlr_seat *wlr_seat, uint32_t time_msec,
  * instead.
  */
 uint32_t wlr_seat_pointer_send_button(struct wlr_seat *wlr_seat,
-		uint32_t time_msec, uint32_t button, enum wlr_button_state state);
+		uint32_t time_msec, uint32_t button, enum wl_pointer_button_state state);
 
 /**
  * Send an axis event to the surface with pointer focus. This function does not
@@ -406,8 +421,9 @@ uint32_t wlr_seat_pointer_send_button(struct wlr_seat *wlr_seat,
  * instead.
  */
 void wlr_seat_pointer_send_axis(struct wlr_seat *wlr_seat, uint32_t time_msec,
-		enum wlr_axis_orientation orientation, double value,
-		int32_t value_discrete, enum wlr_axis_source source);
+		enum wl_pointer_axis orientation, double value,
+		int32_t value_discrete, enum wl_pointer_axis_source source,
+		enum wl_pointer_axis_relative_direction relative_direction);
 
 /**
  * Send a frame event to the surface with pointer focus. This function does not
@@ -451,14 +467,15 @@ void wlr_seat_pointer_notify_motion(struct wlr_seat *wlr_seat,
  * pointer.
  */
 uint32_t wlr_seat_pointer_notify_button(struct wlr_seat *wlr_seat,
-		uint32_t time_msec, uint32_t button, enum wlr_button_state state);
+		uint32_t time_msec, uint32_t button, enum wl_pointer_button_state state);
 
 /**
  * Notify the seat of an axis event. Defers to any grab of the pointer.
  */
 void wlr_seat_pointer_notify_axis(struct wlr_seat *wlr_seat, uint32_t time_msec,
-		enum wlr_axis_orientation orientation, double value,
-		int32_t value_discrete, enum wlr_axis_source source);
+		enum wl_pointer_axis orientation, double value,
+		int32_t value_discrete, enum wl_pointer_axis_source source,
+		enum wl_pointer_axis_relative_direction relative_direction);
 
 /**
  * Notify the seat of a frame event. Frame events are sent to end a group of
@@ -615,7 +632,7 @@ uint32_t wlr_seat_touch_send_down(struct wlr_seat *seat,
  * event. This will remove the touch point. This function does not respect touch
  * grabs: you probably want wlr_seat_touch_notify_up() instead.
  */
-void wlr_seat_touch_send_up(struct wlr_seat *seat, uint32_t time_msec,
+uint32_t wlr_seat_touch_send_up(struct wlr_seat *seat, uint32_t time_msec,
 		int32_t touch_id);
 
 /**
@@ -629,11 +646,12 @@ void wlr_seat_touch_send_motion(struct wlr_seat *seat, uint32_t time_msec,
 
 /**
  * Notify the seat that this is a global gesture and the client should cancel
- * processing it. The event will go to the client for the surface given.
+ * processing it. The event will go to the client given.
  * This function does not respect touch grabs: you probably want
  * wlr_seat_touch_notify_cancel() instead.
  */
-void wlr_seat_touch_send_cancel(struct wlr_seat *seat, struct wlr_surface *surface);
+void wlr_seat_touch_send_cancel(struct wlr_seat *seat,
+		struct wlr_seat_client *seat_client);
 
 void wlr_seat_touch_send_frame(struct wlr_seat *seat);
 
@@ -649,7 +667,7 @@ uint32_t wlr_seat_touch_notify_down(struct wlr_seat *seat,
  * Notify the seat that the touch point given by `touch_id` is up. Defers to any
  * grab of the touch device.
  */
-void wlr_seat_touch_notify_up(struct wlr_seat *seat, uint32_t time_msec,
+uint32_t wlr_seat_touch_notify_up(struct wlr_seat *seat, uint32_t time_msec,
 		int32_t touch_id);
 
 /**
@@ -666,9 +684,11 @@ void wlr_seat_touch_notify_motion(struct wlr_seat *seat, uint32_t time_msec,
  * cancel processing it. Defers to any grab of the touch device.
  */
 void wlr_seat_touch_notify_cancel(struct wlr_seat *seat,
-		struct wlr_surface *surface);
+		struct wlr_seat_client *seat_client);
 
 void wlr_seat_touch_notify_frame(struct wlr_seat *seat);
+void wlr_seat_touch_notify_clear_focus(struct wlr_seat *seat,
+		uint32_t time_msec, int32_t touch_id);
 
 /**
  * How many touch points are currently down for the seat.
@@ -744,6 +764,6 @@ struct wlr_seat_client *wlr_seat_client_from_pointer_resource(
 /**
  * Check whether a surface has bound to touch events.
  */
-bool wlr_surface_accepts_touch(struct wlr_seat *wlr_seat, struct wlr_surface *surface);
+bool wlr_surface_accepts_touch(struct wlr_surface *surface, struct wlr_seat *wlr_seat);
 
 #endif

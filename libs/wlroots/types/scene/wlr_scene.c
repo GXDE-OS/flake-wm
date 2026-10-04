@@ -1,26 +1,35 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wlr/backend.h>
 #include <wlr/render/swapchain.h>
+#include <wlr/render/drm_syncobj.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/types/wlr_color_management_v1.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_damage_ring.h>
-#include <wlr/types/wlr_matrix.h>
+#include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/util/log.h>
 #include <wlr/util/region.h>
-#include "types/wlr_buffer.h"
+#include <wlr/util/transform.h>
+#include "render/color.h"
 #include "types/wlr_output.h"
 #include "types/wlr_scene.h"
 #include "util/array.h"
 #include "util/env.h"
 #include "util/time.h"
 
-#define HIGHLIGHT_DAMAGE_FADEOUT_TIME 250
+#include <wlr/config.h>
+
+#if WLR_HAS_XWAYLAND
+#include <wlr/xwayland/xwayland.h>
+#endif
+
+#define DMABUF_FEEDBACK_DEBOUNCE_FRAMES  30
+#define HIGHLIGHT_DAMAGE_FADEOUT_TIME   250
 
 struct wlr_scene_tree *wlr_scene_tree_from_node(struct wlr_scene_node *node) {
 	assert(node->type == WLR_SCENE_NODE_TREE);
@@ -82,6 +91,11 @@ struct highlight_region {
 	struct wl_list link;
 };
 
+static void scene_buffer_set_buffer(struct wlr_scene_buffer *scene_buffer,
+	struct wlr_buffer *buffer);
+static void scene_buffer_set_texture(struct wlr_scene_buffer *scene_buffer,
+	struct wlr_texture *texture);
+
 void wlr_scene_node_destroy(struct wlr_scene_node *node) {
 	if (node == NULL) {
 		return;
@@ -110,9 +124,16 @@ void wlr_scene_node_destroy(struct wlr_scene_node *node) {
 			}
 		}
 
-		wlr_texture_destroy(scene_buffer->texture);
-		wlr_buffer_unlock(scene_buffer->buffer);
+		scene_buffer_set_buffer(scene_buffer, NULL);
+		scene_buffer_set_texture(scene_buffer, NULL);
 		pixman_region32_fini(&scene_buffer->opaque_region);
+		wlr_drm_syncobj_timeline_unref(scene_buffer->wait_timeline);
+
+		assert(wl_list_empty(&scene_buffer->events.output_leave.listener_list));
+		assert(wl_list_empty(&scene_buffer->events.output_enter.listener_list));
+		assert(wl_list_empty(&scene_buffer->events.outputs_update.listener_list));
+		assert(wl_list_empty(&scene_buffer->events.output_sample.listener_list));
+		assert(wl_list_empty(&scene_buffer->events.frame_done.listener_list));
 	} else if (node->type == WLR_SCENE_NODE_TREE) {
 		struct wlr_scene_tree *scene_tree = wlr_scene_tree_from_node(node);
 
@@ -123,8 +144,9 @@ void wlr_scene_node_destroy(struct wlr_scene_node *node) {
 				wlr_scene_output_destroy(scene_output);
 			}
 
-			wl_list_remove(&scene->presentation_destroy.link);
 			wl_list_remove(&scene->linux_dmabuf_v1_destroy.link);
+			wl_list_remove(&scene->gamma_control_manager_v1_destroy.link);
+			wl_list_remove(&scene->gamma_control_manager_v1_set_gamma.link);
 		} else {
 			assert(node->parent);
 		}
@@ -135,6 +157,8 @@ void wlr_scene_node_destroy(struct wlr_scene_node *node) {
 			wlr_scene_node_destroy(child);
 		}
 	}
+
+	assert(wl_list_empty(&node->events.destroy.listener_list));
 
 	wl_list_remove(&node->link);
 	pixman_region32_fini(&node->visible);
@@ -157,8 +181,11 @@ struct wlr_scene *wlr_scene_create(void) {
 	scene_tree_init(&scene->tree, NULL);
 
 	wl_list_init(&scene->outputs);
-	wl_list_init(&scene->presentation_destroy.link);
 	wl_list_init(&scene->linux_dmabuf_v1_destroy.link);
+	wl_list_init(&scene->gamma_control_manager_v1_destroy.link);
+	wl_list_init(&scene->gamma_control_manager_v1_set_gamma.link);
+
+	scene->restack_xwayland_surfaces = true;
 
 	const char *debug_damage_options[] = {
 		"none",
@@ -170,6 +197,7 @@ struct wlr_scene *wlr_scene_create(void) {
 	scene->debug_damage_option = env_parse_switch("WLR_SCENE_DEBUG_DAMAGE", debug_damage_options);
 	scene->direct_scanout = !env_parse_bool("WLR_SCENE_DISABLE_DIRECT_SCANOUT");
 	scene->calculate_visibility = !env_parse_bool("WLR_SCENE_DISABLE_VISIBILITY");
+	scene->highlight_transparent_region = env_parse_bool("WLR_SCENE_HIGHLIGHT_TRANSPARENT_REGION");
 
 	return scene;
 }
@@ -185,8 +213,6 @@ struct wlr_scene_tree *wlr_scene_tree_create(struct wlr_scene_tree *parent) {
 	scene_tree_init(tree, parent);
 	return tree;
 }
-
-static void scene_node_get_size(struct wlr_scene_node *node, int *lx, int *ly);
 
 typedef bool (*scene_node_box_iterator_func_t)(struct wlr_scene_node *node,
 	int sx, int sy, void *data);
@@ -251,7 +277,7 @@ static void scene_node_opaque_region(struct wlr_scene_node *node, int x, int y,
 			return;
 		}
 
-		if (!buffer_is_opaque(scene_buffer->buffer)) {
+		if (!scene_buffer->buffer_is_opaque) {
 			pixman_region32_copy(opaque, &scene_buffer->opaque_region);
 			pixman_region32_intersect_rect(opaque, opaque, 0, 0, width, height);
 			pixman_region32_translate(opaque, x, y);
@@ -265,12 +291,18 @@ static void scene_node_opaque_region(struct wlr_scene_node *node, int x, int y,
 
 struct scene_update_data {
 	pixman_region32_t *visible;
-	pixman_region32_t *update_region;
+	const pixman_region32_t *update_region;
+	struct wlr_box update_box;
 	struct wl_list *outputs;
 	bool calculate_visibility;
+	bool restack_xwayland_surfaces;
+
+#if WLR_HAS_XWAYLAND
+	struct wlr_xwayland_surface *restack_above;
+#endif
 };
 
-static uint32_t region_area(pixman_region32_t *region) {
+static uint32_t region_area(const pixman_region32_t *region) {
 	uint32_t area = 0;
 
 	int nrects;
@@ -282,11 +314,11 @@ static uint32_t region_area(pixman_region32_t *region) {
 	return area;
 }
 
-static void scale_output_damage(pixman_region32_t *damage, float scale) {
-	wlr_region_scale(damage, damage, scale);
+static void scale_region(pixman_region32_t *region, float scale, bool round_up) {
+	wlr_region_scale(region, region, scale);
 
-	if (floor(scale) != scale) {
-		wlr_region_expand(damage, damage, 1);
+	if (round_up && floor(scale) != scale) {
+		wlr_region_expand(region, region, 1);
 	}
 }
 
@@ -302,18 +334,68 @@ struct render_data {
 	pixman_region32_t damage;
 };
 
-static void transform_output_damage(pixman_region32_t *damage, const struct render_data *data) {
+static void logical_to_buffer_coords(pixman_region32_t *region, const struct render_data *data,
+		bool round_up) {
 	enum wl_output_transform transform = wlr_output_transform_invert(data->transform);
-	wlr_region_transform(damage, damage, transform, data->trans_width, data->trans_height);
+	scale_region(region, data->scale, round_up);
+	wlr_region_transform(region, region, transform, data->trans_width, data->trans_height);
+}
+
+static void output_to_buffer_coords(pixman_region32_t *damage, struct wlr_output *output) {
+	int width, height;
+	wlr_output_transformed_resolution(output, &width, &height);
+
+	wlr_region_transform(damage, damage,
+		wlr_output_transform_invert(output->transform), width, height);
+}
+
+static int scale_length(int length, int offset, float scale) {
+	return round((offset + length) * scale) - round(offset * scale);
+}
+
+static void scale_box(struct wlr_box *box, float scale) {
+	box->width = scale_length(box->width, box->x, scale);
+	box->height = scale_length(box->height, box->y, scale);
+	box->x = round(box->x * scale);
+	box->y = round(box->y * scale);
 }
 
 static void transform_output_box(struct wlr_box *box, const struct render_data *data) {
 	enum wl_output_transform transform = wlr_output_transform_invert(data->transform);
+	scale_box(box, data->scale);
 	wlr_box_transform(box, box, transform, data->trans_width, data->trans_height);
 }
 
-static void scene_damage_outputs(struct wlr_scene *scene, pixman_region32_t *damage) {
-	if (!pixman_region32_not_empty(damage)) {
+static void scene_output_damage(struct wlr_scene_output *scene_output,
+		const pixman_region32_t *damage) {
+	struct wlr_output *output = scene_output->output;
+
+	pixman_region32_t clipped;
+	pixman_region32_init(&clipped);
+	pixman_region32_intersect_rect(&clipped, damage, 0, 0, output->width, output->height);
+
+	if (!pixman_region32_empty(&clipped)) {
+		wlr_output_schedule_frame(scene_output->output);
+		wlr_damage_ring_add(&scene_output->damage_ring, &clipped);
+
+		pixman_region32_union(&scene_output->pending_commit_damage,
+			&scene_output->pending_commit_damage, &clipped);
+	}
+
+	pixman_region32_fini(&clipped);
+}
+
+static void scene_output_damage_whole(struct wlr_scene_output *scene_output) {
+	struct wlr_output *output = scene_output->output;
+
+	pixman_region32_t damage;
+	pixman_region32_init_rect(&damage, 0, 0, output->width, output->height);
+	scene_output_damage(scene_output, &damage);
+	pixman_region32_fini(&damage);
+}
+
+static void scene_damage_outputs(struct wlr_scene *scene, const pixman_region32_t *damage) {
+	if (pixman_region32_empty(damage)) {
 		return;
 	}
 
@@ -324,10 +406,9 @@ static void scene_damage_outputs(struct wlr_scene *scene, pixman_region32_t *dam
 		pixman_region32_copy(&output_damage, damage);
 		pixman_region32_translate(&output_damage,
 			-scene_output->x, -scene_output->y);
-		scale_output_damage(&output_damage, scene_output->output->scale);
-		if (wlr_damage_ring_add(&scene_output->damage_ring, &output_damage)) {
-			wlr_output_schedule_frame(scene_output->output);
-		}
+		scale_region(&output_damage, scene_output->output->scale, true);
+		output_to_buffer_coords(&output_damage, scene_output->output);
+		scene_output_damage(scene_output, &output_damage);
 		pixman_region32_fini(&output_damage);
 	}
 }
@@ -348,56 +429,70 @@ static void update_node_update_outputs(struct wlr_scene_node *node,
 	size_t count = 0;
 	uint64_t active_outputs = 0;
 
-	// let's update the outputs in two steps:
-	//  - the primary outputs
-	//  - the enter/leave signals
-	// This ensures that the enter/leave signals can rely on the primary output
-	// to have a reasonable value. Otherwise, they may get a value that's in
-	// the middle of a calculation.
-	struct wlr_scene_output *scene_output;
-	wl_list_for_each(scene_output, outputs, link) {
-		if (scene_output == ignore) {
-			continue;
+	if (!pixman_region32_empty(&node->visible)) {
+		struct wlr_scene_output *scene_output;
+
+		// Compute the region covered by all outputs, then intersect with the
+		// node's visible region
+		pixman_region32_t visible;
+		pixman_region32_init(&visible);
+		wl_list_for_each(scene_output, outputs, link) {
+			int width, height;
+			wlr_output_effective_resolution(scene_output->output, &width, &height);
+			pixman_region32_union_rect(&visible, &visible,
+				scene_output->x, scene_output->y, width, height);
 		}
+		pixman_region32_intersect(&visible, &visible, &node->visible);
+		uint32_t visible_area = region_area(&visible);
+		pixman_region32_fini(&visible);
 
-		if (!scene_output->output->enabled) {
-			continue;
-		}
-
-		struct wlr_box output_box = {
-			.x = scene_output->x,
-			.y = scene_output->y,
-		};
-		wlr_output_effective_resolution(scene_output->output,
-			&output_box.width, &output_box.height);
-
-		pixman_region32_t intersection;
-		pixman_region32_init(&intersection);
-		pixman_region32_intersect_rect(&intersection, &node->visible,
-			output_box.x, output_box.y, output_box.width, output_box.height);
-
-		if (pixman_region32_not_empty(&intersection)) {
-			uint32_t overlap = region_area(&intersection);
-			if (overlap >= largest_overlap) {
-				largest_overlap = overlap;
-				scene_buffer->primary_output = scene_output;
+		// let's update the outputs in two steps:
+		//  - the primary outputs
+		//  - the enter/leave signals
+		// This ensures that the enter/leave signals can rely on the primary output
+		// to have a reasonable value. Otherwise, they may get a value that's in
+		// the middle of a calculation.
+		wl_list_for_each(scene_output, outputs, link) {
+			if (scene_output == ignore) {
+				continue;
 			}
 
-			active_outputs |= 1ull << scene_output->index;
-			count++;
+			if (!scene_output->output->enabled) {
+				continue;
+			}
+
+			struct wlr_box output_box = {
+				.x = scene_output->x,
+				.y = scene_output->y,
+			};
+			wlr_output_effective_resolution(scene_output->output,
+				&output_box.width, &output_box.height);
+
+			pixman_region32_t intersection;
+			pixman_region32_init(&intersection);
+			pixman_region32_intersect_rect(&intersection, &node->visible,
+				output_box.x, output_box.y, output_box.width, output_box.height);
+			uint32_t overlap = region_area(&intersection);
+			pixman_region32_fini(&intersection);
+
+			// If the overlap accounts for 10% of the visible node area or less,
+			// ignore this output
+			if (overlap > 0.1 * visible_area) {
+				if (overlap >= largest_overlap) {
+					largest_overlap = overlap;
+					scene_buffer->primary_output = scene_output;
+				}
+
+				active_outputs |= 1ull << scene_output->index;
+				count++;
+			}
 		}
-
-		pixman_region32_fini(&intersection);
-	}
-
-	if (old_primary_output != scene_buffer->primary_output) {
-		scene_buffer->prev_feedback_options =
-			(struct wlr_linux_dmabuf_feedback_v1_init_options){0};
 	}
 
 	uint64_t old_active = scene_buffer->active_outputs;
 	scene_buffer->active_outputs = active_outputs;
 
+	struct wlr_scene_output *scene_output;
 	wl_list_for_each(scene_output, outputs, link) {
 		uint64_t mask = 1ull << scene_output->index;
 		bool intersects = active_outputs & mask;
@@ -440,6 +535,50 @@ static void update_node_update_outputs(struct wlr_scene_node *node,
 	wl_signal_emit_mutable(&scene_buffer->events.outputs_update, &event);
 }
 
+#if WLR_HAS_XWAYLAND
+static struct wlr_xwayland_surface *scene_node_try_get_managed_xwayland_surface(
+		struct wlr_scene_node *node) {
+	if (node->type != WLR_SCENE_NODE_BUFFER) {
+		return NULL;
+	}
+
+	struct wlr_scene_buffer *buffer_node = wlr_scene_buffer_from_node(node);
+	struct wlr_scene_surface *surface_node = wlr_scene_surface_try_from_buffer(buffer_node);
+	if (!surface_node) {
+		return NULL;
+	}
+
+	struct wlr_xwayland_surface *xwayland_surface =
+		wlr_xwayland_surface_try_from_wlr_surface(surface_node->surface);
+	if (!xwayland_surface || xwayland_surface->override_redirect) {
+		return NULL;
+	}
+
+	return xwayland_surface;
+}
+
+static void restack_xwayland_surface(struct wlr_scene_node *node,
+		struct wlr_box *box, struct scene_update_data *data) {
+	struct wlr_xwayland_surface *xwayland_surface =
+		scene_node_try_get_managed_xwayland_surface(node);
+	if (!xwayland_surface) {
+		return;
+	}
+
+	// ensure this node is entirely inside the update region. If not, we can't
+	// restack this node since we're not considering the whole thing.
+	if (wlr_box_contains_box(&data->update_box, box)) {
+		if (data->restack_above) {
+			wlr_xwayland_surface_restack(xwayland_surface, data->restack_above, XCB_STACK_MODE_BELOW);
+		} else {
+			wlr_xwayland_surface_restack(xwayland_surface, NULL, XCB_STACK_MODE_ABOVE);
+		}
+	}
+
+	data->restack_above = xwayland_surface;
+}
+#endif
+
 static bool scene_node_update_iterator(struct wlr_scene_node *node,
 		int lx, int ly, void *_data) {
 	struct scene_update_data *data = _data;
@@ -461,6 +600,11 @@ static bool scene_node_update_iterator(struct wlr_scene_node *node,
 	}
 
 	update_node_update_outputs(node, data->outputs, NULL, NULL);
+#if WLR_HAS_XWAYLAND
+	if (data->restack_xwayland_surfaces) {
+		restack_xwayland_surface(node, &box, data);
+	}
+#endif
 
 	return false;
 }
@@ -504,39 +648,88 @@ static void scene_node_bounds(struct wlr_scene_node *node,
 }
 
 static void scene_update_region(struct wlr_scene *scene,
-		pixman_region32_t *update_region) {
+		const pixman_region32_t *update_region) {
 	pixman_region32_t visible;
 	pixman_region32_init(&visible);
 	pixman_region32_copy(&visible, update_region);
 
+	struct pixman_box32 *region_box = pixman_region32_extents(update_region);
 	struct scene_update_data data = {
 		.visible = &visible,
 		.update_region = update_region,
+		.update_box = {
+			.x = region_box->x1,
+			.y = region_box->y1,
+			.width = region_box->x2 - region_box->x1,
+			.height = region_box->y2 - region_box->y1,
+		},
 		.outputs = &scene->outputs,
 		.calculate_visibility = scene->calculate_visibility,
-	};
-
-	struct pixman_box32 *region_box = pixman_region32_extents(update_region);
-	struct wlr_box box = {
-		.x = region_box->x1,
-		.y = region_box->y1,
-		.width = region_box->x2 - region_box->x1,
-		.height = region_box->y2 - region_box->y1,
+		.restack_xwayland_surfaces = scene->restack_xwayland_surfaces,
 	};
 
 	// update node visibility and output enter/leave events
-	scene_nodes_in_box(&scene->tree.node, &box, scene_node_update_iterator, &data);
+	scene_nodes_in_box(&scene->tree.node, &data.update_box, scene_node_update_iterator, &data);
 
 	pixman_region32_fini(&visible);
 }
 
+static void scene_node_cleanup_when_disabled(struct wlr_scene_node *node,
+		bool xwayland_restack, struct wl_list *outputs) {
+	if (node->type == WLR_SCENE_NODE_TREE) {
+		struct wlr_scene_tree *scene_tree = wlr_scene_tree_from_node(node);
+		struct wlr_scene_node *child;
+		wl_list_for_each(child, &scene_tree->children, link) {
+			if (!child->enabled) {
+				continue;
+			}
+
+			scene_node_cleanup_when_disabled(child, xwayland_restack, outputs);
+		}
+		return;
+	}
+
+	pixman_region32_clear(&node->visible);
+	update_node_update_outputs(node, outputs, NULL, NULL);
+
+#if WLR_HAS_XWAYLAND
+	if (xwayland_restack) {
+		struct wlr_xwayland_surface *xwayland_surface =
+			scene_node_try_get_managed_xwayland_surface(node);
+		if (!xwayland_surface) {
+			return;
+		}
+
+		wlr_xwayland_surface_restack(xwayland_surface, NULL, XCB_STACK_MODE_BELOW);
+	}
+#endif
+}
+
+/**
+ * Updates the nodes visibility, xwayland restacking, send leave/enter events
+ * and damages the screen. The damage region is used to not only damage the
+ * screen, but to direct the update logic to only update certain parts of the
+ * screen and not the whole thing. If a NULL damage is given, the damage is
+ * assumed to be the previous nodes visibility.
+ *
+ * Currently, the only usage for an explicit damage is for update scenarios where
+ * the scene node might be enabled/disabled. If the scene node is disabled, the
+ * update logic will ignore the node. This is normally desirable as most update
+ * scenarios like updating the color or whatever. However, it's not what we want
+ * when disabling the node. Note that reparenting the node could lead to the node
+ * being reparented to a disabled super tree.
+ */
 static void scene_node_update(struct wlr_scene_node *node,
 		pixman_region32_t *damage) {
 	struct wlr_scene *scene = scene_node_get_root(node);
 
 	int x, y;
 	if (!wlr_scene_node_coords(node, &x, &y)) {
+		// We assume explicit damage on a disabled tree means the node was just
+		// disabled.
 		if (damage) {
+			scene_node_cleanup_when_disabled(node, scene->restack_xwayland_surfaces, &scene->outputs);
+
 			scene_update_region(scene, damage);
 			scene_damage_outputs(scene, damage);
 			pixman_region32_fini(damage);
@@ -567,11 +760,13 @@ static void scene_node_update(struct wlr_scene_node *node,
 
 struct wlr_scene_rect *wlr_scene_rect_create(struct wlr_scene_tree *parent,
 		int width, int height, const float color[static 4]) {
+	assert(parent);
+	assert(width >= 0 && height >= 0);
+
 	struct wlr_scene_rect *scene_rect = calloc(1, sizeof(*scene_rect));
 	if (scene_rect == NULL) {
 		return NULL;
 	}
-	assert(parent);
 	scene_node_init(&scene_rect->node, WLR_SCENE_NODE_RECT, parent);
 
 	scene_rect->width = width;
@@ -588,6 +783,8 @@ void wlr_scene_rect_set_size(struct wlr_scene_rect *rect, int width, int height)
 		return;
 	}
 
+	assert(width >= 0 && height >= 0);
+
 	rect->width = width;
 	rect->height = height;
 	scene_node_update(&rect->node, NULL);
@@ -602,6 +799,74 @@ void wlr_scene_rect_set_color(struct wlr_scene_rect *rect, const float color[sta
 	scene_node_update(&rect->node, NULL);
 }
 
+static void scene_buffer_handle_buffer_release(struct wl_listener *listener,
+		void *data) {
+	struct wlr_scene_buffer *scene_buffer =
+		wl_container_of(listener, scene_buffer, buffer_release);
+
+	scene_buffer->buffer = NULL;
+	wl_list_remove(&scene_buffer->buffer_release.link);
+	wl_list_init(&scene_buffer->buffer_release.link);
+}
+
+static void scene_buffer_set_buffer(struct wlr_scene_buffer *scene_buffer,
+		struct wlr_buffer *buffer) {
+	wl_list_remove(&scene_buffer->buffer_release.link);
+	wl_list_init(&scene_buffer->buffer_release.link);
+	if (scene_buffer->own_buffer) {
+		wlr_buffer_unlock(scene_buffer->buffer);
+	}
+	scene_buffer->buffer = NULL;
+	scene_buffer->own_buffer = false;
+	scene_buffer->buffer_width = scene_buffer->buffer_height = 0;
+	scene_buffer->buffer_is_opaque = false;
+
+	if (!buffer) {
+		return;
+	}
+
+	scene_buffer->own_buffer = true;
+	scene_buffer->buffer = wlr_buffer_lock(buffer);
+	scene_buffer->buffer_width = buffer->width;
+	scene_buffer->buffer_height = buffer->height;
+	scene_buffer->buffer_is_opaque = wlr_buffer_is_opaque(buffer);
+
+	scene_buffer->buffer_release.notify = scene_buffer_handle_buffer_release;
+	wl_signal_add(&buffer->events.release, &scene_buffer->buffer_release);
+}
+
+static void scene_buffer_handle_renderer_destroy(struct wl_listener *listener,
+		void *data) {
+	struct wlr_scene_buffer *scene_buffer = wl_container_of(listener, scene_buffer, renderer_destroy);
+	scene_buffer_set_texture(scene_buffer, NULL);
+}
+
+static void scene_buffer_set_texture(struct wlr_scene_buffer *scene_buffer,
+		struct wlr_texture *texture) {
+	wl_list_remove(&scene_buffer->renderer_destroy.link);
+	wlr_texture_destroy(scene_buffer->texture);
+	scene_buffer->texture = texture;
+
+	if (texture != NULL) {
+		scene_buffer->renderer_destroy.notify = scene_buffer_handle_renderer_destroy;
+		wl_signal_add(&texture->renderer->events.destroy, &scene_buffer->renderer_destroy);
+	} else {
+		wl_list_init(&scene_buffer->renderer_destroy.link);
+	}
+}
+
+static void scene_buffer_set_wait_timeline(struct wlr_scene_buffer *scene_buffer,
+		struct wlr_drm_syncobj_timeline *timeline, uint64_t point) {
+	wlr_drm_syncobj_timeline_unref(scene_buffer->wait_timeline);
+	if (timeline != NULL) {
+		scene_buffer->wait_timeline = wlr_drm_syncobj_timeline_ref(timeline);
+		scene_buffer->wait_point = point;
+	} else {
+		scene_buffer->wait_timeline = NULL;
+		scene_buffer->wait_point = 0;
+	}
+}
+
 struct wlr_scene_buffer *wlr_scene_buffer_create(struct wlr_scene_tree *parent,
 		struct wlr_buffer *buffer) {
 	struct wlr_scene_buffer *scene_buffer = calloc(1, sizeof(*scene_buffer));
@@ -611,51 +876,78 @@ struct wlr_scene_buffer *wlr_scene_buffer_create(struct wlr_scene_tree *parent,
 	assert(parent);
 	scene_node_init(&scene_buffer->node, WLR_SCENE_NODE_BUFFER, parent);
 
-	if (buffer) {
-		scene_buffer->buffer = wlr_buffer_lock(buffer);
-	}
-
 	wl_signal_init(&scene_buffer->events.outputs_update);
 	wl_signal_init(&scene_buffer->events.output_enter);
 	wl_signal_init(&scene_buffer->events.output_leave);
 	wl_signal_init(&scene_buffer->events.output_sample);
 	wl_signal_init(&scene_buffer->events.frame_done);
+
 	pixman_region32_init(&scene_buffer->opaque_region);
+	wl_list_init(&scene_buffer->buffer_release.link);
+	wl_list_init(&scene_buffer->renderer_destroy.link);
 	scene_buffer->opacity = 1;
 
+	scene_buffer_set_buffer(scene_buffer, buffer);
 	scene_node_update(&scene_buffer->node, NULL);
 
 	return scene_buffer;
 }
 
-void wlr_scene_buffer_set_buffer_with_damage(struct wlr_scene_buffer *scene_buffer,
-		struct wlr_buffer *buffer, const pixman_region32_t *damage) {
+void wlr_scene_buffer_set_buffer_with_options(struct wlr_scene_buffer *scene_buffer,
+		struct wlr_buffer *buffer, const struct wlr_scene_buffer_set_buffer_options *options) {
+	const struct wlr_scene_buffer_set_buffer_options default_options = {0};
+	if (options == NULL) {
+		options = &default_options;
+	}
+
 	// specifying a region for a NULL buffer doesn't make sense. We need to know
 	// about the buffer to scale the buffer local coordinates down to scene
 	// coordinates.
-	assert(buffer || !damage);
+	assert(buffer || !options->damage);
 
-	bool update = false;
+	bool mapped = buffer != NULL;
+	bool prev_mapped = scene_buffer->buffer != NULL || scene_buffer->texture != NULL;
 
-	wlr_texture_destroy(scene_buffer->texture);
-	scene_buffer->texture = NULL;
-
-	if (buffer) {
-		// if this node used to not be mapped or its previous displayed
-		// buffer region will be different from what the new buffer would
-		// produce we need to update the node.
-		update = !scene_buffer->buffer ||
-			(scene_buffer->dst_width == 0 && scene_buffer->dst_height == 0 &&
-				(scene_buffer->buffer->width != buffer->width ||
-				scene_buffer->buffer->height != buffer->height));
-
-		wlr_buffer_unlock(scene_buffer->buffer);
-		scene_buffer->buffer = wlr_buffer_lock(buffer);
-	} else {
-		wlr_buffer_unlock(scene_buffer->buffer);
-		update = true;
-		scene_buffer->buffer = NULL;
+	if (!mapped && !prev_mapped) {
+		// unmapping already unmapped buffer - noop
+		return;
 	}
+
+	// if this node used to not be mapped or its previous displayed
+	// buffer region will be different from what the new buffer would
+	// produce we need to update the node.
+	bool update = mapped != prev_mapped;
+	if (buffer != NULL && scene_buffer->dst_width == 0 && scene_buffer->dst_height == 0) {
+		update = update || scene_buffer->buffer_width != buffer->width ||
+			scene_buffer->buffer_height != buffer->height;
+	}
+
+	// If this is a buffer change, check if it's a single pixel buffer.
+	// Cache that so we can still apply rendering optimisations even when
+	// the original buffer has been freed after texture upload.
+	if (buffer != scene_buffer->buffer) {
+		scene_buffer->is_single_pixel_buffer = false;
+		struct wlr_client_buffer *client_buffer = NULL;
+		if (buffer != NULL) {
+			client_buffer = wlr_client_buffer_get(buffer);
+		}
+		if (client_buffer != NULL && client_buffer->source != NULL) {
+			struct wlr_single_pixel_buffer_v1 *single_pixel_buffer =
+				wlr_single_pixel_buffer_v1_try_from_buffer(client_buffer->source);
+			if (single_pixel_buffer != NULL) {
+				scene_buffer->is_single_pixel_buffer = true;
+				scene_buffer->single_pixel_buffer_color[0] = single_pixel_buffer->r;
+				scene_buffer->single_pixel_buffer_color[1] = single_pixel_buffer->g;
+				scene_buffer->single_pixel_buffer_color[2] = single_pixel_buffer->b;
+				scene_buffer->single_pixel_buffer_color[3] = single_pixel_buffer->a;
+			}
+		}
+	}
+
+	scene_buffer_set_buffer(scene_buffer, buffer);
+	scene_buffer_set_texture(scene_buffer, NULL);
+	scene_buffer_set_wait_timeline(scene_buffer,
+		options->wait_timeline, options->wait_point);
 
 	if (update) {
 		scene_node_update(&scene_buffer->node, NULL);
@@ -671,6 +963,7 @@ void wlr_scene_buffer_set_buffer_with_damage(struct wlr_scene_buffer *scene_buff
 
 	pixman_region32_t fallback_damage;
 	pixman_region32_init_rect(&fallback_damage, 0, 0, buffer->width, buffer->height);
+	const pixman_region32_t *damage = options->damage;
 	if (!damage) {
 		damage = &fallback_damage;
 	}
@@ -736,7 +1029,7 @@ void wlr_scene_buffer_set_buffer_with_damage(struct wlr_scene_buffer *scene_buff
 		pixman_region32_t cull_region;
 		pixman_region32_init(&cull_region);
 		pixman_region32_copy(&cull_region, &scene_buffer->node.visible);
-		scale_output_damage(&cull_region, output_scale);
+		scale_region(&cull_region, output_scale, true);
 		pixman_region32_translate(&cull_region, -lx * output_scale, -ly * output_scale);
 		pixman_region32_intersect(&output_damage, &output_damage, &cull_region);
 		pixman_region32_fini(&cull_region);
@@ -744,9 +1037,8 @@ void wlr_scene_buffer_set_buffer_with_damage(struct wlr_scene_buffer *scene_buff
 		pixman_region32_translate(&output_damage,
 			(int)round((lx - scene_output->x) * output_scale),
 			(int)round((ly - scene_output->y) * output_scale));
-		if (wlr_damage_ring_add(&scene_output->damage_ring, &output_damage)) {
-			wlr_output_schedule_frame(scene_output->output);
-		}
+		output_to_buffer_coords(&output_damage, scene_output->output);
+		scene_output_damage(scene_output, &output_damage);
 		pixman_region32_fini(&output_damage);
 	}
 
@@ -754,9 +1046,17 @@ void wlr_scene_buffer_set_buffer_with_damage(struct wlr_scene_buffer *scene_buff
 	pixman_region32_fini(&fallback_damage);
 }
 
+void wlr_scene_buffer_set_buffer_with_damage(struct wlr_scene_buffer *scene_buffer,
+		struct wlr_buffer *buffer, const pixman_region32_t *damage) {
+	const struct wlr_scene_buffer_set_buffer_options options = {
+		.damage = damage,
+	};
+	wlr_scene_buffer_set_buffer_with_options(scene_buffer, buffer, &options);
+}
+
 void wlr_scene_buffer_set_buffer(struct wlr_scene_buffer *scene_buffer,
 		struct wlr_buffer *buffer)  {
-	wlr_scene_buffer_set_buffer_with_damage(scene_buffer, buffer, NULL);
+	wlr_scene_buffer_set_buffer_with_options(scene_buffer, buffer, NULL);
 }
 
 void wlr_scene_buffer_set_opaque_region(struct wlr_scene_buffer *scene_buffer,
@@ -786,6 +1086,7 @@ void wlr_scene_buffer_set_source_box(struct wlr_scene_buffer *scene_buffer,
 	}
 
 	if (box != NULL) {
+		assert(box->x >= 0 && box->y >= 0 && box->width >= 0 && box->height >= 0);
 		scene_buffer->src_box = *box;
 	} else {
 		scene_buffer->src_box = (struct wlr_fbox){0};
@@ -800,6 +1101,7 @@ void wlr_scene_buffer_set_dest_size(struct wlr_scene_buffer *scene_buffer,
 		return;
 	}
 
+	assert(width >= 0 && height >= 0);
 	scene_buffer->dst_width = width;
 	scene_buffer->dst_height = height;
 	scene_node_update(&scene_buffer->node, NULL);
@@ -816,9 +1118,9 @@ void wlr_scene_buffer_set_transform(struct wlr_scene_buffer *scene_buffer,
 }
 
 void wlr_scene_buffer_send_frame_done(struct wlr_scene_buffer *scene_buffer,
-		struct timespec *now) {
-	if (pixman_region32_not_empty(&scene_buffer->node.visible)) {
-		wl_signal_emit_mutable(&scene_buffer->events.frame_done, now);
+		struct wlr_scene_frame_done_event *event) {
+	if (!pixman_region32_empty(&scene_buffer->node.visible)) {
+		wl_signal_emit_mutable(&scene_buffer->events.frame_done, event);
 	}
 }
 
@@ -828,6 +1130,7 @@ void wlr_scene_buffer_set_opacity(struct wlr_scene_buffer *scene_buffer,
 		return;
 	}
 
+	assert(opacity >= 0 && opacity <= 1);
 	scene_buffer->opacity = opacity;
 	scene_node_update(&scene_buffer->node, NULL);
 }
@@ -842,25 +1145,69 @@ void wlr_scene_buffer_set_filter_mode(struct wlr_scene_buffer *scene_buffer,
 	scene_node_update(&scene_buffer->node, NULL);
 }
 
+void wlr_scene_buffer_set_transfer_function(struct wlr_scene_buffer *scene_buffer,
+		enum wlr_color_transfer_function transfer_function) {
+	if (scene_buffer->transfer_function == transfer_function) {
+		return;
+	}
+
+	scene_buffer->transfer_function = transfer_function;
+	scene_node_update(&scene_buffer->node, NULL);
+}
+
+void wlr_scene_buffer_set_primaries(struct wlr_scene_buffer *scene_buffer,
+		enum wlr_color_named_primaries primaries) {
+	if (scene_buffer->primaries == primaries) {
+		return;
+	}
+
+	scene_buffer->primaries = primaries;
+	scene_node_update(&scene_buffer->node, NULL);
+}
+
+void wlr_scene_buffer_set_color_encoding(struct wlr_scene_buffer *scene_buffer,
+		enum wlr_color_encoding color_encoding) {
+	if (scene_buffer->color_encoding == color_encoding) {
+		return;
+	}
+
+	scene_buffer->color_encoding = color_encoding;
+	scene_node_update(&scene_buffer->node, NULL);
+}
+
+void wlr_scene_buffer_set_color_range(struct wlr_scene_buffer *scene_buffer,
+		enum wlr_color_range color_range) {
+	if (scene_buffer->color_range == color_range) {
+		return;
+	}
+
+	scene_buffer->color_range = color_range;
+	scene_node_update(&scene_buffer->node, NULL);
+}
+
 static struct wlr_texture *scene_buffer_get_texture(
 		struct wlr_scene_buffer *scene_buffer, struct wlr_renderer *renderer) {
+	if (scene_buffer->buffer == NULL || scene_buffer->texture != NULL) {
+		return scene_buffer->texture;
+	}
+
 	struct wlr_client_buffer *client_buffer =
 		wlr_client_buffer_get(scene_buffer->buffer);
 	if (client_buffer != NULL) {
 		return client_buffer->texture;
 	}
 
-	if (scene_buffer->texture != NULL) {
-		return scene_buffer->texture;
-	}
-
-	scene_buffer->texture =
+	struct wlr_texture *texture =
 		wlr_texture_from_buffer(renderer, scene_buffer->buffer);
-	return scene_buffer->texture;
+	if (texture != NULL && scene_buffer->own_buffer) {
+		scene_buffer->own_buffer = false;
+		wlr_buffer_unlock(scene_buffer->buffer);
+	}
+	scene_buffer_set_texture(scene_buffer, texture);
+	return texture;
 }
 
-static void scene_node_get_size(struct wlr_scene_node *node,
-		int *width, int *height) {
+void scene_node_get_size(struct wlr_scene_node *node, int *width, int *height) {
 	*width = 0;
 	*height = 0;
 
@@ -877,28 +1224,13 @@ static void scene_node_get_size(struct wlr_scene_node *node,
 		if (scene_buffer->dst_width > 0 && scene_buffer->dst_height > 0) {
 			*width = scene_buffer->dst_width;
 			*height = scene_buffer->dst_height;
-		} else if (scene_buffer->buffer) {
-			if (scene_buffer->transform & WL_OUTPUT_TRANSFORM_90) {
-				*height = scene_buffer->buffer->width;
-				*width = scene_buffer->buffer->height;
-			} else {
-				*width = scene_buffer->buffer->width;
-				*height = scene_buffer->buffer->height;
-			}
+		} else {
+			*width = scene_buffer->buffer_width;
+			*height = scene_buffer->buffer_height;
+			wlr_output_transform_coords(scene_buffer->transform, width, height);
 		}
 		break;
 	}
-}
-
-static int scale_length(int length, int offset, float scale) {
-	return round((offset + length) * scale) - round(offset * scale);
-}
-
-static void scale_box(struct wlr_box *box, float scale) {
-	box->width = scale_length(box->width, box->x, scale);
-	box->height = scale_length(box->height, box->y, scale);
-	box->x = round(box->x * scale);
-	box->y = round(box->y * scale);
 }
 
 void wlr_scene_node_set_enabled(struct wlr_scene_node *node, bool enabled) {
@@ -1107,9 +1439,14 @@ struct wlr_scene_node *wlr_scene_node_at(struct wlr_scene_node *node,
 
 struct render_list_entry {
 	struct wlr_scene_node *node;
-	bool sent_dmabuf_feedback;
+	bool highlight_transparent_region;
 	int x, y;
 };
+
+static float get_luminance_multiplier(const struct wlr_color_luminances *src_lum,
+		const struct wlr_color_luminances *dst_lum) {
+	return (dst_lum->reference / src_lum->reference) * (src_lum->max / dst_lum->max);
+}
 
 static void scene_entry_render(struct render_list_entry *entry, const struct render_data *data) {
 	struct wlr_scene_node *node = entry->node;
@@ -1118,9 +1455,9 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 	pixman_region32_init(&render_region);
 	pixman_region32_copy(&render_region, &node->visible);
 	pixman_region32_translate(&render_region, -data->logical.x, -data->logical.y);
-	scale_output_damage(&render_region, data->scale);
+	logical_to_buffer_coords(&render_region, data, true);
 	pixman_region32_intersect(&render_region, &render_region, &data->damage);
-	if (!pixman_region32_not_empty(&render_region)) {
+	if (pixman_region32_empty(&render_region)) {
 		pixman_region32_fini(&render_region);
 		return;
 	}
@@ -1133,16 +1470,13 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 		.y = y,
 	};
 	scene_node_get_size(node, &dst_box.width, &dst_box.height);
-	scale_box(&dst_box, data->scale);
+	transform_output_box(&dst_box, data);
 
 	pixman_region32_t opaque;
 	pixman_region32_init(&opaque);
 	scene_node_opaque_region(node, x, y, &opaque);
-	scale_output_damage(&opaque, data->scale);
+	logical_to_buffer_coords(&opaque, data, false);
 	pixman_region32_subtract(&opaque, &render_region, &opaque);
-
-	transform_output_box(&dst_box, data);
-	transform_output_damage(&render_region, data);
 
 	switch (node->type) {
 	case WLR_SCENE_NODE_TREE:
@@ -1164,17 +1498,45 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 		break;
 	case WLR_SCENE_NODE_BUFFER:;
 		struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_from_node(node);
-		assert(scene_buffer->buffer);
+
+		if (scene_buffer->is_single_pixel_buffer) {
+			// Render the buffer as a rect, this is likely to be more efficient
+			wlr_render_pass_add_rect(data->render_pass, &(struct wlr_render_rect_options){
+				.box = dst_box,
+				.color = {
+					.r = (float)scene_buffer->single_pixel_buffer_color[0] / (float)UINT32_MAX,
+					.g = (float)scene_buffer->single_pixel_buffer_color[1] / (float)UINT32_MAX,
+					.b = (float)scene_buffer->single_pixel_buffer_color[2] / (float)UINT32_MAX,
+					.a = (float)scene_buffer->single_pixel_buffer_color[3] /
+						(float)UINT32_MAX * scene_buffer->opacity,
+				},
+				.clip = &render_region,
+			});
+			break;
+		}
 
 		struct wlr_texture *texture = scene_buffer_get_texture(scene_buffer,
 			data->output->output->renderer);
 		if (texture == NULL) {
+			scene_output_damage(data->output, &render_region);
 			break;
 		}
 
 		enum wl_output_transform transform =
 			wlr_output_transform_invert(scene_buffer->transform);
 		transform = wlr_output_transform_compose(transform, data->transform);
+
+		struct wlr_color_primaries primaries = {0};
+		if (scene_buffer->primaries != 0) {
+			wlr_color_primaries_from_named(&primaries, scene_buffer->primaries);
+		}
+
+		struct wlr_color_luminances src_lum, srgb_lum;
+		wlr_color_transfer_function_get_default_luminance(
+			scene_buffer->transfer_function, &src_lum);
+		wlr_color_transfer_function_get_default_luminance(
+			WLR_COLOR_TRANSFER_FUNCTION_SRGB, &srgb_lum);
+		float luminance_multiplier = get_luminance_multiplier(&src_lum, &srgb_lum);
 
 		wlr_render_pass_add_texture(data->render_pass, &(struct wlr_render_texture_options) {
 			.texture = texture,
@@ -1184,37 +1546,39 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 			.clip = &render_region,
 			.alpha = &scene_buffer->opacity,
 			.filter_mode = scene_buffer->filter_mode,
-			.blend_mode = pixman_region32_not_empty(&opaque) ?
+			.blend_mode = !data->output->scene->calculate_visibility ||
+					!pixman_region32_empty(&opaque) ?
 				WLR_RENDER_BLEND_MODE_PREMULTIPLIED : WLR_RENDER_BLEND_MODE_NONE,
+			.transfer_function = scene_buffer->transfer_function,
+			.primaries = scene_buffer->primaries != 0 ? &primaries : NULL,
+			.color_encoding = scene_buffer->color_encoding,
+			.color_range = scene_buffer->color_range,
+			.luminance_multiplier = &luminance_multiplier,
+			.wait_timeline = scene_buffer->wait_timeline,
+			.wait_point = scene_buffer->wait_point,
 		});
 
 		struct wlr_scene_output_sample_event sample_event = {
 			.output = data->output,
 			.direct_scanout = false,
+			.release_timeline = data->output->in_timeline,
+			.release_point = data->output->in_point,
 		};
 		wl_signal_emit_mutable(&scene_buffer->events.output_sample, &sample_event);
+
+		if (entry->highlight_transparent_region) {
+			wlr_render_pass_add_rect(data->render_pass, &(struct wlr_render_rect_options){
+				.box = dst_box,
+				.color = { .r = 0, .g = 0.3, .b = 0, .a = 0.3 },
+				.clip = &opaque,
+			});
+		}
+
 		break;
 	}
 
 	pixman_region32_fini(&opaque);
 	pixman_region32_fini(&render_region);
-}
-
-static void scene_handle_presentation_destroy(struct wl_listener *listener,
-		void *data) {
-	struct wlr_scene *scene =
-		wl_container_of(listener, scene, presentation_destroy);
-	wl_list_remove(&scene->presentation_destroy.link);
-	wl_list_init(&scene->presentation_destroy.link);
-	scene->presentation = NULL;
-}
-
-void wlr_scene_set_presentation(struct wlr_scene *scene,
-		struct wlr_presentation *presentation) {
-	assert(scene->presentation == NULL);
-	scene->presentation = presentation;
-	scene->presentation_destroy.notify = scene_handle_presentation_destroy;
-	wl_signal_add(&presentation->events.destroy, &scene->presentation_destroy);
 }
 
 static void scene_handle_linux_dmabuf_v1_destroy(struct wl_listener *listener,
@@ -1232,6 +1596,71 @@ void wlr_scene_set_linux_dmabuf_v1(struct wlr_scene *scene,
 	scene->linux_dmabuf_v1 = linux_dmabuf_v1;
 	scene->linux_dmabuf_v1_destroy.notify = scene_handle_linux_dmabuf_v1_destroy;
 	wl_signal_add(&linux_dmabuf_v1->events.destroy, &scene->linux_dmabuf_v1_destroy);
+}
+
+static void scene_handle_gamma_control_manager_v1_set_gamma(struct wl_listener *listener,
+		void *data) {
+	const struct wlr_gamma_control_manager_v1_set_gamma_event *event = data;
+	struct wlr_scene *scene =
+		wl_container_of(listener, scene, gamma_control_manager_v1_set_gamma);
+	struct wlr_scene_output *output = wlr_scene_get_scene_output(scene, event->output);
+	if (!output) {
+		// this scene might not own this output.
+		return;
+	}
+
+	output->gamma_lut_changed = true;
+	output->gamma_lut = event->control;
+	wlr_color_transform_unref(output->gamma_lut_color_transform);
+	output->gamma_lut_color_transform = wlr_gamma_control_v1_get_color_transform(event->control);
+	wlr_output_schedule_frame(output->output);
+}
+
+static void scene_handle_gamma_control_manager_v1_destroy(struct wl_listener *listener,
+		void *data) {
+	struct wlr_scene *scene =
+		wl_container_of(listener, scene, gamma_control_manager_v1_destroy);
+	wl_list_remove(&scene->gamma_control_manager_v1_destroy.link);
+	wl_list_init(&scene->gamma_control_manager_v1_destroy.link);
+	wl_list_remove(&scene->gamma_control_manager_v1_set_gamma.link);
+	wl_list_init(&scene->gamma_control_manager_v1_set_gamma.link);
+	scene->gamma_control_manager_v1 = NULL;
+
+	struct wlr_scene_output *output;
+	wl_list_for_each(output, &scene->outputs, link) {
+		output->gamma_lut_changed = false;
+		output->gamma_lut = NULL;
+		wlr_color_transform_unref(output->gamma_lut_color_transform);
+		output->gamma_lut_color_transform = NULL;
+	}
+}
+
+void wlr_scene_set_gamma_control_manager_v1(struct wlr_scene *scene,
+	    struct wlr_gamma_control_manager_v1 *gamma_control) {
+	assert(scene->gamma_control_manager_v1 == NULL);
+	scene->gamma_control_manager_v1 = gamma_control;
+
+	scene->gamma_control_manager_v1_destroy.notify =
+		scene_handle_gamma_control_manager_v1_destroy;
+	wl_signal_add(&gamma_control->events.destroy, &scene->gamma_control_manager_v1_destroy);
+	scene->gamma_control_manager_v1_set_gamma.notify =
+		scene_handle_gamma_control_manager_v1_set_gamma;
+	wl_signal_add(&gamma_control->events.set_gamma, &scene->gamma_control_manager_v1_set_gamma);
+}
+
+static void scene_handle_color_manager_v1_destroy(struct wl_listener *listener, void *data) {
+	struct wlr_scene *scene = wl_container_of(listener, scene, color_manager_v1_destroy);
+	wl_list_remove(&scene->color_manager_v1_destroy.link);
+	wl_list_init(&scene->color_manager_v1_destroy.link);
+	scene->color_manager_v1 = NULL;
+}
+
+void wlr_scene_set_color_manager_v1(struct wlr_scene *scene, struct wlr_color_manager_v1 *manager) {
+	assert(scene->color_manager_v1 == NULL);
+	scene->color_manager_v1 = manager;
+
+	scene->color_manager_v1_destroy.notify = scene_handle_color_manager_v1_destroy;
+	wl_signal_add(&manager->events.destroy, &scene->color_manager_v1_destroy);
 }
 
 static void scene_output_handle_destroy(struct wlr_addon *addon) {
@@ -1262,8 +1691,7 @@ static void scene_node_output_update(struct wlr_scene_node *node,
 
 static void scene_output_update_geometry(struct wlr_scene_output *scene_output,
 		bool force_update) {
-	wlr_damage_ring_add_whole(&scene_output->damage_ring);
-	wlr_output_schedule_frame(scene_output->output);
+	scene_output_damage_whole(scene_output);
 
 	scene_node_output_update(&scene_output->scene->tree.node,
 			&scene_output->scene->outputs, NULL, force_update ? scene_output : NULL);
@@ -1274,6 +1702,19 @@ static void scene_output_handle_commit(struct wl_listener *listener, void *data)
 		scene_output, output_commit);
 	struct wlr_output_event_commit *event = data;
 	const struct wlr_output_state *state = event->state;
+
+	// if the output has been committed with a certain damage, we know that region
+	// will be acknowledged by the backend so we don't need to keep track of it
+	// anymore
+	if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
+		if (state->committed & WLR_OUTPUT_STATE_DAMAGE) {
+			pixman_region32_subtract(&scene_output->pending_commit_damage,
+				&scene_output->pending_commit_damage, &state->damage);
+		} else {
+			pixman_region32_fini(&scene_output->pending_commit_damage);
+			pixman_region32_init(&scene_output->pending_commit_damage);
+		}
+	}
 
 	bool force_update = state->committed & (
 		WLR_OUTPUT_STATE_TRANSFORM |
@@ -1289,15 +1730,31 @@ static void scene_output_handle_commit(struct wl_listener *listener, void *data)
 			!wl_list_empty(&scene_output->damage_highlight_regions)) {
 		wlr_output_schedule_frame(scene_output->output);
 	}
+
+	// Next time the output is enabled, try to re-apply the gamma LUT
+	if (scene_output->scene->gamma_control_manager_v1 &&
+			(state->committed & WLR_OUTPUT_STATE_ENABLED) &&
+			!scene_output->output->enabled) {
+		scene_output->gamma_lut_changed = true;
+	}
 }
 
 static void scene_output_handle_damage(struct wl_listener *listener, void *data) {
 	struct wlr_scene_output *scene_output = wl_container_of(listener,
 		scene_output, output_damage);
+	struct wlr_output *output = scene_output->output;
 	struct wlr_output_event_damage *event = data;
-	if (wlr_damage_ring_add(&scene_output->damage_ring, event->damage)) {
-		wlr_output_schedule_frame(scene_output->output);
-	}
+
+	int width, height;
+	wlr_output_transformed_resolution(output, &width, &height);
+
+	pixman_region32_t damage;
+	pixman_region32_init(&damage);
+	pixman_region32_copy(&damage, event->damage);
+	wlr_region_transform(&damage, &damage,
+		wlr_output_transform_invert(output->transform), width, height);
+	scene_output_damage(scene_output, &damage);
+	pixman_region32_fini(&damage);
 }
 
 static void scene_output_handle_needs_frame(struct wl_listener *listener, void *data) {
@@ -1318,6 +1775,7 @@ struct wlr_scene_output *wlr_scene_output_create(struct wlr_scene *scene,
 	wlr_addon_init(&scene_output->addon, &output->addons, scene, &output_addon_impl);
 
 	wlr_damage_ring_init(&scene_output->damage_ring);
+	pixman_region32_init(&scene_output->pending_commit_damage);
 	wl_list_init(&scene_output->damage_highlight_regions);
 
 	int prev_output_index = -1;
@@ -1331,6 +1789,18 @@ struct wlr_scene_output *wlr_scene_output_create(struct wlr_scene *scene,
 
 		prev_output_index = current_output->index;
 		prev_output_link = &current_output->link;
+	}
+
+	int drm_fd = wlr_backend_get_drm_fd(output->backend);
+	if (drm_fd >= 0 && output->backend->features.timeline &&
+			output->renderer != NULL && output->renderer->features.timeline) {
+		scene_output->in_timeline = wlr_drm_syncobj_timeline_create(drm_fd);
+		scene_output->out_timeline = wlr_drm_syncobj_timeline_create(drm_fd);
+		if (scene_output->in_timeline == NULL || scene_output->out_timeline == NULL) {
+			wlr_drm_syncobj_timeline_unref(scene_output->in_timeline);
+			wlr_drm_syncobj_timeline_unref(scene_output->out_timeline);
+			return NULL;
+		}
 	}
 
 	scene_output->index = prev_output_index + 1;
@@ -1369,6 +1839,8 @@ void wlr_scene_output_destroy(struct wlr_scene_output *scene_output) {
 	scene_node_output_update(&scene_output->scene->tree.node,
 		&scene_output->scene->outputs, scene_output, NULL);
 
+	assert(wl_list_empty(&scene_output->events.destroy.listener_list));
+
 	struct highlight_region *damage, *tmp_damage;
 	wl_list_for_each_safe(damage, tmp_damage, &scene_output->damage_highlight_regions, link) {
 		highlight_region_destroy(damage);
@@ -1376,11 +1848,23 @@ void wlr_scene_output_destroy(struct wlr_scene_output *scene_output) {
 
 	wlr_addon_finish(&scene_output->addon);
 	wlr_damage_ring_finish(&scene_output->damage_ring);
+	pixman_region32_fini(&scene_output->pending_commit_damage);
 	wl_list_remove(&scene_output->link);
 	wl_list_remove(&scene_output->output_commit.link);
 	wl_list_remove(&scene_output->output_damage.link);
 	wl_list_remove(&scene_output->output_needs_frame.link);
-
+	if (scene_output->in_timeline != NULL) {
+		wlr_drm_syncobj_timeline_signal(scene_output->in_timeline, UINT64_MAX);
+		wlr_drm_syncobj_timeline_unref(scene_output->in_timeline);
+	}
+	if (scene_output->out_timeline != NULL) {
+		wlr_drm_syncobj_timeline_signal(scene_output->out_timeline, UINT64_MAX);
+		wlr_drm_syncobj_timeline_unref(scene_output->out_timeline);
+	}
+	wlr_color_transform_unref(scene_output->gamma_lut_color_transform);
+	wlr_color_transform_unref(scene_output->prev_gamma_lut_color_transform);
+	wlr_color_transform_unref(scene_output->prev_supplied_color_transform);
+	wlr_color_transform_unref(scene_output->combined_color_transform);
 	wl_array_release(&scene_output->render_list);
 	free(scene_output);
 }
@@ -1419,7 +1903,7 @@ static bool scene_node_invisible(struct wlr_scene_node *node) {
 	} else if (node->type == WLR_SCENE_NODE_BUFFER) {
 		struct wlr_scene_buffer *buffer = wlr_scene_buffer_from_node(node);
 
-		return buffer->buffer == NULL;
+		return buffer->buffer == NULL && buffer->texture == NULL;
 	}
 
 	return false;
@@ -1429,7 +1913,18 @@ struct render_list_constructor_data {
 	struct wlr_box box;
 	struct wl_array *render_list;
 	bool calculate_visibility;
+	bool highlight_transparent_region;
+	bool fractional_scale;
 };
+
+static bool scene_buffer_is_black_opaque(struct wlr_scene_buffer *scene_buffer) {
+	return scene_buffer->is_single_pixel_buffer &&
+		scene_buffer->single_pixel_buffer_color[0] == 0 &&
+		scene_buffer->single_pixel_buffer_color[1] == 0 &&
+		scene_buffer->single_pixel_buffer_color[2] == 0 &&
+		scene_buffer->single_pixel_buffer_color[3] == UINT32_MAX &&
+		scene_buffer->opacity == 1.0;
+}
 
 static bool construct_render_list_iterator(struct wlr_scene_node *node,
 		int lx, int ly, void *_data) {
@@ -1439,14 +1934,26 @@ static bool construct_render_list_iterator(struct wlr_scene_node *node,
 		return false;
 	}
 
-	// while rendering, the background should always be black.
-	// If we see a black rect, we can ignore rendering everything under the rect
-	// and even the rect itself.
-	if (node->type == WLR_SCENE_NODE_RECT && data->calculate_visibility) {
+	// While rendering, the background should always be black. If we see a
+	// black rect, we can ignore rendering everything under the rect, and
+	// unless fractional scale is used even the rect itself (to avoid running
+	// into issues regarding damage region expansion).
+	if (node->type == WLR_SCENE_NODE_RECT && data->calculate_visibility &&
+			(!data->fractional_scale || data->render_list->size == 0)) {
 		struct wlr_scene_rect *rect = wlr_scene_rect_from_node(node);
 		float *black = (float[4]){ 0.f, 0.f, 0.f, 1.f };
 
 		if (memcmp(rect->color, black, sizeof(float) * 4) == 0) {
+			return false;
+		}
+	}
+
+	// Apply the same special-case to black opaque single-pixel buffers
+	if (node->type == WLR_SCENE_NODE_BUFFER && data->calculate_visibility &&
+			(!data->fractional_scale || data->render_list->size == 0)) {
+		struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_from_node(node);
+
+		if (scene_buffer_is_black_opaque(scene_buffer)) {
 			return false;
 		}
 	}
@@ -1456,7 +1963,7 @@ static bool construct_render_list_iterator(struct wlr_scene_node *node,
 	pixman_region32_intersect_rect(&intersection, &node->visible,
 			data->box.x, data->box.y,
 			data->box.width, data->box.height);
-	if (!pixman_region32_not_empty(&intersection)) {
+	if (pixman_region32_empty(&intersection)) {
 		pixman_region32_fini(&intersection);
 		return false;
 	}
@@ -1472,19 +1979,10 @@ static bool construct_render_list_iterator(struct wlr_scene_node *node,
 		.node = node,
 		.x = lx,
 		.y = ly,
+		.highlight_transparent_region = data->highlight_transparent_region,
 	};
 
 	return false;
-}
-
-static void output_state_apply_damage(const struct render_data *data,
-		struct wlr_output_state *state) {
-	pixman_region32_t frame_damage;
-	pixman_region32_init(&frame_damage);
-	pixman_region32_copy(&frame_damage, &data->output->damage_ring.current);
-	transform_output_damage(&frame_damage, data);
-	wlr_output_state_set_damage(state, &frame_damage);
-	pixman_region32_fini(&frame_damage);
 }
 
 static void scene_buffer_send_dmabuf_feedback(const struct wlr_scene *scene,
@@ -1512,92 +2010,161 @@ static void scene_buffer_send_dmabuf_feedback(const struct wlr_scene *scene,
 		return;
 	}
 
+	enum wl_output_transform preferred_buffer_transform = WL_OUTPUT_TRANSFORM_NORMAL;
+	if (options->scanout_primary_output != NULL) {
+		preferred_buffer_transform = options->scanout_primary_output->transform;
+	}
+
+	// TODO: also send wl_surface.preferred_buffer_transform when running with
+	// pure software rendering
+	wlr_surface_set_preferred_buffer_transform(surface->surface, preferred_buffer_transform);
 	wlr_linux_dmabuf_v1_set_surface_feedback(scene->linux_dmabuf_v1,
 		surface->surface, &feedback);
 
 	wlr_linux_dmabuf_feedback_v1_finish(&feedback);
 }
 
-static bool scene_entry_try_direct_scanout(struct render_list_entry *entry,
-		struct wlr_output_state *state, const struct render_data *data) {
+static bool color_management_is_scanout_allowed(const struct wlr_output_image_description *img_desc,
+		const struct wlr_scene_buffer *buffer) {
+	// Disallow scanout if the output has colorimetry information but buffer
+	// doesn't; allow it only if the output also lacks it.
+	if (buffer->transfer_function == 0 && buffer->primaries == 0) {
+		return img_desc == NULL;
+	}
+
+	// If the output has colorimetry information, the buffer must match it for
+	// direct scanout to be allowed.
+	if (img_desc != NULL) {
+		return img_desc->transfer_function == buffer->transfer_function &&
+				img_desc->primaries == buffer->primaries;
+	}
+	// If the output doesn't have colorimetry image description set, we can only
+	// scan out buffers with default colorimetry (gamma2.2 transfer and sRGB
+	// primaries) used in wlroots.
+	return buffer->transfer_function == WLR_COLOR_TRANSFER_FUNCTION_GAMMA22 &&
+			buffer->primaries == WLR_COLOR_NAMED_PRIMARIES_SRGB;
+}
+
+enum scene_direct_scanout_result {
+	// This scene node is not a candidate for scanout
+	SCANOUT_INELIGIBLE,
+
+	// This scene node is a candidate for scanout, but is currently
+	// incompatible due to e.g. buffer mismatch, and if possible we'd like to
+	// resolve this incompatibility.
+	SCANOUT_CANDIDATE,
+
+	// Scanout is successful.
+	SCANOUT_SUCCESS,
+};
+
+static enum scene_direct_scanout_result scene_entry_try_direct_scanout(
+		struct render_list_entry *entry, struct wlr_output_state *state,
+		const struct render_data *data) {
 	struct wlr_scene_output *scene_output = data->output;
 	struct wlr_scene_node *node = entry->node;
 
 	if (!scene_output->scene->direct_scanout) {
-		return false;
-	}
-
-	if (scene_output->scene->debug_damage_option ==
-			WLR_SCENE_DEBUG_DAMAGE_HIGHLIGHT) {
-		// We don't want to enter direct scan out if we have highlight regions
-		// enabled. Otherwise, we won't be able to render the damage regions.
-		return false;
+		return SCANOUT_INELIGIBLE;
 	}
 
 	if (node->type != WLR_SCENE_NODE_BUFFER) {
-		return false;
+		return SCANOUT_INELIGIBLE;
 	}
 
 	if (state->committed & (WLR_OUTPUT_STATE_MODE |
 			WLR_OUTPUT_STATE_ENABLED |
 			WLR_OUTPUT_STATE_RENDER_FORMAT)) {
 		// Legacy DRM will explode if we try to modeset with a direct scanout buffer
-		return false;
+		return SCANOUT_INELIGIBLE;
 	}
 
 	if (!wlr_output_is_direct_scanout_allowed(scene_output->output)) {
-		return false;
+		return SCANOUT_INELIGIBLE;
 	}
 
 	struct wlr_scene_buffer *buffer = wlr_scene_buffer_from_node(node);
-
-	struct wlr_fbox default_box = {0};
-	if (buffer->transform & WL_OUTPUT_TRANSFORM_90) {
-		default_box.width = buffer->buffer->height;
-		default_box.height = buffer->buffer->width;
-	} else {
-		default_box.width = buffer->buffer->width;
-		default_box.height = buffer->buffer->height;
+	if (buffer->buffer == NULL) {
+		return SCANOUT_INELIGIBLE;
 	}
 
-	if (!wlr_fbox_empty(&buffer->src_box) &&
-			!wlr_fbox_equal(&buffer->src_box, &default_box)) {
-		return false;
-	}
+	// The native size of the buffer after any transform is applied
+	int default_width = buffer->buffer->width;
+	int default_height = buffer->buffer->height;
+	wlr_output_transform_coords(buffer->transform, &default_width, &default_height);
+	struct wlr_fbox default_box = {
+		.width = default_width,
+		.height = default_height,
+	};
 
 	if (buffer->transform != data->transform) {
-		return false;
+		return SCANOUT_INELIGIBLE;
 	}
 
-	struct wlr_box node_box = { .x = entry->x, .y = entry->y };
-	scene_node_get_size(node, &node_box.width, &node_box.height);
-
-	if (!wlr_box_equal(&data->logical, &node_box)) {
-		return false;
+	const struct wlr_output_image_description *img_desc = output_pending_image_description(scene_output->output, state);
+	if (!color_management_is_scanout_allowed(img_desc, buffer)) {
+		return SCANOUT_INELIGIBLE;
 	}
 
-	if (buffer->primary_output == scene_output) {
+	bool is_color_repr_none = buffer->color_encoding == WLR_COLOR_ENCODING_NONE &&
+			buffer->color_range == WLR_COLOR_RANGE_NONE;
+	bool is_color_repr_identity_full = buffer->color_encoding == WLR_COLOR_ENCODING_IDENTITY &&
+			buffer->color_range == WLR_COLOR_RANGE_FULL;
+
+	if (!(is_color_repr_none || is_color_repr_identity_full)) {
+		return SCANOUT_INELIGIBLE;
+	}
+
+	// We want to ensure optimal buffer selection, but as direct-scanout can be enabled and disabled
+	// on a frame-by-frame basis, we wait for a few frames to send the new format recommendations.
+	// Maybe we should only send feedback in this case if tests fail.
+	if (scene_output->dmabuf_feedback_debounce >= DMABUF_FEEDBACK_DEBOUNCE_FRAMES
+			&& buffer->primary_output == scene_output) {
 		struct wlr_linux_dmabuf_feedback_v1_init_options options = {
 			.main_renderer = scene_output->output->renderer,
 			.scanout_primary_output = scene_output->output,
 		};
 
 		scene_buffer_send_dmabuf_feedback(scene_output->scene, buffer, &options);
-		entry->sent_dmabuf_feedback = true;
 	}
 
 	struct wlr_output_state pending;
 	wlr_output_state_init(&pending);
 	if (!wlr_output_state_copy(&pending, state)) {
-		return false;
+		return SCANOUT_CANDIDATE;
 	}
 
-	wlr_output_state_set_buffer(&pending, buffer->buffer);
-	output_state_apply_damage(data, &pending);
+	if (!wlr_fbox_empty(&buffer->src_box) &&
+			!wlr_fbox_equal(&buffer->src_box, &default_box)) {
+		pending.buffer_src_box = buffer->src_box;
+	}
+
+	// Translate the position from scene coordinates to output coordinates
+	pending.buffer_dst_box.x = entry->x - scene_output->x;
+	pending.buffer_dst_box.y = entry->y - scene_output->y;
+
+	scene_node_get_size(node, &pending.buffer_dst_box.width, &pending.buffer_dst_box.height);
+	transform_output_box(&pending.buffer_dst_box, data);
+
+	struct wlr_buffer *wlr_buffer = buffer->buffer;
+	struct wlr_client_buffer *client_buffer = wlr_client_buffer_get(wlr_buffer);
+	if (client_buffer != NULL && client_buffer->source != NULL && client_buffer->source->n_locks > 0) {
+		wlr_buffer = client_buffer->source;
+	}
+
+	wlr_output_state_set_buffer(&pending, wlr_buffer);
+	if (buffer->wait_timeline != NULL) {
+		wlr_output_state_set_wait_timeline(&pending, buffer->wait_timeline, buffer->wait_point);
+	}
+
+	if (scene_output->out_timeline) {
+		scene_output->out_point++;
+		wlr_output_state_set_signal_timeline(&pending, scene_output->out_timeline, scene_output->out_point);
+	}
 
 	if (!wlr_output_test_state(scene_output->output, &pending)) {
 		wlr_output_state_finish(&pending);
-		return false;
+		return SCANOUT_CANDIDATE;
 	}
 
 	wlr_output_state_copy(state, &pending);
@@ -1606,15 +2173,22 @@ static bool scene_entry_try_direct_scanout(struct render_list_entry *entry,
 	struct wlr_scene_output_sample_event sample_event = {
 		.output = scene_output,
 		.direct_scanout = true,
+		.release_timeline = data->output->out_timeline,
+		.release_point = data->output->out_point,
 	};
 	wl_signal_emit_mutable(&buffer->events.output_sample, &sample_event);
-	return true;
+	return SCANOUT_SUCCESS;
+}
+
+bool wlr_scene_output_needs_frame(struct wlr_scene_output *scene_output) {
+	return scene_output->output->needs_frame ||
+		!pixman_region32_empty(&scene_output->pending_commit_damage) ||
+		scene_output->gamma_lut_changed;
 }
 
 bool wlr_scene_output_commit(struct wlr_scene_output *scene_output,
 		const struct wlr_scene_output_state_options *options) {
-	if (!scene_output->output->needs_frame && !pixman_region32_not_empty(
-			&scene_output->damage_ring.current)) {
+	if (!wlr_scene_output_needs_frame(scene_output)) {
 		return true;
 	}
 
@@ -1630,11 +2204,110 @@ bool wlr_scene_output_commit(struct wlr_scene_output *scene_output,
 		goto out;
 	}
 
-	wlr_damage_ring_rotate(&scene_output->damage_ring);
-
 out:
 	wlr_output_state_finish(&state);
 	return ok;
+}
+
+static void scene_output_state_attempt_gamma(struct wlr_scene_output *scene_output,
+		struct wlr_output_state *state) {
+	if (!scene_output->gamma_lut_changed) {
+		return;
+	}
+
+	struct wlr_output_state gamma_pending = {0};
+	if (!wlr_output_state_copy(&gamma_pending, state)) {
+		return;
+	}
+
+	wlr_output_state_set_color_transform(&gamma_pending, scene_output->gamma_lut_color_transform);
+	scene_output->gamma_lut_changed = false;
+
+	if (!wlr_output_test_state(scene_output->output, &gamma_pending)) {
+		wlr_gamma_control_v1_send_failed_and_destroy(scene_output->gamma_lut);
+
+		scene_output->gamma_lut = NULL;
+		wlr_color_transform_unref(scene_output->gamma_lut_color_transform);
+		scene_output->gamma_lut_color_transform = NULL;
+		wlr_output_state_finish(&gamma_pending);
+		return;
+	}
+
+	wlr_output_state_copy(state, &gamma_pending);
+	wlr_output_state_finish(&gamma_pending);
+}
+
+static bool scene_output_combine_color_transforms(
+		struct wlr_scene_output *scene_output, struct wlr_color_transform *supplied,
+		const struct wlr_output_image_description *img_desc, bool render_gamma_lut) {
+	bool result = false;
+	struct wlr_color_transform *color_matrix = NULL;
+	struct wlr_color_transform *inv_eotf = NULL;
+	struct wlr_color_transform *user_gamma = NULL;
+
+	if (img_desc != NULL) {
+		assert(supplied == NULL);
+		struct wlr_color_primaries primaries_srgb;
+		wlr_color_primaries_from_named(&primaries_srgb, WLR_COLOR_NAMED_PRIMARIES_SRGB);
+		struct wlr_color_primaries primaries;
+		wlr_color_primaries_from_named(&primaries, img_desc->primaries);
+		float matrix[9];
+		wlr_color_primaries_transform_absolute_colorimetric(&primaries_srgb, &primaries, matrix);
+
+		struct wlr_color_luminances srgb_lum, dst_lum;
+		wlr_color_transfer_function_get_default_luminance(
+			WLR_COLOR_TRANSFER_FUNCTION_SRGB, &srgb_lum);
+		wlr_color_transfer_function_get_default_luminance(img_desc->transfer_function, &dst_lum);
+		float luminance_multiplier = get_luminance_multiplier(&srgb_lum, &dst_lum);
+		for (int i = 0; i < 9; ++i) {
+			matrix[i] *= luminance_multiplier;
+		}
+
+		color_matrix = wlr_color_transform_init_matrix(matrix);
+		inv_eotf = wlr_color_transform_init_linear_to_inverse_eotf(img_desc->transfer_function);
+		if (color_matrix == NULL || inv_eotf == NULL) {
+			goto cleanup_transforms;
+		}
+	} else if (supplied != NULL) {
+		inv_eotf = wlr_color_transform_ref(supplied);
+	} else {
+		inv_eotf = wlr_color_transform_init_linear_to_inverse_eotf(
+			WLR_COLOR_TRANSFER_FUNCTION_GAMMA22);
+		if (inv_eotf == NULL) {
+			goto cleanup_transforms;
+		}
+	}
+
+	struct wlr_color_transform *gamma_lut = scene_output->gamma_lut_color_transform;
+	if (gamma_lut != NULL && render_gamma_lut) {
+		user_gamma = wlr_color_transform_ref(gamma_lut);
+	}
+
+	struct wlr_color_transform *combined;
+	struct wlr_color_transform *transforms[] = {
+		color_matrix,
+		inv_eotf,
+		user_gamma,
+	};
+	const size_t transforms_len = sizeof(transforms) / sizeof(transforms[0]);
+	if (!color_transform_compose(&combined, transforms, transforms_len)) {
+		goto cleanup_transforms;
+	}
+
+	wlr_color_transform_unref(scene_output->prev_gamma_lut_color_transform);
+	scene_output->prev_gamma_lut_color_transform = gamma_lut ? wlr_color_transform_ref(gamma_lut) : NULL;
+	wlr_color_transform_unref(scene_output->prev_supplied_color_transform);
+	scene_output->prev_supplied_color_transform = supplied ? wlr_color_transform_ref(supplied) : NULL;
+	wlr_color_transform_unref(scene_output->combined_color_transform);
+	scene_output->combined_color_transform = combined;
+
+	result = true;
+
+cleanup_transforms:
+	wlr_color_transform_unref(color_matrix);
+	wlr_color_transform_unref(inv_eotf);
+	wlr_color_transform_unref(user_gamma);
+	return result;
 }
 
 bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
@@ -1660,6 +2333,16 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	enum wlr_scene_debug_damage_option debug_damage =
 		scene_output->scene->debug_damage_option;
 
+	bool render_gamma_lut = false;
+	if (wlr_output_get_gamma_size(output) == 0 && output->renderer->features.output_color_transform) {
+		if (scene_output->gamma_lut_color_transform != scene_output->prev_gamma_lut_color_transform) {
+			scene_output_damage_whole(scene_output);
+		}
+		if (scene_output->gamma_lut_color_transform != NULL) {
+			render_gamma_lut = true;
+		}
+	}
+
 	struct render_data render_data = {
 		.transform = output->transform,
 		.scale = output->scale,
@@ -1667,12 +2350,13 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		.output = scene_output,
 	};
 
+	int resolution_width, resolution_height;
 	output_pending_resolution(output, state,
-		&render_data.trans_width, &render_data.trans_height);
+		&resolution_width, &resolution_height);
 
 	if (state->committed & WLR_OUTPUT_STATE_TRANSFORM) {
 		if (render_data.transform != state->transform) {
-			wlr_damage_ring_add_whole(&scene_output->damage_ring);
+			scene_output_damage_whole(scene_output);
 		}
 
 		render_data.transform = state->transform;
@@ -1680,17 +2364,16 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 
 	if (state->committed & WLR_OUTPUT_STATE_SCALE) {
 		if (render_data.scale != state->scale) {
-			wlr_damage_ring_add_whole(&scene_output->damage_ring);
+			scene_output_damage_whole(scene_output);
 		}
 
 		render_data.scale = state->scale;
 	}
 
-	if (render_data.transform & WL_OUTPUT_TRANSFORM_90) {
-		int tmp = render_data.trans_width;
-		render_data.trans_width = render_data.trans_height;
-		render_data.trans_height = tmp;
-	}
+	render_data.trans_width = resolution_width;
+	render_data.trans_height = resolution_height;
+	wlr_output_transform_coords(render_data.transform,
+		&render_data.trans_width, &render_data.trans_height);
 
 	render_data.logical.width = render_data.trans_width / render_data.scale;
 	render_data.logical.height = render_data.trans_height / render_data.scale;
@@ -1699,6 +2382,8 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		.box = render_data.logical,
 		.render_list = &scene_output->render_list,
 		.calculate_visibility = scene_output->scene->calculate_visibility,
+		.highlight_transparent_region = scene_output->scene->highlight_transparent_region,
+		.fractional_scale = floor(render_data.scale) != render_data.scale,
 	};
 
 	list_con.render_list->size = 0;
@@ -1709,31 +2394,8 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	struct render_list_entry *list_data = list_con.render_list->data;
 	int list_len = list_con.render_list->size / sizeof(*list_data);
 
-	bool scanout = list_len == 1 &&
-		scene_entry_try_direct_scanout(&list_data[0], state, &render_data);
-
-	if (scene_output->prev_scanout != scanout) {
-		scene_output->prev_scanout = scanout;
-		wlr_log(WLR_DEBUG, "Direct scan-out %s",
-			scanout ? "enabled" : "disabled");
-		if (!scanout) {
-			// When exiting direct scan-out, damage everything
-			wlr_damage_ring_add_whole(&scene_output->damage_ring);
-		}
-	}
-
-	if (scanout) {
-		if (timer) {
-			struct timespec end_time, duration;
-			clock_gettime(CLOCK_MONOTONIC, &end_time);
-			timespec_sub(&duration, &end_time, &start_time);
-			timer->pre_render_duration = timespec_to_nsec(&duration);
-		}
-		return true;
-	}
-
 	if (debug_damage == WLR_SCENE_DEBUG_DAMAGE_RERENDER) {
-		wlr_damage_ring_add_whole(&scene_output->damage_ring);
+		scene_output_damage_whole(scene_output);
 	}
 
 	struct timespec now;
@@ -1742,7 +2404,7 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		clock_gettime(CLOCK_MONOTONIC, &now);
 
 		// add the current frame's damage if there is damage
-		if (pixman_region32_not_empty(&scene_output->damage_ring.current)) {
+		if (!pixman_region32_empty(&scene_output->damage_ring.current)) {
 			struct highlight_region *current_damage = calloc(1, sizeof(*current_damage));
 			if (current_damage) {
 				pixman_region32_init(&current_damage->region);
@@ -1757,7 +2419,7 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		pixman_region32_init(&acc_damage);
 		struct highlight_region *damage, *tmp_damage;
 		wl_list_for_each_safe(damage, tmp_damage, regions, link) {
-			// remove overlaping damage regions
+			// remove overlapping damage regions
 			pixman_region32_subtract(&damage->region, &damage->region, &acc_damage);
 			pixman_region32_union(&acc_damage, &acc_damage, &damage->region);
 
@@ -1765,27 +2427,72 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 			struct timespec time_diff;
 			timespec_sub(&time_diff, &now, &damage->when);
 			if (timespec_to_msec(&time_diff) >= HIGHLIGHT_DAMAGE_FADEOUT_TIME ||
-					!pixman_region32_not_empty(&damage->region)) {
+					pixman_region32_empty(&damage->region)) {
 				highlight_region_destroy(damage);
 			}
 		}
 
-		wlr_damage_ring_add(&scene_output->damage_ring, &acc_damage);
+		scene_output_damage(scene_output, &acc_damage);
 		pixman_region32_fini(&acc_damage);
 	}
 
-	wlr_damage_ring_set_bounds(&scene_output->damage_ring,
-		render_data.trans_width, render_data.trans_height);
+	wlr_output_state_set_damage(state, &scene_output->pending_commit_damage);
 
-	if (!wlr_output_configure_primary_swapchain(output, state, &output->swapchain)) {
-		return false;
+	// We only want to try direct scanout if:
+	// - There is only one entry in the render list
+	// - There are no color transforms that need to be applied
+	// - Damage highlight debugging is not enabled
+	enum scene_direct_scanout_result scanout_result = SCANOUT_INELIGIBLE;
+	if (options->color_transform == NULL && !render_gamma_lut && list_len == 1
+			&& debug_damage != WLR_SCENE_DEBUG_DAMAGE_HIGHLIGHT) {
+		scanout_result = scene_entry_try_direct_scanout(&list_data[0], state, &render_data);
 	}
 
-	int buffer_age;
-	struct wlr_buffer *buffer = wlr_swapchain_acquire(output->swapchain, &buffer_age);
+	if (scanout_result == SCANOUT_INELIGIBLE) {
+		if (scene_output->dmabuf_feedback_debounce > 0) {
+			// We cannot scan out, so count down towards sending composition dmabuf feedback
+			scene_output->dmabuf_feedback_debounce--;
+		}
+	} else if (scene_output->dmabuf_feedback_debounce < DMABUF_FEEDBACK_DEBOUNCE_FRAMES) {
+		// We either want to scan out or successfully scanned out, so count up towards sending
+		// scanout dmabuf feedback
+		scene_output->dmabuf_feedback_debounce++;
+	}
+
+	bool scanout = scanout_result == SCANOUT_SUCCESS;
+	if (scene_output->prev_scanout != scanout) {
+		scene_output->prev_scanout = scanout;
+		wlr_log(WLR_DEBUG, "Direct scan-out %s",
+			scanout ? "enabled" : "disabled");
+	}
+
+	if (scanout) {
+		scene_output_state_attempt_gamma(scene_output, state);
+
+		if (timer) {
+			struct timespec end_time, duration;
+			clock_gettime(CLOCK_MONOTONIC, &end_time);
+			timespec_sub(&duration, &end_time, &start_time);
+			timer->pre_render_duration = timespec_to_nsec(&duration);
+		}
+		return true;
+	}
+
+	struct wlr_swapchain *swapchain = options->swapchain;
+	if (!swapchain) {
+		if (!wlr_output_configure_primary_swapchain(output, state, &output->swapchain)) {
+			return false;
+		}
+
+		swapchain = output->swapchain;
+	}
+
+	struct wlr_buffer *buffer = wlr_swapchain_acquire(swapchain);
 	if (buffer == NULL) {
 		return false;
 	}
+
+	assert(buffer->width == resolution_width && buffer->height == resolution_height);
 
 	if (timer) {
 		timer->render_timer = wlr_render_timer_create(output->renderer);
@@ -1796,9 +2503,26 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		timer->pre_render_duration = timespec_to_nsec(&duration);
 	}
 
+	if ((render_gamma_lut
+			&& scene_output->gamma_lut_color_transform != scene_output->prev_gamma_lut_color_transform)
+			|| scene_output->prev_supplied_color_transform != options->color_transform
+			|| (state->committed & WLR_OUTPUT_STATE_IMAGE_DESCRIPTION)) {
+		const struct wlr_output_image_description *output_description =
+			output_pending_image_description(output, state);
+		if (!scene_output_combine_color_transforms(scene_output, options->color_transform,
+				output_description, render_gamma_lut)) {
+			wlr_buffer_unlock(buffer);
+			return false;
+		}
+	}
+
+	scene_output->in_point++;
 	struct wlr_render_pass *render_pass = wlr_renderer_begin_buffer_pass(output->renderer, buffer,
 			&(struct wlr_buffer_pass_options){
 		.timer = timer ? timer->render_timer : NULL,
+		.color_transform = scene_output->combined_color_transform,
+		.signal_timeline = scene_output->in_timeline,
+		.signal_point = scene_output->in_point,
 	});
 	if (render_pass == NULL) {
 		wlr_buffer_unlock(buffer);
@@ -1806,9 +2530,10 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	}
 
 	render_data.render_pass = render_pass;
+
 	pixman_region32_init(&render_data.damage);
-	wlr_damage_ring_get_buffer_damage(&scene_output->damage_ring,
-		buffer_age, &render_data.damage);
+	wlr_damage_ring_rotate_buffer(&scene_output->damage_ring, buffer,
+		&render_data.damage);
 
 	pixman_region32_t background;
 	pixman_region32_init(&background);
@@ -1832,7 +2557,7 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 			pixman_region32_intersect(&opaque, &opaque, &entry->node->visible);
 
 			pixman_region32_translate(&opaque, -scene_output->x, -scene_output->y);
-			wlr_region_scale(&opaque, &opaque, render_data.scale);
+			logical_to_buffer_coords(&opaque, &render_data, false);
 			pixman_region32_subtract(&background, &background, &opaque);
 			pixman_region32_fini(&opaque);
 		}
@@ -1846,7 +2571,6 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		}
 	}
 
-	transform_output_damage(&background, &render_data);
 	wlr_render_pass_add_rect(render_pass, &(struct wlr_render_rect_options){
 		.box = { .width = buffer->width, .height = buffer->height },
 		.color = { .r = 0, .g = 0, .b = 0, .a = 1 },
@@ -1861,7 +2585,11 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		if (entry->node->type == WLR_SCENE_NODE_BUFFER) {
 			struct wlr_scene_buffer *buffer = wlr_scene_buffer_from_node(entry->node);
 
-			if (buffer->primary_output == scene_output && !entry->sent_dmabuf_feedback) {
+			// Direct scanout counts up to DMABUF_FEEDBACK_DEBOUNCE_FRAMES before sending new dmabuf
+			// feedback, and on composition we wait until it hits zero again. If we knew that an
+			// entry could never be a scanout candidate, we could send feedback to it
+			// unconditionally without debounce, but for now it is all or nothing
+			if (scene_output->dmabuf_feedback_debounce == 0 && buffer->primary_output == scene_output) {
 				struct wlr_linux_dmabuf_feedback_v1_init_options options = {
 					.main_renderer = output->renderer,
 					.scanout_primary_output = NULL,
@@ -1889,17 +2617,31 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	}
 
 	wlr_output_add_software_cursors_to_render_pass(output, render_pass, &render_data.damage);
-
 	pixman_region32_fini(&render_data.damage);
 
 	if (!wlr_render_pass_submit(render_pass)) {
 		wlr_buffer_unlock(buffer);
+
+		// if we failed to render the buffer, it will have undefined contents
+		// Trash the damage ring
+		wlr_damage_ring_add_whole(&scene_output->damage_ring);
 		return false;
 	}
 
 	wlr_output_state_set_buffer(state, buffer);
 	wlr_buffer_unlock(buffer);
-	output_state_apply_damage(&render_data, state);
+
+	if (scene_output->in_timeline != NULL) {
+		wlr_output_state_set_wait_timeline(state, scene_output->in_timeline,
+			scene_output->in_point);
+		scene_output->out_point++;
+		wlr_output_state_set_signal_timeline(state, scene_output->out_timeline,
+			scene_output->out_point);
+	}
+
+	if (!render_gamma_lut) {
+		scene_output_state_attempt_gamma(scene_output, state);
+	}
 
 	return true;
 }
@@ -1928,10 +2670,11 @@ static void scene_node_send_frame_done(struct wlr_scene_node *node,
 	if (node->type == WLR_SCENE_NODE_BUFFER) {
 		struct wlr_scene_buffer *scene_buffer =
 			wlr_scene_buffer_from_node(node);
-
-		if (scene_buffer->primary_output == scene_output) {
-			wlr_scene_buffer_send_frame_done(scene_buffer, now);
-		}
+		struct wlr_scene_frame_done_event event = {
+			.output = scene_output,
+			.when = *now,
+		};
+		wlr_scene_buffer_send_frame_done(scene_buffer, &event);
 	} else if (node->type == WLR_SCENE_NODE_TREE) {
 		struct wlr_scene_tree *scene_tree = wlr_scene_tree_from_node(node);
 		struct wlr_scene_node *child;

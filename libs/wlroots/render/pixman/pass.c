@@ -48,7 +48,7 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
 	}
 
 	pixman_op_t op = get_pixman_blending(options->blend_mode);
-	pixman_image_set_clip_region32(buffer->image, (pixman_region32_t *)options->clip);
+	pixman_image_set_clip_region32(buffer->image, options->clip);
 
 	struct wlr_fbox src_fbox;
 	wlr_render_texture_options_get_src_box(options, &src_fbox);
@@ -78,7 +78,7 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
 	if (options->transform != WL_OUTPUT_TRANSFORM_NORMAL ||
 			src_box_transformed.width != dst_box.width ||
 			src_box_transformed.height != dst_box.height) {
-		// Cosinus/sinus values are extact integers for enum wl_output_transform entries
+		// Cosinus/sinus values are exact integers for enum wl_output_transform entries
 		int tr_cos = 1, tr_sin = 0, tr_x = 0, tr_y = 0;
 		switch (options->transform) {
 		case WL_OUTPUT_TRANSFORM_NORMAL:
@@ -159,6 +159,7 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
 
 		switch (options->filter_mode) {
 		case WLR_SCALE_FILTER_BILINEAR:
+			pixman_image_set_repeat(texture->image, PIXMAN_REPEAT_PAD);
 			pixman_image_set_filter(texture->image, PIXMAN_FILTER_BILINEAR, NULL, 0);
 			break;
 		case WLR_SCALE_FILTER_NEAREST:
@@ -217,7 +218,7 @@ static void render_pass_add_rect(struct wlr_render_pass *wlr_pass,
 
 	pixman_image_t *fill = pixman_image_create_solid_fill(&color);
 
-	pixman_image_set_clip_region32(buffer->image, (pixman_region32_t *)options->clip);
+	pixman_image_set_clip_region32(buffer->image, options->clip);
 	pixman_image_composite32(op, fill, NULL, buffer->image,
 		0, 0, 0, 0, box.x, box.y, box.width, box.height);
 	pixman_image_set_clip_region32(buffer->image, NULL);

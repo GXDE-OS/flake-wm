@@ -1,10 +1,8 @@
 #include <assert.h>
-#include <errno.h>
 #include <drm_fourcc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend/interface.h>
 #include <wlr/backend/session.h>
@@ -12,6 +10,8 @@
 #include <wlr/util/log.h>
 #include <xf86drm.h>
 #include "backend/drm/drm.h"
+#include "backend/drm/fb.h"
+#include "render/drm_format_set.h"
 
 struct wlr_drm_backend *get_drm_backend_from_backend(
 		struct wlr_backend *wlr_backend) {
@@ -46,14 +46,14 @@ static void backend_destroy(struct wlr_backend *backend) {
 
 	wlr_backend_finish(backend);
 
-	wl_list_remove(&drm->display_destroy.link);
 	wl_list_remove(&drm->session_destroy.link);
 	wl_list_remove(&drm->session_active.link);
 	wl_list_remove(&drm->parent_destroy.link);
 	wl_list_remove(&drm->dev_change.link);
 	wl_list_remove(&drm->dev_remove.link);
 
-	if (drm->parent) {
+	if (drm->mgpu_renderer.wlr_rend) {
+		wlr_drm_format_set_finish(&drm->mgpu_formats);
 		finish_drm_renderer(&drm->mgpu_renderer);
 	}
 
@@ -72,27 +72,36 @@ static void backend_destroy(struct wlr_backend *backend) {
 
 static int backend_get_drm_fd(struct wlr_backend *backend) {
 	struct wlr_drm_backend *drm = get_drm_backend_from_backend(backend);
-
-	if (drm->parent) {
-		return drm->parent->fd;
-	} else {
-		return drm->fd;
-	}
+	return drm->fd;
 }
 
-static uint32_t drm_backend_get_buffer_caps(struct wlr_backend *backend) {
-	return WLR_BUFFER_CAP_DMABUF;
+static bool backend_test(struct wlr_backend *backend,
+		const struct wlr_backend_output_state *states, size_t states_len) {
+	struct wlr_drm_backend *drm = get_drm_backend_from_backend(backend);
+	return commit_drm_device(drm, states, states_len, true);
+}
+
+static bool backend_commit(struct wlr_backend *backend,
+		const struct wlr_backend_output_state *states, size_t states_len) {
+	struct wlr_drm_backend *drm = get_drm_backend_from_backend(backend);
+	return commit_drm_device(drm, states, states_len, false);
 }
 
 static const struct wlr_backend_impl backend_impl = {
 	.start = backend_start,
 	.destroy = backend_destroy,
 	.get_drm_fd = backend_get_drm_fd,
-	.get_buffer_caps = drm_backend_get_buffer_caps,
+	.test = backend_test,
+	.commit = backend_commit,
 };
 
 bool wlr_backend_is_drm(struct wlr_backend *b) {
 	return b->impl == &backend_impl;
+}
+
+struct wlr_backend *wlr_drm_backend_get_parent(struct wlr_backend *backend) {
+	struct wlr_drm_backend *drm = get_drm_backend_from_backend(backend);
+	return drm->parent ? &drm->parent->backend : NULL;
 }
 
 static void handle_session_active(struct wl_listener *listener, void *data) {
@@ -100,48 +109,21 @@ static void handle_session_active(struct wl_listener *listener, void *data) {
 		wl_container_of(listener, drm, session_active);
 	struct wlr_session *session = drm->session;
 
-	if (session->active) {
-		wlr_log(WLR_INFO, "DRM fd resumed");
-		scan_drm_connectors(drm, NULL);
+	wlr_log(WLR_INFO, "DRM FD %s", session->active ? "resumed" : "paused");
 
-		// The previous DRM master leaves KMS in an undefined state. We need
-		// to restore out own state, but be careful to avoid invalid
-		// configurations. The connector/CRTC mapping may have changed, so
-		// first disable all CRTCs, then light up the ones we were using
-		// before the VT switch.
-		// TODO: use the atomic API to improve restoration after a VT switch
-		for (size_t i = 0; i < drm->num_crtcs; i++) {
-			struct wlr_drm_crtc *crtc = &drm->crtcs[i];
-
-			if (drmModeSetCrtc(drm->fd, crtc->id, 0, 0, 0, NULL, 0, NULL) != 0) {
-				wlr_log_errno(WLR_ERROR, "Failed to disable CRTC %"PRIu32" after VT switch",
-					crtc->id);
-			}
-		}
-
+	if (!session->active) {
+		// Disconnect any active connectors so that the client will modeset and
+		// rerender when the session is activated again.
 		struct wlr_drm_connector *conn;
 		wl_list_for_each(conn, &drm->connectors, link) {
-			bool enabled = conn->status != DRM_MODE_DISCONNECTED && conn->output.enabled;
-
-			struct wlr_output_state state;
-			wlr_output_state_init(&state);
-			wlr_output_state_set_enabled(&state, enabled);
-			if (enabled) {
-				if (conn->output.current_mode != NULL) {
-					wlr_output_state_set_mode(&state, conn->output.current_mode);
-				} else {
-					wlr_output_state_set_custom_mode(&state,
-						conn->output.width, conn->output.height, conn->output.refresh);
-				}
+			if (conn->status == DRM_MODE_CONNECTED) {
+				wlr_output_destroy(&conn->output);
 			}
-			if (!drm_connector_commit_state(conn, &state)) {
-				wlr_drm_conn_log(conn, WLR_ERROR, "Failed to restore state after VT switch");
-			}
-			wlr_output_state_finish(&state);
 		}
-	} else {
-		wlr_log(WLR_INFO, "DRM fd paused");
+		return;
 	}
+
+	scan_drm_connectors(drm, NULL);
 }
 
 static void handle_dev_change(struct wl_listener *listener, void *data) {
@@ -179,26 +161,67 @@ static void handle_session_destroy(struct wl_listener *listener, void *data) {
 	backend_destroy(&drm->backend);
 }
 
-static void handle_display_destroy(struct wl_listener *listener, void *data) {
-	struct wlr_drm_backend *drm =
-		wl_container_of(listener, drm, display_destroy);
-	backend_destroy(&drm->backend);
-}
-
 static void handle_parent_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_drm_backend *drm =
 		wl_container_of(listener, drm, parent_destroy);
 	backend_destroy(&drm->backend);
 }
 
-struct wlr_backend *wlr_drm_backend_create(struct wl_display *display,
-		struct wlr_session *session, struct wlr_device *dev,
-		struct wlr_backend *parent) {
-	assert(display && session && dev);
+static void sanitize_mgpu_modifiers(struct wlr_drm_format_set *set) {
+	for (size_t idx = 0; idx < set->len; idx++) {
+		// Implicit modifiers are not well-defined across devices, so strip
+		// them from all formats in multi-gpu scenarios.
+		struct wlr_drm_format *fmt = &set->formats[idx];
+		wlr_drm_format_set_remove(set, fmt->format, DRM_FORMAT_MOD_INVALID);
+	}
+}
+
+static bool init_mgpu_renderer(struct wlr_drm_backend *drm) {
+	if (!init_drm_renderer(drm, &drm->mgpu_renderer)) {
+		wlr_log(WLR_INFO, "Failed to initialize mgpu blit renderer"
+			", falling back to scanning out from primary GPU");
+
+		for (uint32_t plane_idx = 0; plane_idx < drm->num_planes; plane_idx++) {
+			struct wlr_drm_plane *plane = &drm->planes[plane_idx];
+			sanitize_mgpu_modifiers(&plane->formats);
+		}
+		return true;
+	}
+
+	// We'll perform a multi-GPU copy for all submitted buffers, we need
+	// to be able to texture from them
+	struct wlr_renderer *renderer = drm->mgpu_renderer.wlr_rend;
+	const struct wlr_drm_format_set *texture_formats =
+		wlr_renderer_get_texture_formats(renderer, WLR_BUFFER_CAP_DMABUF);
+	if (texture_formats == NULL) {
+		wlr_log(WLR_ERROR, "Failed to query renderer texture formats");
+		return false;
+	}
+
+	wlr_drm_format_set_copy(&drm->mgpu_formats, texture_formats);
+	sanitize_mgpu_modifiers(&drm->mgpu_formats);
+	drm->backend.features.timeline = drm->backend.features.timeline &&
+		drm->mgpu_renderer.wlr_rend->features.timeline;
+	return true;
+}
+
+struct wlr_backend *wlr_drm_backend_create(struct wlr_session *session,
+		struct wlr_device *dev, struct wlr_backend *parent) {
+	assert(session && dev);
 	assert(!parent || wlr_backend_is_drm(parent));
 
 	char *name = drmGetDeviceNameFromFd2(dev->fd);
+	if (name == NULL) {
+		wlr_log_errno(WLR_ERROR, "drmGetDeviceNameFromFd2() failed");
+		return NULL;
+	}
+
 	drmVersion *version = drmGetVersion(dev->fd);
+	if (version == NULL) {
+		wlr_log_errno(WLR_ERROR, "drmGetVersion() failed");
+		free(name);
+		return NULL;
+	}
 	wlr_log(WLR_INFO, "Initializing DRM backend for %s (%s)", name, version->name);
 	drmFreeVersion(version);
 
@@ -208,6 +231,8 @@ struct wlr_backend *wlr_drm_backend_create(struct wl_display *display,
 		return NULL;
 	}
 	wlr_backend_init(&drm->backend, &backend_impl);
+
+	drm->backend.buffer_caps = WLR_BUFFER_CAP_DMABUF;
 
 	drm->session = session;
 	wl_list_init(&drm->fbs);
@@ -233,10 +258,7 @@ struct wlr_backend *wlr_drm_backend_create(struct wl_display *display,
 	drm->dev_remove.notify = handle_dev_remove;
 	wl_signal_add(&dev->events.remove, &drm->dev_remove);
 
-	drm->display = display;
-
-	struct wl_event_loop *event_loop = wl_display_get_event_loop(display);
-	drm->drm_event = wl_event_loop_add_fd(event_loop, drm->fd,
+	drm->drm_event = wl_event_loop_add_fd(session->event_loop, drm->fd,
 		WL_EVENT_READABLE, handle_drm_event, drm);
 	if (!drm->drm_event) {
 		wlr_log(WLR_ERROR, "Failed to create DRM event source");
@@ -254,47 +276,17 @@ struct wlr_backend *wlr_drm_backend_create(struct wl_display *display,
 		goto error_event;
 	}
 
-	if (drm->parent) {
-		if (!init_drm_renderer(drm, &drm->mgpu_renderer)) {
-			wlr_log(WLR_ERROR, "Failed to initialize renderer");
-			goto error_resources;
-		}
-
-		// We'll perform a multi-GPU copy for all submitted buffers, we need
-		// to be able to texture from them
-		struct wlr_renderer *renderer = drm->mgpu_renderer.wlr_rend;
-		const struct wlr_drm_format_set *texture_formats =
-			wlr_renderer_get_dmabuf_texture_formats(renderer);
-		if (texture_formats == NULL) {
-			wlr_log(WLR_ERROR, "Failed to query renderer texture formats");
-			goto error_mgpu_renderer;
-		}
-
-		// Forbid implicit modifiers, because their meaning changes from one
-		// GPU to another.
-		for (size_t i = 0; i < texture_formats->len; i++) {
-			const struct wlr_drm_format *fmt = &texture_formats->formats[i];
-			for (size_t j = 0; j < fmt->len; j++) {
-				uint64_t mod = fmt->modifiers[j];
-				if (mod == DRM_FORMAT_MOD_INVALID) {
-					continue;
-				}
-				wlr_drm_format_set_add(&drm->mgpu_formats, fmt->format, mod);
-			}
-		}
+	if (drm->parent && !init_mgpu_renderer(drm)) {
+		goto error_mgpu_renderer;
 	}
 
 	drm->session_destroy.notify = handle_session_destroy;
 	wl_signal_add(&session->events.destroy, &drm->session_destroy);
 
-	drm->display_destroy.notify = handle_display_destroy;
-	wl_display_add_destroy_listener(display, &drm->display_destroy);
-
 	return &drm->backend;
 
 error_mgpu_renderer:
 	finish_drm_renderer(&drm->mgpu_renderer);
-error_resources:
 	finish_drm_resources(drm);
 error_event:
 	wl_list_remove(&drm->session_active.link);
@@ -304,6 +296,7 @@ error_fd:
 	wl_list_remove(&drm->dev_change.link);
 	wl_list_remove(&drm->parent_destroy.link);
 	wlr_session_close_file(drm->session, dev);
+	free(drm->name);
 	free(drm);
 	return NULL;
 }

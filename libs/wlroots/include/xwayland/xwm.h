@@ -36,9 +36,11 @@ enum atom_name {
 	NET_WM_STATE,
 	NET_WM_STRUT_PARTIAL,
 	NET_WM_WINDOW_TYPE,
+	NET_WM_ICON,
 	WM_TAKE_FOCUS,
 	WINDOW,
 	NET_ACTIVE_WINDOW,
+	NET_CLOSE_WINDOW,
 	NET_WM_MOVERESIZE,
 	NET_SUPPORTING_WM_CHECK,
 	NET_WM_STATE_FOCUSED,
@@ -47,6 +49,13 @@ enum atom_name {
 	NET_WM_STATE_MAXIMIZED_VERT,
 	NET_WM_STATE_MAXIMIZED_HORZ,
 	NET_WM_STATE_HIDDEN,
+	NET_WM_STATE_STICKY,
+	NET_WM_STATE_SHADED,
+	NET_WM_STATE_SKIP_TASKBAR,
+	NET_WM_STATE_SKIP_PAGER,
+	NET_WM_STATE_ABOVE,
+	NET_WM_STATE_BELOW,
+	NET_WM_STATE_DEMANDS_ATTENTION,
 	NET_WM_PING,
 	WM_CHANGE_STATE,
 	WM_STATE,
@@ -62,6 +71,7 @@ enum atom_name {
 	NET_STARTUP_ID,
 	NET_STARTUP_INFO,
 	NET_STARTUP_INFO_BEGIN,
+	NET_WM_WINDOW_OPACITY,
 	NET_WM_WINDOW_TYPE_NORMAL,
 	NET_WM_WINDOW_TYPE_UTILITY,
 	NET_WM_WINDOW_TYPE_TOOLTIP,
@@ -72,6 +82,10 @@ enum atom_name {
 	NET_WM_WINDOW_TYPE_MENU,
 	NET_WM_WINDOW_TYPE_NOTIFICATION,
 	NET_WM_WINDOW_TYPE_SPLASH,
+	NET_WM_WINDOW_TYPE_DESKTOP,
+	NET_WM_WINDOW_TYPE_DOCK,
+	NET_WM_WINDOW_TYPE_TOOLBAR,
+	NET_WM_WINDOW_TYPE_DIALOG,
 	DND_SELECTION,
 	DND_AWARE,
 	DND_STATUS,
@@ -102,6 +116,7 @@ struct wlr_xwm {
 	xcb_connection_t *xcb_conn;
 	xcb_screen_t *screen;
 	xcb_window_t window;
+	xcb_window_t no_focus_window;
 	xcb_visualid_t visual_id;
 	xcb_colormap_t colormap;
 	xcb_render_pictformat_t render_format_id;
@@ -112,6 +127,7 @@ struct wlr_xwm {
 	struct wlr_xwm_selection dnd_selection;
 
 	struct wlr_xwayland_surface *focus_surface;
+	struct wlr_xwayland_surface *offered_focus;
 
 	// Surfaces in creation order
 	struct wl_list surfaces; // wlr_xwayland_surface.link
@@ -122,6 +138,7 @@ struct wlr_xwm {
 
 	struct wlr_drag *drag;
 	struct wlr_xwayland_surface *drag_focus;
+	struct wlr_xwayland_surface *drop_focus;
 
 	const xcb_query_extension_reply_t *xfixes;
 	const xcb_query_extension_reply_t *xres;
@@ -134,6 +151,7 @@ struct wlr_xwm {
 	struct wl_listener compositor_new_surface;
 	struct wl_listener compositor_destroy;
 	struct wl_listener shell_v1_new_surface;
+	struct wl_listener shell_v1_destroy;
 	struct wl_listener seat_set_selection;
 	struct wl_listener seat_set_primary_selection;
 	struct wl_listener seat_start_drag;
@@ -142,18 +160,22 @@ struct wlr_xwm {
 	struct wl_listener seat_drag_drop;
 	struct wl_listener seat_drag_destroy;
 	struct wl_listener seat_drag_source_destroy;
+	struct wl_listener drag_focus_destroy;
+	struct wl_listener drop_focus_destroy;
 };
 
+// xwm_create takes ownership of wm_fd and will close it under all circumstances.
 struct wlr_xwm *xwm_create(struct wlr_xwayland *wlr_xwayland, int wm_fd);
 
 void xwm_destroy(struct wlr_xwm *xwm);
 
-void xwm_set_cursor(struct wlr_xwm *xwm, const uint8_t *pixels, uint32_t stride,
-	uint32_t width, uint32_t height, int32_t hotspot_x, int32_t hotspot_y);
+void xwm_set_cursor(struct wlr_xwm *xwm, struct wlr_buffer *buffer,
+	int32_t hotspot_x, int32_t hotspot_y);
 
 int xwm_handle_selection_event(struct wlr_xwm *xwm, xcb_generic_event_t *event);
 int xwm_handle_selection_client_message(struct wlr_xwm *xwm,
 	xcb_client_message_event_t *ev);
+void xwm_seat_unlink_drag_handlers(struct wlr_xwm *xwm);
 
 void xwm_set_seat(struct wlr_xwm *xwm, struct wlr_seat *seat);
 
@@ -164,5 +186,7 @@ bool xwm_atoms_contains(struct wlr_xwm *xwm, xcb_atom_t *atoms,
 xcb_void_cookie_t xwm_send_event_with_size(xcb_connection_t *c,
 	uint8_t propagate, xcb_window_t destination,
 	uint32_t event_mask, const void *event, uint32_t length);
+
+void xwm_schedule_flush(struct wlr_xwm *xwm);
 
 #endif

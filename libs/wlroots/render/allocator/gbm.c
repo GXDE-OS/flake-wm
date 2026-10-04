@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <drm_fourcc.h>
 #include <fcntl.h>
@@ -10,7 +9,6 @@
 #include <wlr/util/log.h>
 #include <xf86drm.h>
 
-#include "config.h"
 #include "render/allocator/gbm.h"
 #include "render/drm_format_set.h"
 
@@ -40,40 +38,12 @@ static bool export_gbm_bo(struct gbm_bo *bo,
 	attribs.modifier = gbm_bo_get_modifier(bo);
 
 	int i;
-	int32_t handle = -1;
 	for (i = 0; i < attribs.n_planes; ++i) {
-#if HAVE_GBM_BO_GET_FD_FOR_PLANE
-		(void)handle;
-
 		attribs.fd[i] = gbm_bo_get_fd_for_plane(bo, i);
 		if (attribs.fd[i] < 0) {
 			wlr_log(WLR_ERROR, "gbm_bo_get_fd_for_plane failed");
 			goto error_fd;
 		}
-#else
-		// GBM is lacking a function to get a FD for a given plane. Instead,
-		// check all planes have the same handle. We can't use
-		// drmPrimeHandleToFD because that messes up handle ref'counting in
-		// the user-space driver.
-		union gbm_bo_handle plane_handle = gbm_bo_get_handle_for_plane(bo, i);
-		if (plane_handle.s32 < 0) {
-			wlr_log(WLR_ERROR, "gbm_bo_get_handle_for_plane failed");
-			goto error_fd;
-		}
-		if (i == 0) {
-			handle = plane_handle.s32;
-		} else if (plane_handle.s32 != handle) {
-			wlr_log(WLR_ERROR, "Failed to export GBM BO: "
-				"all planes don't have the same GEM handle");
-			goto error_fd;
-		}
-
-		attribs.fd[i] = gbm_bo_get_fd(bo);
-		if (attribs.fd[i] < 0) {
-			wlr_log(WLR_ERROR, "gbm_bo_get_fd failed");
-			goto error_fd;
-		}
-#endif
 
 		attribs.offset[i] = gbm_bo_get_offset(bo, i);
 		attribs.stride[i] = gbm_bo_get_stride_for_plane(bo, i);
@@ -97,6 +67,7 @@ static struct wlr_gbm_buffer *create_buffer(struct wlr_gbm_allocator *alloc,
 
 	bool has_modifier = true;
 	uint64_t fallback_modifier = DRM_FORMAT_MOD_INVALID;
+	errno = 0;
 	struct gbm_bo *bo = gbm_bo_create_with_modifiers(gbm_device, width, height,
 		format->format, format->modifiers, format->len);
 	if (bo == NULL) {
@@ -107,14 +78,15 @@ static struct wlr_gbm_buffer *create_buffer(struct wlr_gbm_allocator *alloc,
 			fallback_modifier = DRM_FORMAT_MOD_LINEAR;
 		} else if (!wlr_drm_format_has(format, DRM_FORMAT_MOD_INVALID)) {
 			// If the format doesn't accept an implicit modifier, bail out.
-			wlr_log(WLR_ERROR, "gbm_bo_create_with_modifiers failed");
+			wlr_log_errno(WLR_ERROR, "gbm_bo_create_with_modifiers failed");
 			return NULL;
 		}
+		errno = 0;
 		bo = gbm_bo_create(gbm_device, width, height, format->format, usage);
 		has_modifier = false;
 	}
 	if (bo == NULL) {
-		wlr_log(WLR_ERROR, "gbm_bo_create failed");
+		wlr_log_errno(WLR_ERROR, "gbm_bo_create failed");
 		return NULL;
 	}
 
@@ -125,7 +97,6 @@ static struct wlr_gbm_buffer *create_buffer(struct wlr_gbm_allocator *alloc,
 	}
 	wlr_buffer_init(&buffer->base, &buffer_impl, width, height);
 	buffer->gbm_bo = bo;
-	wl_list_insert(&alloc->buffers, &buffer->link);
 
 	if (!export_gbm_bo(bo, &buffer->dmabuf)) {
 		free(buffer);
@@ -139,6 +110,8 @@ static struct wlr_gbm_buffer *create_buffer(struct wlr_gbm_allocator *alloc,
 	if (!has_modifier) {
 		buffer->dmabuf.modifier = fallback_modifier;
 	}
+
+	wl_list_insert(&alloc->buffers, &buffer->link);
 
 	char *format_name = drmGetFormatName(buffer->dmabuf.format);
 	char *modifier_name = drmGetFormatModifierName(buffer->dmabuf.modifier);
@@ -154,8 +127,10 @@ static struct wlr_gbm_buffer *create_buffer(struct wlr_gbm_allocator *alloc,
 }
 
 static void buffer_destroy(struct wlr_buffer *wlr_buffer) {
-	struct wlr_gbm_buffer *buffer =
-		get_gbm_buffer_from_buffer(wlr_buffer);
+	struct wlr_gbm_buffer *buffer = get_gbm_buffer_from_buffer(wlr_buffer);
+
+	wlr_buffer_finish(wlr_buffer);
+
 	wlr_dmabuf_attributes_finish(&buffer->dmabuf);
 	if (buffer->gbm_bo != NULL) {
 		gbm_bo_destroy(buffer->gbm_bo);

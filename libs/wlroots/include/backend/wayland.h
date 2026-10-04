@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include <wayland-client.h>
+#include <wayland-client-protocol.h>
 #include <wayland-server-core.h>
 
 #include <wlr/backend/wayland.h>
@@ -14,18 +14,20 @@
 #include <wlr/types/wlr_tablet_tool.h>
 #include <wlr/types/wlr_touch.h>
 #include <wlr/render/drm_format_set.h>
+#include <wlr/render/drm_syncobj.h>
 
 struct wlr_wl_backend {
 	struct wlr_backend backend;
 
 	/* local state */
 	bool started;
-	struct wl_display *local_display;
+	struct wl_event_loop *event_loop;
+	struct wl_event_queue *busy_loop_queue;
 	struct wl_list outputs;
 	int drm_fd;
 	struct wl_list buffers; // wlr_wl_buffer.link
 	size_t requested_outputs;
-	struct wl_listener local_display_destroy;
+	struct wl_listener event_loop_destroy;
 	char *activation_token;
 
 	/* remote state */
@@ -40,6 +42,8 @@ struct wlr_wl_backend {
 	struct wp_presentation *presentation;
 	struct wl_shm *shm;
 	struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf_v1;
+	struct wp_linux_drm_syncobj_manager_v1 *drm_syncobj_manager_v1;
+	struct wl_list drm_syncobj_timelines; // wlr_wl_drm_syncobj_timeline.link
 	struct zwp_relative_pointer_manager_v1 *zwp_relative_pointer_manager_v1;
 	struct wl_list seats; // wlr_wl_seat.link
 	struct zwp_tablet_manager_v2 *tablet_manager;
@@ -58,6 +62,19 @@ struct wlr_wl_buffer {
 	bool released;
 	struct wl_list link; // wlr_wl_backend.buffers
 	struct wl_listener buffer_destroy;
+
+	bool has_drm_syncobj_waiter;
+	struct wlr_drm_syncobj_timeline_waiter drm_syncobj_waiter;
+
+	struct wlr_drm_syncobj_timeline *fallback_signal_timeline;
+	uint64_t fallback_signal_point;
+};
+
+struct wlr_wl_drm_syncobj_timeline {
+	struct wlr_drm_syncobj_timeline *base;
+	struct wlr_addon addon;
+	struct wl_list link; // wlr_wl_backend.drm_syncobj_timelines
+	struct wp_linux_drm_syncobj_timeline_v1 *wl;
 };
 
 struct wlr_wl_presentation_feedback {
@@ -88,9 +105,25 @@ struct wlr_wl_output {
 	struct xdg_surface *xdg_surface;
 	struct xdg_toplevel *xdg_toplevel;
 	struct zxdg_toplevel_decoration_v1 *zxdg_toplevel_decoration_v1;
+	struct wp_linux_drm_syncobj_surface_v1 *drm_syncobj_surface_v1;
 	struct wl_list presentation_feedbacks;
 
+	char *title;
+	char *app_id;
+
+	// 0 if not requested
+	int32_t requested_width, requested_height;
+
+	uint32_t configure_serial;
+	bool has_configure_serial;
 	bool configured;
+
+	bool initialized;
+
+	// If not NULL, the host compositor hasn't acknowledged the unmapping yet;
+	// ignore all configure events
+	struct wl_callback *unmap_callback;
+
 	uint32_t enter_serial;
 
 	struct {
@@ -106,9 +139,10 @@ struct wlr_wl_pointer {
 	struct wlr_wl_seat *seat;
 	struct wlr_wl_output *output;
 
-	enum wlr_axis_source axis_source;
+	enum wl_pointer_axis_source axis_source;
 	int32_t axis_discrete;
 	uint32_t fingers; // trackpad gesture
+	enum wl_pointer_axis_relative_direction axis_relative_direction;
 
 	struct wl_listener output_destroy;
 
@@ -174,6 +208,7 @@ bool create_wl_seat(struct wl_seat *wl_seat, struct wlr_wl_backend *wl,
 	uint32_t global_name);
 void destroy_wl_seat(struct wlr_wl_seat *seat);
 void destroy_wl_buffer(struct wlr_wl_buffer *buffer);
+void destroy_wl_drm_syncobj_timeline(struct wlr_wl_drm_syncobj_timeline *timeline);
 
 extern const struct wlr_pointer_impl wl_pointer_impl;
 extern const struct wlr_tablet_pad_impl wl_tablet_pad_impl;

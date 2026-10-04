@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200112L
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -25,6 +24,7 @@ struct cairo_buffer {
 
 static void cairo_buffer_destroy(struct wlr_buffer *wlr_buffer) {
 	struct cairo_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
+	wlr_buffer_finish(wlr_buffer);
 	cairo_surface_destroy(buffer->surface);
 	free(buffer);
 }
@@ -125,7 +125,7 @@ int main(void) {
 
 	struct server server = {0};
 	server.display = wl_display_create();
-	server.backend = wlr_backend_autocreate(server.display, NULL);
+	server.backend = wlr_backend_autocreate(wl_display_get_event_loop(server.display), NULL);
 	server.scene = wlr_scene_create();
 
 	server.renderer = wlr_renderer_autocreate(server.backend);

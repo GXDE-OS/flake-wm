@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200112L
 #include <getopt.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -88,16 +87,14 @@ static void output_handle_frame(struct wl_listener *listener, void *data) {
 		layers_arr.size / sizeof(struct wlr_output_layer_state));
 
 	if (!wlr_output_test_state(output->wlr_output, &output_state)) {
-		wlr_log(WLR_ERROR, "wlr_output_test() failed");
+		wlr_log(WLR_ERROR, "wlr_output_test_state() failed");
 		return;
 	}
 
 	int width, height;
 	wlr_output_effective_resolution(output->wlr_output, &width, &height);
 
-	struct wlr_render_pass *pass = wlr_output_begin_render_pass(output->wlr_output, &output_state,
-		NULL, NULL);
-
+	struct wlr_render_pass *pass = wlr_output_begin_render_pass(output->wlr_output, &output_state, NULL);
 	wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
 		.box = { .width = width, .height = height },
 		.color = { 0.3, 0.3, 0.3, 1 },
@@ -184,7 +181,7 @@ static void server_handle_new_output(struct wl_listener *listener, void *data) {
 	wlr_output_commit_state(wlr_output, &state);
 	wlr_output_state_finish(&state);
 
-	wlr_output_create_global(wlr_output);
+	wlr_output_create_global(wlr_output, server->wl_display);
 }
 
 static void output_surface_handle_destroy(struct wl_listener *listener,
@@ -204,6 +201,12 @@ static void output_surface_handle_commit(struct wl_listener *listener,
 		void *data) {
 	struct output_surface *output_surface =
 		wl_container_of(listener, output_surface, commit);
+
+	struct wlr_xdg_toplevel *xdg_toplevel =
+		wlr_xdg_toplevel_try_from_wlr_surface(output_surface->wlr_surface);
+	if (xdg_toplevel != NULL && xdg_toplevel->base->initial_commit) {
+		wlr_xdg_toplevel_set_size(xdg_toplevel, 0, 0);
+	}
 
 	struct wlr_buffer *buffer = NULL;
 	if (output_surface->wlr_surface->buffer != NULL) {
@@ -286,12 +289,12 @@ int main(int argc, char *argv[]) {
 
 	struct server server = {0};
 	server.wl_display = wl_display_create();
-	server.backend = wlr_backend_autocreate(server.wl_display, NULL);
+	server.backend = wlr_backend_autocreate(wl_display_get_event_loop(server.wl_display), NULL);
 
 	server.renderer = wlr_renderer_autocreate(server.backend);
 	wlr_renderer_init_wl_shm(server.renderer, server.wl_display);
 
-	if (wlr_renderer_get_dmabuf_texture_formats(server.renderer) != NULL) {
+	if (wlr_renderer_get_texture_formats(server.renderer, WLR_BUFFER_CAP_DMABUF) != NULL) {
 		wlr_drm_create(server.wl_display, server.renderer);
 		server.linux_dmabuf_v1 = wlr_linux_dmabuf_v1_create_with_renderer(
 			server.wl_display, 4, server.renderer);

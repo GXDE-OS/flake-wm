@@ -1,15 +1,13 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
-#include <backend/backend.h>
 #include <drm_fourcc.h>
 #include <stdlib.h>
+#include <wlr/backend.h>
 #include <wlr/interfaces/wlr_output.h>
+#include <wlr/render/allocator.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_compositor.h>
-#include <wlr/types/wlr_matrix.h>
 #include <wlr/types/wlr_output_layer.h>
 #include <wlr/util/log.h>
-#include "render/allocator/allocator.h"
 #include "types/wlr_output.h"
 #include "util/env.h"
 #include "util/global.h"
@@ -18,20 +16,9 @@
 
 static void send_geometry(struct wl_resource *resource) {
 	struct wlr_output *output = wlr_output_from_resource(resource);
-
-	const char *make = output->make;
-	if (make == NULL) {
-		make = "Unknown";
-	}
-
-	const char *model = output->model;
-	if (model == NULL) {
-		model = "Unknown";
-	}
-
 	wl_output_send_geometry(resource, 0, 0,
 		output->phys_width, output->phys_height, output->subpixel,
-		make, model, output->transform);
+		"Unknown", "Unknown", output->transform);
 }
 
 static void send_current_mode(struct wl_resource *resource) {
@@ -128,15 +115,25 @@ static void output_bind(struct wl_client *wl_client, void *data,
 	wl_signal_emit_mutable(&output->events.bind, &evt);
 }
 
-void wlr_output_create_global(struct wlr_output *output) {
+static void handle_display_destroy(struct wl_listener *listener, void *data) {
+	struct wlr_output *output = wl_container_of(listener, output, display_destroy);
+	wlr_output_destroy_global(output);
+}
+
+void wlr_output_create_global(struct wlr_output *output, struct wl_display *display) {
 	if (output->global != NULL) {
 		return;
 	}
-	output->global = wl_global_create(output->display,
+
+	output->global = wl_global_create(display,
 		&wl_output_interface, OUTPUT_VERSION, output, output_bind);
 	if (output->global == NULL) {
 		wlr_log(WLR_ERROR, "Failed to allocate wl_output global");
+		return;
 	}
+
+	wl_list_remove(&output->display_destroy.link);
+	wl_display_add_destroy_listener(display, &output->display_destroy);
 }
 
 void wlr_output_destroy_global(struct wlr_output *output) {
@@ -151,6 +148,9 @@ void wlr_output_destroy_global(struct wlr_output *output) {
 		wl_list_remove(wl_resource_get_link(resource));
 		wl_list_init(wl_resource_get_link(resource));
 	}
+
+	wl_list_remove(&output->display_destroy.link);
+	wl_list_init(&output->display_destroy.link);
 
 	wlr_global_destroy_safe(output->global);
 	output->global = NULL;
@@ -171,75 +171,14 @@ void wlr_output_schedule_done(struct wlr_output *output) {
 		return; // Already scheduled
 	}
 
-	struct wl_event_loop *ev = wl_display_get_event_loop(output->display);
-	output->idle_done =
-		wl_event_loop_add_idle(ev, schedule_done_handle_idle_timer, output);
+	output->idle_done = wl_event_loop_add_idle(output->event_loop,
+		schedule_done_handle_idle_timer, output);
 }
 
 struct wlr_output *wlr_output_from_resource(struct wl_resource *resource) {
 	assert(wl_resource_instance_of(resource, &wl_output_interface,
 		&output_impl));
 	return wl_resource_get_user_data(resource);
-}
-
-static void output_update_matrix(struct wlr_output *output) {
-	wlr_matrix_identity(output->transform_matrix);
-	if (output->transform != WL_OUTPUT_TRANSFORM_NORMAL) {
-		int tr_width, tr_height;
-		wlr_output_transformed_resolution(output, &tr_width, &tr_height);
-
-		wlr_matrix_translate(output->transform_matrix,
-			output->width / 2.0, output->height / 2.0);
-		wlr_matrix_transform(output->transform_matrix, output->transform);
-		wlr_matrix_translate(output->transform_matrix,
-			- tr_width / 2.0, - tr_height / 2.0);
-	}
-}
-
-void wlr_output_enable(struct wlr_output *output, bool enable) {
-	wlr_output_state_set_enabled(&output->pending, enable);
-}
-
-void wlr_output_set_mode(struct wlr_output *output,
-		struct wlr_output_mode *mode) {
-	wlr_output_state_set_mode(&output->pending, mode);
-}
-
-void wlr_output_set_custom_mode(struct wlr_output *output, int32_t width,
-		int32_t height, int32_t refresh) {
-	// If there is a fixed mode which matches what the user wants, use that
-	struct wlr_output_mode *mode;
-	wl_list_for_each(mode, &output->modes, link) {
-		if (mode->width == width && mode->height == height &&
-				mode->refresh == refresh) {
-			wlr_output_set_mode(output, mode);
-			return;
-		}
-	}
-
-	wlr_output_state_set_custom_mode(&output->pending, width, height, refresh);
-}
-
-void wlr_output_set_transform(struct wlr_output *output,
-		enum wl_output_transform transform) {
-	wlr_output_state_set_transform(&output->pending, transform);
-}
-
-void wlr_output_set_scale(struct wlr_output *output, float scale) {
-	wlr_output_state_set_scale(&output->pending, scale);
-}
-
-void wlr_output_enable_adaptive_sync(struct wlr_output *output, bool enabled) {
-	wlr_output_state_set_adaptive_sync_enabled(&output->pending, enabled);
-}
-
-void wlr_output_set_render_format(struct wlr_output *output, uint32_t format) {
-	wlr_output_state_set_render_format(&output->pending, format);
-}
-
-void wlr_output_set_subpixel(struct wlr_output *output,
-		enum wl_output_subpixel subpixel) {
-	wlr_output_state_set_subpixel(&output->pending, subpixel);
 }
 
 void wlr_output_set_name(struct wlr_output *output, const char *name) {
@@ -271,18 +210,6 @@ void wlr_output_set_description(struct wlr_output *output, const char *desc) {
 	wl_signal_emit_mutable(&output->events.description, output);
 }
 
-static void handle_display_destroy(struct wl_listener *listener, void *data) {
-	struct wlr_output *output =
-		wl_container_of(listener, output, display_destroy);
-	wlr_output_destroy_global(output);
-}
-
-static void output_state_move(struct wlr_output_state *dst,
-		struct wlr_output_state *src) {
-	*dst = *src;
-	wlr_output_state_init(src);
-}
-
 static void output_apply_state(struct wlr_output *output,
 		const struct wlr_output_state *state) {
 	if (state->committed & WLR_OUTPUT_STATE_RENDER_FORMAT) {
@@ -304,7 +231,29 @@ static void output_apply_state(struct wlr_output *output,
 
 	if (state->committed & WLR_OUTPUT_STATE_TRANSFORM) {
 		output->transform = state->transform;
-		output_update_matrix(output);
+	}
+
+	if (state->committed & WLR_OUTPUT_STATE_IMAGE_DESCRIPTION) {
+		if (state->image_description != NULL) {
+			output->image_description_value = *state->image_description;
+			output->image_description = &output->image_description_value;
+		} else {
+			output->image_description = NULL;
+		}
+
+		struct wlr_output_cursor *output_cursor;
+		wl_list_for_each(output_cursor, &output->cursors, link) {
+			output_cursor_refresh_color_transform(output_cursor, output->image_description);
+		}
+	}
+
+	if (state->committed & WLR_OUTPUT_STATE_COLOR_TRANSFORM) {
+		wlr_color_transform_unref(output->color_transform);
+		if (state->color_transform != NULL) {
+			output->color_transform = wlr_color_transform_ref(state->color_transform);
+		} else {
+			output->color_transform = NULL;
+		}
 	}
 
 	bool geometry_updated = state->committed &
@@ -334,11 +283,6 @@ static void output_apply_state(struct wlr_output *output,
 		}
 	}
 
-	if ((state->committed & WLR_OUTPUT_STATE_BUFFER) &&
-			output->swapchain != NULL) {
-		wlr_swapchain_set_buffer_submitted(output->swapchain, state->buffer);
-	}
-
 	bool mode_updated = false;
 	if (state->committed & WLR_OUTPUT_STATE_MODE) {
 		int width = 0, height = 0, refresh = 0;
@@ -364,7 +308,6 @@ static void output_apply_state(struct wlr_output *output,
 				output->refresh != refresh) {
 			output->width = width;
 			output->height = height;
-			output_update_matrix(output);
 
 			output->refresh = refresh;
 
@@ -397,7 +340,7 @@ static void output_apply_state(struct wlr_output *output,
 }
 
 void wlr_output_init(struct wlr_output *output, struct wlr_backend *backend,
-		const struct wlr_output_impl *impl, struct wl_display *display,
+		const struct wlr_output_impl *impl, struct wl_event_loop *event_loop,
 		const struct wlr_output_state *state) {
 	assert(impl->commit);
 	if (impl->set_cursor || impl->move_cursor) {
@@ -407,7 +350,7 @@ void wlr_output_init(struct wlr_output *output, struct wlr_backend *backend,
 	*output = (struct wlr_output){
 		.backend = backend,
 		.impl = impl,
-		.display = display,
+		.event_loop = event_loop,
 		.render_format = DRM_FORMAT_XRGB8888,
 		.transform = WL_OUTPUT_TRANSFORM_NORMAL,
 		.scale = 1,
@@ -418,6 +361,7 @@ void wlr_output_init(struct wlr_output *output, struct wlr_backend *backend,
 	wl_list_init(&output->cursors);
 	wl_list_init(&output->layers);
 	wl_list_init(&output->resources);
+
 	wl_signal_init(&output->events.frame);
 	wl_signal_init(&output->events.damage);
 	wl_signal_init(&output->events.needs_frame);
@@ -428,7 +372,6 @@ void wlr_output_init(struct wlr_output *output, struct wlr_backend *backend,
 	wl_signal_init(&output->events.description);
 	wl_signal_init(&output->events.request_state);
 	wl_signal_init(&output->events.destroy);
-	wlr_output_state_init(&output->pending);
 
 	output->software_cursor_locks = env_parse_bool("WLR_NO_HARDWARE_CURSORS");
 	if (output->software_cursor_locks) {
@@ -437,26 +380,32 @@ void wlr_output_init(struct wlr_output *output, struct wlr_backend *backend,
 
 	wlr_addon_set_init(&output->addons);
 
+	wl_list_init(&output->display_destroy.link);
 	output->display_destroy.notify = handle_display_destroy;
-	wl_display_add_destroy_listener(display, &output->display_destroy);
 
 	if (state) {
 		output_apply_state(output, state);
 	}
 }
 
-void wlr_output_destroy(struct wlr_output *output) {
-	if (!output) {
-		return;
-	}
-
+void wlr_output_finish(struct wlr_output *output) {
 	wl_signal_emit_mutable(&output->events.destroy, output);
+	wlr_addon_set_finish(&output->addons);
+
+	assert(wl_list_empty(&output->events.frame.listener_list));
+	assert(wl_list_empty(&output->events.damage.listener_list));
+	assert(wl_list_empty(&output->events.needs_frame.listener_list));
+	assert(wl_list_empty(&output->events.precommit.listener_list));
+	assert(wl_list_empty(&output->events.commit.listener_list));
+	assert(wl_list_empty(&output->events.present.listener_list));
+	assert(wl_list_empty(&output->events.bind.listener_list));
+	assert(wl_list_empty(&output->events.description.listener_list));
+	assert(wl_list_empty(&output->events.request_state.listener_list));
+	assert(wl_list_empty(&output->events.destroy.listener_list));
+
+	wlr_output_destroy_global(output);
 
 	wl_list_remove(&output->display_destroy.link);
-	wlr_output_destroy_global(output);
-	output_clear_back_buffer(output);
-
-	wlr_addon_set_finish(&output->addons);
 
 	// The backend is responsible for free-ing the list of modes
 
@@ -472,6 +421,7 @@ void wlr_output_destroy(struct wlr_output *output) {
 
 	wlr_swapchain_destroy(output->cursor_swapchain);
 	wlr_buffer_unlock(output->cursor_front_buffer);
+	wlr_color_transform_unref(output->color_transform);
 
 	wlr_swapchain_destroy(output->swapchain);
 
@@ -488,12 +438,17 @@ void wlr_output_destroy(struct wlr_output *output) {
 	free(output->make);
 	free(output->model);
 	free(output->serial);
+}
 
-	wlr_output_state_finish(&output->pending);
+void wlr_output_destroy(struct wlr_output *output) {
+	if (!output) {
+		return;
+	}
 
 	if (output->impl && output->impl->destroy) {
 		output->impl->destroy(output);
 	} else {
+		wlr_output_finish(output);
 		free(output);
 	}
 }
@@ -532,42 +487,6 @@ struct wlr_output_mode *wlr_output_preferred_mode(struct wlr_output *output) {
 	return wl_container_of(output->modes.next, mode, link);
 }
 
-static void output_state_clear_buffer(struct wlr_output_state *state) {
-	if (!(state->committed & WLR_OUTPUT_STATE_BUFFER)) {
-		return;
-	}
-
-	wlr_buffer_unlock(state->buffer);
-	state->buffer = NULL;
-
-	state->committed &= ~WLR_OUTPUT_STATE_BUFFER;
-}
-
-void wlr_output_set_damage(struct wlr_output *output,
-		const pixman_region32_t *damage) {
-	pixman_region32_intersect_rect(&output->pending.damage, damage,
-		0, 0, output->width, output->height);
-	output->pending.committed |= WLR_OUTPUT_STATE_DAMAGE;
-}
-
-void wlr_output_set_layers(struct wlr_output *output,
-		struct wlr_output_layer_state *layers, size_t layers_len) {
-	wlr_output_state_set_layers(&output->pending, layers, layers_len);
-}
-
-static void output_state_clear_gamma_lut(struct wlr_output_state *state) {
-	free(state->gamma_lut);
-	state->gamma_lut = NULL;
-	state->committed &= ~WLR_OUTPUT_STATE_GAMMA_LUT;
-}
-
-static void output_state_clear(struct wlr_output_state *state) {
-	output_state_clear_buffer(state);
-	output_state_clear_gamma_lut(state);
-	pixman_region32_clear(&state->damage);
-	state->committed = 0;
-}
-
 void output_pending_resolution(struct wlr_output *output,
 		const struct wlr_output_state *state, int *width, int *height) {
 	if (state->committed & WLR_OUTPUT_STATE_MODE) {
@@ -596,6 +515,14 @@ bool output_pending_enabled(struct wlr_output *output,
 	return output->enabled;
 }
 
+const struct wlr_output_image_description *output_pending_image_description(
+		struct wlr_output *output, const struct wlr_output_state *state) {
+	if (state->committed & WLR_OUTPUT_STATE_IMAGE_DESCRIPTION) {
+		return state->image_description;
+	}
+	return output->image_description;
+}
+
 /**
  * Compare a struct wlr_output_state with the current state of a struct
  * wlr_output.
@@ -603,8 +530,7 @@ bool output_pending_enabled(struct wlr_output *output,
  * Returns a bitfield of the unchanged fields.
  *
  * Some fields are not checked: damage always changes in-between frames, the
- * gamma LUT is too expensive to check, the contents of the buffer might have
- * changed, etc.
+ * contents of the buffer might have changed, etc.
  */
 static uint32_t output_compare_state(struct wlr_output *output,
 		const struct wlr_output_state *state) {
@@ -650,25 +576,62 @@ static uint32_t output_compare_state(struct wlr_output *output,
 			output->subpixel == state->subpixel) {
 		fields |= WLR_OUTPUT_STATE_SUBPIXEL;
 	}
+	if ((state->committed & WLR_OUTPUT_STATE_COLOR_TRANSFORM) &&
+			output->color_transform == state->color_transform) {
+		fields |= WLR_OUTPUT_STATE_COLOR_TRANSFORM;
+	}
 	return fields;
 }
 
 static bool output_basic_test(struct wlr_output *output,
 		const struct wlr_output_state *state) {
 	if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
-		// If the size doesn't match, reject buffer (scaling is not
-		// supported)
-		int pending_width, pending_height;
-		output_pending_resolution(output, state,
-			&pending_width, &pending_height);
-		if (state->buffer->width != pending_width ||
-				state->buffer->height != pending_height) {
-			wlr_log(WLR_DEBUG, "Primary buffer size mismatch");
+		struct wlr_fbox src_box;
+		output_state_get_buffer_src_box(state, &src_box);
+
+		// Source box must be contained within the buffer
+		if (src_box.x < 0.0 || src_box.y < 0.0 ||
+				src_box.x + src_box.width > state->buffer->width ||
+				src_box.y + src_box.height > state->buffer->height) {
+			wlr_log(WLR_ERROR, "Tried to commit with invalid buffer_src_box");
 			return false;
 		}
-	} else if (state->tearing_page_flip) {
-		wlr_log(WLR_ERROR, "Trying to commit a tearing page flip without a buffer?");
-		return false;
+
+		// Source box must not be empty (but it can be smaller than 1 pixel,
+		// some DRM devices support sub-pixel crops)
+		if (wlr_fbox_empty(&src_box)) {
+			wlr_log(WLR_ERROR, "Tried to commit with an empty buffer_src_box");
+			return false;
+		}
+
+		// Destination box cannot be entirely off-screen (but it also doesn't
+		// have to be entirely on-screen).  This also checks the dst box is
+		// not empty.
+		int pending_width, pending_height;
+		output_pending_resolution(output, state, &pending_width, &pending_height);
+		struct wlr_box output_box = {
+			.width = pending_width,
+			.height = pending_height
+		};
+		struct wlr_box dst_box;
+		output_state_get_buffer_dst_box(state, &dst_box);
+		if (!wlr_box_intersection(&output_box, &output_box, &dst_box)) {
+			wlr_log(WLR_ERROR, "Primary buffer is entirely off-screen or 0-sized");
+			return false;
+		}
+	} else {
+		if (state->tearing_page_flip) {
+			wlr_log(WLR_ERROR, "Tried to commit a tearing page flip without a buffer");
+			return false;
+		}
+		if (state->committed & WLR_OUTPUT_STATE_WAIT_TIMELINE) {
+			wlr_log(WLR_DEBUG, "Tried to set wait timeline without a buffer");
+			return false;
+		}
+		if (state->committed & WLR_OUTPUT_STATE_SIGNAL_TIMELINE) {
+			wlr_log(WLR_DEBUG, "Tried to set signal timeline without a buffer");
+			return false;
+		}
 	}
 
 	if (state->committed & WLR_OUTPUT_STATE_RENDER_FORMAT) {
@@ -686,10 +649,7 @@ static bool output_basic_test(struct wlr_output *output,
 		wlr_drm_format_finish(&format);
 	}
 
-	bool enabled = output->enabled;
-	if (state->committed & WLR_OUTPUT_STATE_ENABLED) {
-		enabled = state->enabled;
-	}
+	bool enabled = output_pending_enabled(output, state);
 
 	if (enabled && (state->committed & (WLR_OUTPUT_STATE_ENABLED |
 			WLR_OUTPUT_STATE_MODE))) {
@@ -702,29 +662,25 @@ static bool output_basic_test(struct wlr_output *output,
 		}
 	}
 
-	if (!enabled && state->committed & WLR_OUTPUT_STATE_BUFFER) {
-		wlr_log(WLR_DEBUG, "Tried to commit a buffer on a disabled output");
-		return false;
-	}
-	if (!enabled && state->committed & WLR_OUTPUT_STATE_MODE) {
-		wlr_log(WLR_DEBUG, "Tried to modeset a disabled output");
-		return false;
-	}
-	if (!enabled && state->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED) {
-		wlr_log(WLR_DEBUG, "Tried to enable adaptive sync on a disabled output");
-		return false;
-	}
-	if (!enabled && state->committed & WLR_OUTPUT_STATE_RENDER_FORMAT) {
-		wlr_log(WLR_DEBUG, "Tried to set format for a disabled output");
-		return false;
-	}
-	if (!enabled && state->committed & WLR_OUTPUT_STATE_GAMMA_LUT) {
-		wlr_log(WLR_DEBUG, "Tried to set the gamma lut on a disabled output");
-		return false;
-	}
-	if (!enabled && state->committed & WLR_OUTPUT_STATE_SUBPIXEL) {
-		wlr_log(WLR_DEBUG, "Tried to set the subpixel layout on a disabled output");
-		return false;
+	const struct {
+		enum wlr_output_state_field field;
+		const char *name;
+	} needs_enabled[] = {
+		{ WLR_OUTPUT_STATE_BUFFER, "buffer" },
+		{ WLR_OUTPUT_STATE_MODE, "mode" },
+		{ WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED, "adaptive sync" },
+		{ WLR_OUTPUT_STATE_RENDER_FORMAT, "render format" },
+		{ WLR_OUTPUT_STATE_SUBPIXEL, "subpixel" },
+		{ WLR_OUTPUT_STATE_COLOR_TRANSFORM, "color transform" },
+		{ WLR_OUTPUT_STATE_IMAGE_DESCRIPTION, "image description" },
+	};
+	if (!enabled) {
+		for (size_t i = 0; i < sizeof(needs_enabled) / sizeof(needs_enabled[0]); i++) {
+			if (state->committed & needs_enabled[i].field) {
+				wlr_log(WLR_DEBUG, "Tried to set %s on a disabled output", needs_enabled[i].name);
+				return false;
+			}
+		}
 	}
 
 	if (state->committed & WLR_OUTPUT_STATE_LAYERS) {
@@ -735,6 +691,24 @@ static bool output_basic_test(struct wlr_output *output,
 
 		for (size_t i = 0; i < state->layers_len; i++) {
 			state->layers[i].accepted = false;
+		}
+	}
+
+	if ((state->committed & (WLR_OUTPUT_STATE_WAIT_TIMELINE | WLR_OUTPUT_STATE_SIGNAL_TIMELINE)) &&
+			!output->backend->features.timeline) {
+		wlr_log(WLR_DEBUG, "Wait/signal timelines are not supported for this output");
+		return false;
+	}
+
+	if ((state->committed & WLR_OUTPUT_STATE_IMAGE_DESCRIPTION) &&
+			state->image_description != NULL) {
+		if (!(output->supported_primaries & state->image_description->primaries)) {
+			wlr_log(WLR_DEBUG, "Unsupported image description primaries");
+			return false;
+		}
+		if (!(output->supported_transfer_functions & state->image_description->transfer_function)) {
+			wlr_log(WLR_DEBUG, "Unsupported image description transfer function");
+			return false;
 		}
 	}
 
@@ -769,16 +743,51 @@ bool wlr_output_test_state(struct wlr_output *output,
 	return success;
 }
 
-bool wlr_output_test(struct wlr_output *output) {
-	struct wlr_output_state state = output->pending;
-
-	if (output->back_buffer != NULL) {
-		assert((state.committed & WLR_OUTPUT_STATE_BUFFER) == 0);
-		state.committed |= WLR_OUTPUT_STATE_BUFFER;
-		state.buffer = output->back_buffer;
+bool output_prepare_commit(struct wlr_output *output, const struct wlr_output_state *state) {
+	if (!output_basic_test(output, state)) {
+		wlr_log(WLR_ERROR, "Basic output test failed for %s", output->name);
+		return false;
 	}
 
-	return wlr_output_test_state(output, &state);
+	if ((state->committed & WLR_OUTPUT_STATE_BUFFER) &&
+			output->idle_frame != NULL) {
+		wl_event_source_remove(output->idle_frame);
+		output->idle_frame = NULL;
+	}
+
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	struct wlr_output_event_precommit pre_event = {
+		.output = output,
+		.when = now,
+		.state = state,
+	};
+	wl_signal_emit_mutable(&output->events.precommit, &pre_event);
+
+	return true;
+}
+
+void output_apply_commit(struct wlr_output *output, const struct wlr_output_state *state) {
+	output->commit_seq++;
+
+	if (output_pending_enabled(output, state)) {
+		output->frame_pending = true;
+		output->needs_frame = false;
+	}
+
+	output_apply_state(output, state);
+}
+
+void output_send_commit_event(struct wlr_output *output, const struct wlr_output_state *state) {
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	struct wlr_output_event_commit event = {
+		.output = output,
+		.when = now,
+		.state = state,
+	};
+	wl_signal_emit_mutable(&output->events.commit, &event);
 }
 
 bool wlr_output_commit_state(struct wlr_output *output,
@@ -800,21 +809,9 @@ bool wlr_output_commit_state(struct wlr_output *output,
 		return false;
 	}
 
-	if ((pending.committed & WLR_OUTPUT_STATE_BUFFER) &&
-			output->idle_frame != NULL) {
-		wl_event_source_remove(output->idle_frame);
-		output->idle_frame = NULL;
+	if (!output_prepare_commit(output, &pending)) {
+		return false;
 	}
-
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-
-	struct wlr_output_event_precommit pre_event = {
-		.output = output,
-		.when = &now,
-		.state = &pending,
-	};
-	wl_signal_emit_mutable(&output->events.precommit, &pre_event);
 
 	if (!output->impl->commit(output, &pending)) {
 		if (new_back_buffer) {
@@ -823,56 +820,14 @@ bool wlr_output_commit_state(struct wlr_output *output,
 		return false;
 	}
 
-	output->commit_seq++;
-
-	if (output_pending_enabled(output, state)) {
-		output->frame_pending = true;
-		output->needs_frame = false;
-	}
-
-	output_apply_state(output, &pending);
-
-	struct wlr_output_event_commit event = {
-		.output = output,
-		.when = &now,
-		.state = &pending,
-	};
-	wl_signal_emit_mutable(&output->events.commit, &event);
+	output_apply_commit(output, &pending);
+	output_send_commit_event(output, &pending);
 
 	if (new_back_buffer) {
 		wlr_buffer_unlock(pending.buffer);
 	}
 
 	return true;
-}
-
-bool wlr_output_commit(struct wlr_output *output) {
-	// Make sure the pending state is cleared before the output is committed
-	struct wlr_output_state state = {0};
-	output_state_move(&state, &output->pending);
-
-	// output_clear_back_buffer detaches the buffer from the renderer. This is
-	// important to do before calling impl->commit(), because this marks an
-	// implicit rendering synchronization point. The backend needs it to avoid
-	// displaying a buffer when asynchronous GPU work isn't finished.
-	if (output->back_buffer != NULL) {
-		wlr_output_state_set_buffer(&state, output->back_buffer);
-		output_clear_back_buffer(output);
-	}
-
-	bool ok = wlr_output_commit_state(output, &state);
-	wlr_output_state_finish(&state);
-	return ok;
-}
-
-void wlr_output_rollback(struct wlr_output *output) {
-	output_clear_back_buffer(output);
-	output_state_clear(&output->pending);
-}
-
-void wlr_output_attach_buffer(struct wlr_output *output,
-		struct wlr_buffer *buffer) {
-	wlr_output_state_set_buffer(&output->pending, buffer);
 }
 
 void wlr_output_send_frame(struct wlr_output *output) {
@@ -902,9 +857,8 @@ void wlr_output_schedule_frame(struct wlr_output *output) {
 
 	// We're using an idle timer here in case a buffer swap happens right after
 	// this function is called
-	struct wl_event_loop *ev = wl_display_get_event_loop(output->display);
-	output->idle_frame =
-		wl_event_loop_add_idle(ev, schedule_frame_handle_idle_timer, output);
+	output->idle_frame = wl_event_loop_add_idle(output->event_loop,
+		schedule_frame_handle_idle_timer, output);
 }
 
 void wlr_output_send_present(struct wlr_output *output,
@@ -912,14 +866,12 @@ void wlr_output_send_present(struct wlr_output *output,
 	assert(event);
 	event->output = output;
 
-	struct timespec now;
-	if (event->presented && event->when == NULL) {
-		if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+	if (event->presented && (event->when.tv_sec == 0 && event->when.tv_nsec == 0)) {
+		if (clock_gettime(CLOCK_MONOTONIC, &event->when) != 0) {
 			wlr_log_errno(WLR_ERROR, "failed to send output present event: "
 				"failed to read clock");
 			return;
 		}
-		event->when = &now;
 	}
 
 	wl_signal_emit_mutable(&output->events.present, event);
@@ -961,8 +913,41 @@ void output_defer_present(struct wlr_output *output, struct wlr_output_event_pre
 	deferred->output_destroy.notify = deferred_present_event_handle_output_destroy;
 	wl_signal_add(&output->events.destroy, &deferred->output_destroy);
 
-	struct wl_event_loop *ev = wl_display_get_event_loop(output->display);
-	deferred->idle_source = wl_event_loop_add_idle(ev, deferred_present_event_handle_idle, deferred);
+	deferred->idle_source = wl_event_loop_add_idle(output->event_loop,
+		deferred_present_event_handle_idle, deferred);
+}
+
+void output_state_get_buffer_src_box(const struct wlr_output_state *state,
+		struct wlr_fbox *out) {
+	out->x = state->buffer_src_box.x;
+	out->y = state->buffer_src_box.y;
+	// If the source box is unset then default to the whole buffer.
+	if (state->buffer_src_box.width == 0.0 &&
+			state->buffer_src_box.height == 0.0) {
+		out->width = (double)state->buffer->width;
+		out->height = (double)state->buffer->height;
+	} else {
+		out->width = state->buffer_src_box.width;
+		out->height = state->buffer_src_box.height;
+	}
+}
+
+void output_state_get_buffer_dst_box(const struct wlr_output_state *state,
+		struct wlr_box *out) {
+	out->x = state->buffer_dst_box.x;
+	out->y = state->buffer_dst_box.y;
+	// If the dst box is unset then default to source crop size (which itself
+	// defaults to the whole buffer size if unset)
+	if (state->buffer_dst_box.width == 0 &&
+			state->buffer_dst_box.height == 0) {
+		struct wlr_fbox src_box;
+		output_state_get_buffer_src_box(state, &src_box);
+		out->width = (int)src_box.width;
+		out->height = (int)src_box.height;
+	} else {
+		out->width = state->buffer_dst_box.width;
+		out->height = state->buffer_dst_box.height;
+	}
 }
 
 void wlr_output_send_request_state(struct wlr_output *output,
@@ -979,11 +964,6 @@ void wlr_output_send_request_state(struct wlr_output *output,
 		.state = &copy,
 	};
 	wl_signal_emit_mutable(&output->events.request_state, &event);
-}
-
-void wlr_output_set_gamma(struct wlr_output *output, size_t size,
-		const uint16_t *r, const uint16_t *g, const uint16_t *b) {
-	wlr_output_state_set_gamma_lut(&output->pending, size, r, g, b);
 }
 
 size_t wlr_output_get_gamma_size(struct wlr_output *output) {

@@ -1,9 +1,9 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <wlr/util/log.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -20,10 +20,12 @@ struct prop_info {
 };
 
 static const struct prop_info connector_info[] = {
-#define INDEX(name) (offsetof(union wlr_drm_connector_props, name) / sizeof(uint32_t))
+#define INDEX(name) (offsetof(struct wlr_drm_connector_props, name) / sizeof(uint32_t))
 	{ "CRTC_ID", INDEX(crtc_id) },
+	{ "Colorspace", INDEX(colorspace) },
 	{ "DPMS", INDEX(dpms) },
 	{ "EDID", INDEX(edid) },
+	{ "HDR_OUTPUT_METADATA", INDEX(hdr_output_metadata) },
 	{ "PATH", INDEX(path) },
 	{ "content type", INDEX(content_type) },
 	{ "link-status", INDEX(link_status) },
@@ -36,17 +38,18 @@ static const struct prop_info connector_info[] = {
 };
 
 static const struct prop_info crtc_info[] = {
-#define INDEX(name) (offsetof(union wlr_drm_crtc_props, name) / sizeof(uint32_t))
+#define INDEX(name) (offsetof(struct wlr_drm_crtc_props, name) / sizeof(uint32_t))
 	{ "ACTIVE", INDEX(active) },
 	{ "GAMMA_LUT", INDEX(gamma_lut) },
 	{ "GAMMA_LUT_SIZE", INDEX(gamma_lut_size) },
 	{ "MODE_ID", INDEX(mode_id) },
+	{ "OUT_FENCE_PTR", INDEX(out_fence_ptr) },
 	{ "VRR_ENABLED", INDEX(vrr_enabled) },
 #undef INDEX
 };
 
 static const struct prop_info plane_info[] = {
-#define INDEX(name) (offsetof(union wlr_drm_plane_props, name) / sizeof(uint32_t))
+#define INDEX(name) (offsetof(struct wlr_drm_plane_props, name) / sizeof(uint32_t))
 	{ "CRTC_H", INDEX(crtc_h) },
 	{ "CRTC_ID", INDEX(crtc_id) },
 	{ "CRTC_W", INDEX(crtc_w) },
@@ -54,7 +57,11 @@ static const struct prop_info plane_info[] = {
 	{ "CRTC_Y", INDEX(crtc_y) },
 	{ "FB_DAMAGE_CLIPS", INDEX(fb_damage_clips) },
 	{ "FB_ID", INDEX(fb_id) },
+	{ "HOTSPOT_X", INDEX(hotspot_x) },
+	{ "HOTSPOT_Y", INDEX(hotspot_y) },
+	{ "IN_FENCE_FD", INDEX(in_fence_fd) },
 	{ "IN_FORMATS", INDEX(in_formats) },
+	{ "SIZE_HINTS", INDEX(size_hints) },
 	{ "SRC_H", INDEX(src_h) },
 	{ "SRC_W", INDEX(src_w) },
 	{ "SRC_X", INDEX(src_x) },
@@ -75,14 +82,14 @@ static bool scan_properties(int fd, uint32_t id, uint32_t type, uint32_t *result
 		const struct prop_info *info, size_t info_len) {
 	drmModeObjectProperties *props = drmModeObjectGetProperties(fd, id, type);
 	if (!props) {
-		wlr_log_errno(WLR_ERROR, "Failed to get DRM object properties");
+		wlr_log_errno(WLR_ERROR, "Failed to get DRM object %" PRIu32 " properties", id);
 		return false;
 	}
 
 	for (uint32_t i = 0; i < props->count_props; ++i) {
 		drmModePropertyRes *prop = drmModeGetProperty(fd, props->props[i]);
 		if (!prop) {
-			wlr_log_errno(WLR_ERROR, "Failed to get DRM object property");
+			wlr_log_errno(WLR_ERROR, "Failed to get property %" PRIu32 " of DRM object %" PRIu32, props->props[i], id);
 			continue;
 		}
 
@@ -99,19 +106,18 @@ static bool scan_properties(int fd, uint32_t id, uint32_t type, uint32_t *result
 	return true;
 }
 
-bool get_drm_connector_props(int fd, uint32_t id,
-		union wlr_drm_connector_props *out) {
-	return scan_properties(fd, id, DRM_MODE_OBJECT_CONNECTOR, out->props,
+bool get_drm_connector_props(int fd, uint32_t id, struct wlr_drm_connector_props *out) {
+	return scan_properties(fd, id, DRM_MODE_OBJECT_CONNECTOR, (uint32_t *)out,
 		connector_info, sizeof(connector_info) / sizeof(connector_info[0]));
 }
 
-bool get_drm_crtc_props(int fd, uint32_t id, union wlr_drm_crtc_props *out) {
-	return scan_properties(fd, id, DRM_MODE_OBJECT_CRTC, out->props,
+bool get_drm_crtc_props(int fd, uint32_t id, struct wlr_drm_crtc_props *out) {
+	return scan_properties(fd, id, DRM_MODE_OBJECT_CRTC, (uint32_t *)out,
 		crtc_info, sizeof(crtc_info) / sizeof(crtc_info[0]));
 }
 
-bool get_drm_plane_props(int fd, uint32_t id, union wlr_drm_plane_props *out) {
-	return scan_properties(fd, id, DRM_MODE_OBJECT_PLANE, out->props,
+bool get_drm_plane_props(int fd, uint32_t id, struct wlr_drm_plane_props *out) {
+	return scan_properties(fd, id, DRM_MODE_OBJECT_PLANE, (uint32_t *)out,
 		plane_info, sizeof(plane_info) / sizeof(plane_info[0]));
 }
 

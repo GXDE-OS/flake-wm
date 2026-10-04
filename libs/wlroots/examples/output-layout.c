@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200112L
 #include <drm_fourcc.h>
 #include <limits.h>
 #include <math.h>
@@ -14,7 +13,6 @@
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_keyboard.h>
-#include <wlr/types/wlr_matrix.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_output.h>
@@ -116,7 +114,7 @@ static void output_frame_notify(struct wl_listener *listener, void *data) {
 
 	struct wlr_output_state output_state;
 	wlr_output_state_init(&output_state);
-	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &output_state, NULL, NULL);
+	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &output_state, NULL);
 
 	wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
 		.box = { .width = wlr_output->width, .height = wlr_output->height },
@@ -273,10 +271,10 @@ int main(int argc, char *argv[]) {
 		.display = display,
 	};
 
-	state.layout = wlr_output_layout_create();
+	state.layout = wlr_output_layout_create(display);
 	clock_gettime(CLOCK_MONOTONIC, &state.ts_last);
 
-	struct wlr_backend *wlr = wlr_backend_autocreate(display, NULL);
+	struct wlr_backend *wlr = wlr_backend_autocreate(wl_display_get_event_loop(display), NULL);
 	if (!wlr) {
 		exit(1);
 	}
@@ -303,5 +301,4 @@ int main(int argc, char *argv[]) {
 	wlr_texture_destroy(state.cat_texture);
 
 	wl_display_destroy(state.display);
-	wlr_output_layout_destroy(state.layout);
 }

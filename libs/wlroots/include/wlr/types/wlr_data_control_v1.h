@@ -12,6 +12,12 @@
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_seat.h>
 
+/**
+ * Deprecated: this protocol is legacy and superseded by ext-data-control-v1.
+ * The implementation will be dropped in a future wlroots version.
+ *
+ * Consider using `wlr_ext_data_control_manager_v1` as a replacement.
+ */
 struct wlr_data_control_manager_v1 {
 	struct wl_global *global;
 	struct wl_list devices; // wlr_data_control_device_v1.link
@@ -21,7 +27,9 @@ struct wlr_data_control_manager_v1 {
 		struct wl_signal new_device; // wlr_data_control_device_v1
 	} events;
 
-	struct wl_listener display_destroy;
+	struct {
+		struct wl_listener display_destroy;
+	} WLR_PRIVATE;
 };
 
 struct wlr_data_control_device_v1 {
@@ -33,9 +41,11 @@ struct wlr_data_control_device_v1 {
 	struct wl_resource *selection_offer_resource; // current selection offer
 	struct wl_resource *primary_selection_offer_resource; // current primary selection offer
 
-	struct wl_listener seat_destroy;
-	struct wl_listener seat_set_selection;
-	struct wl_listener seat_set_primary_selection;
+	struct {
+		struct wl_listener seat_destroy;
+		struct wl_listener seat_set_selection;
+		struct wl_listener seat_set_primary_selection;
+	} WLR_PRIVATE;
 };
 
 struct wlr_data_control_manager_v1 *wlr_data_control_manager_v1_create(
