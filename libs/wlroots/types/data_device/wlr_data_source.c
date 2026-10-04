@@ -19,8 +19,6 @@ void wlr_data_source_init(struct wlr_data_source *source,
 		.actions = -1,
 	};
 	wl_array_init(&source->mime_types);
-	wl_signal_init(&source->events.accepted);
-	wl_signal_init(&source->events.dnd_action);
 	wl_signal_init(&source->events.destroy);
 }
 
@@ -31,9 +29,7 @@ void wlr_data_source_send(struct wlr_data_source *source, const char *mime_type,
 
 void wlr_data_source_accept(struct wlr_data_source *source, uint32_t serial,
 		const char *mime_type) {
-	source->accepted = (mime_type != NULL && *mime_type != '\0');
-	wl_signal_emit_mutable(&source->events.accepted, NULL);
-
+	source->accepted = (mime_type != NULL);
 	if (source->impl->accept) {
 		source->impl->accept(source, serial, mime_type);
 	}
@@ -74,8 +70,6 @@ void wlr_data_source_dnd_finish(struct wlr_data_source *source) {
 void wlr_data_source_dnd_action(struct wlr_data_source *source,
 		enum wl_data_device_manager_dnd_action action) {
 	source->current_dnd_action = action;
-	wl_signal_emit_mutable(&source->events.dnd_action, NULL);
-
 	if (source->impl->dnd_action) {
 		source->impl->dnd_action(source, action);
 	}

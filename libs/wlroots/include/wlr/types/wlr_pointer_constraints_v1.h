@@ -33,7 +33,6 @@ struct wlr_pointer_constraint_v1_state {
 
 	// only valid for locked_pointer
 	struct {
-		bool enabled;
 		double x, y;
 	} cursor_hint;
 };
