@@ -17,7 +17,12 @@ static struct config_manager *config_manager = NULL;
 
 static const char *check_config_file(void)
 {
-    char *config_dir = string_expand_path("~/.config/gxde-wlcom");
+    /* Honour XDG_CONFIG_HOME so nested/test sessions can keep their settings
+     * separate from the running desktop. Relative XDG paths are invalid. */
+    const char *xdg_config = getenv("XDG_CONFIG_HOME");
+    char *config_dir = xdg_config && xdg_config[0] == '/'
+        ? (char *)string_join_path(xdg_config, NULL, "gxde-wlcom")
+        : string_expand_path("~/.config/gxde-wlcom");
     if (!config_dir) {
         return NULL;
     }

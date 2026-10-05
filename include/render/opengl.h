@@ -63,6 +63,7 @@ struct ky_opengl_renderer {
         bool OES_texture_half_float_linear;
         bool EXT_texture_norm16;
         bool EXT_disjoint_timer_query;
+        bool core_timer_query;
         bool KHR_robustness;
     } exts;
 
@@ -82,6 +83,7 @@ struct ky_opengl_renderer {
     struct wl_list textures; // ky_opengl_texture.link
 
     struct ky_opengl_buffer *current_buffer;
+    struct wlr_drm_format_set shm_texture_formats;
     uint32_t viewport_width, viewport_height;
 };
 
@@ -131,6 +133,7 @@ struct ky_opengl_render_pass {
     float projection_matrix[9];
     struct ky_egl_context prev_ctx;
     struct ky_opengl_render_timer *timer;
+    bool failed;
 };
 
 struct ky_opengl_texture_attribs {
@@ -162,6 +165,11 @@ struct ky_opengl_render_pass *ky_opengl_begin_buffer_pass(struct ky_opengl_buffe
                                                           struct ky_opengl_render_timer *timer);
 
 bool wlr_render_pass_is_opengl(struct wlr_render_pass *render_pass);
+
+/* Signal point 1 after commands already queued in this pass complete.
+ * On failure, waits synchronously for those commands and returns NULL. */
+struct wlr_drm_syncobj_timeline *
+ky_opengl_render_pass_signal_sample(struct wlr_render_pass *render_pass);
 
 struct ky_opengl_render_pass *
 ky_opengl_render_pass_from_wlr_render_pass(struct wlr_render_pass *wlr_pass);

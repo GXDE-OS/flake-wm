@@ -20,11 +20,6 @@ struct fbdev_backend *get_fbdev_backend_from_backend(struct wlr_backend *wlr_bac
     return backend;
 }
 
-static uint32_t get_buffer_caps(struct wlr_backend *wlr_backend)
-{
-    return WLR_BUFFER_CAP_DATA_PTR | WLR_BUFFER_CAP_SHM;
-}
-
 static bool backend_start(struct wlr_backend *wlr_backend)
 {
     struct fbdev_backend *backend = get_fbdev_backend_from_backend(wlr_backend);
@@ -62,7 +57,6 @@ static void backend_destroy(struct wlr_backend *wlr_backend)
 static const struct wlr_backend_impl backend_impl = {
     .start = backend_start,
     .destroy = backend_destroy,
-    .get_buffer_caps = get_buffer_caps,
 };
 
 static void fbdev_output_damage_whole(struct fbdev_output *output)
@@ -126,6 +120,7 @@ struct wlr_backend *fbdev_backend_create(struct wl_display *display, struct wlr_
     }
 
     wlr_backend_init(&backend->backend, &backend_impl);
+    backend->backend.buffer_caps = WLR_BUFFER_CAP_DATA_PTR | WLR_BUFFER_CAP_SHM;
 
     backend->display = display;
     backend->session = session;

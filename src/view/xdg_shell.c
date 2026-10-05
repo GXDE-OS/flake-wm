@@ -56,8 +56,8 @@ static bool xdg_view_hover(struct seat *seat, struct ky_scene_node *node, double
     double sy = y - geometry->y;
     // sx = sx < 0 ? 0 : (sx > geometry->width ? geometry->width : sx);
     // sy = sy < 0 ? 0 : (sy > geometry->height ? geometry->height : sy);
-    sx += xdg_view->wlr_xdg_surface->current.geometry.x;
-    sy += xdg_view->wlr_xdg_surface->current.geometry.y;
+    sx += xdg_view->wlr_xdg_surface->geometry.x;
+    sy += xdg_view->wlr_xdg_surface->geometry.y;
 
     seat_notify_motion(seat, surface, time, sx, sy, first);
     return true;
@@ -197,7 +197,7 @@ static void xdg_view_update_geometry(struct xdg_view *xdg_view)
     struct wlr_xdg_surface *wlr_xdg_surface = xdg_view->wlr_xdg_surface;
     struct wlr_surface *wlr_surface = wlr_xdg_surface->surface;
 
-    struct wlr_box *geo = &wlr_xdg_surface->current.geometry;
+    struct wlr_box *geo = &wlr_xdg_surface->geometry;
     int width = geo->width, height = geo->height;
 
     if (!width || !height) {
@@ -221,6 +221,14 @@ static void xdg_view_handle_commit(struct wl_listener *listener, void *data)
 {
     struct xdg_view *xdg_view = wl_container_of(listener, xdg_view, commit);
     struct view *view = &xdg_view->view;
+
+    if (xdg_view->wlr_xdg_surface->initial_commit) {
+        wlr_xdg_toplevel_set_size(xdg_view->wlr_xdg_surface->toplevel, 0, 0);
+        return;
+    }
+    if (!view->surface->mapped) {
+        return;
+    }
 
     xdg_view_update_geometry(xdg_view);
     treeland_personalization_apply_view_popup_effects(view);
@@ -329,8 +337,8 @@ static void xdg_view_handle_show_window_menu(struct wl_listener *listener, void 
     struct kywc_view *kywc_view = &xdg_view->view.base;
 
     struct seat *seat = seat_from_wlr_seat(event->seat->seat);
-    int off_x = kywc_view->geometry.x - xdg_view->wlr_xdg_surface->current.geometry.x;
-    int off_y = kywc_view->geometry.y - xdg_view->wlr_xdg_surface->current.geometry.y;
+    int off_x = kywc_view->geometry.x - xdg_view->wlr_xdg_surface->geometry.x;
+    int off_y = kywc_view->geometry.y - xdg_view->wlr_xdg_surface->geometry.y;
     view_show_window_menu(&xdg_view->view, seat, off_x + event->x, off_y + event->y);
 }
 
@@ -403,9 +411,6 @@ static void xdg_view_handle_map(struct wl_listener *listener, void *data)
     xdg_view->set_app_id.notify = xdg_view_handle_set_app_id;
     wl_signal_add(&toplevel->events.set_app_id, &xdg_view->set_app_id);
 
-    xdg_view->commit.notify = xdg_view_handle_commit;
-    wl_signal_add(&wlr_surface->events.commit, &xdg_view->commit);
-
     struct wl_client *client = wl_resource_get_client(wlr_surface->resource);
     wl_client_get_credentials(client, &xdg_view->view.pid, NULL, NULL);
     view_map(&xdg_view->view);
@@ -416,7 +421,6 @@ static void xdg_view_handle_unmap(struct wl_listener *listener, void *data)
 {
     struct xdg_view *xdg_view = wl_container_of(listener, xdg_view, unmap);
 
-    wl_list_remove(&xdg_view->commit.link);
     wl_list_remove(&xdg_view->request_move.link);
     wl_list_remove(&xdg_view->request_minimize.link);
     wl_list_remove(&xdg_view->request_maximize.link);
@@ -438,15 +442,18 @@ static void xdg_view_handle_destroy(struct wl_listener *listener, void *data)
     wl_list_remove(&xdg_view->map.link);
     wl_list_remove(&xdg_view->unmap.link);
     wl_list_remove(&xdg_view->new_popup.link);
+    wl_list_remove(&xdg_view->commit.link);
 
     xdg_view->wlr_xdg_surface->surface->data = NULL;
-    /* scene tree destroy will be called before by scene */
+    xdg_view->wlr_xdg_surface->data = NULL;
+    /* The role's scene tree is destroyed before this role listener. */
     view_destroy(&xdg_view->view);
 }
 
 static void handle_new_xdg_surface(struct wl_listener *listener, void *data)
 {
-    struct wlr_xdg_surface *wlr_xdg_surface = data;
+    struct wlr_xdg_toplevel *toplevel = data;
+    struct wlr_xdg_surface *wlr_xdg_surface = toplevel->base;
 
     /* popup is handled in surface new_popup listener */
     if (wlr_xdg_surface->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
@@ -465,6 +472,8 @@ static void handle_new_xdg_surface(struct wl_listener *listener, void *data)
     view_init(&xdg_view->view, &xdg_surface_impl, xdg_view);
 
     xdg_view->wlr_xdg_surface = wlr_xdg_surface;
+    xdg_view->commit.notify = xdg_view_handle_commit;
+    wl_signal_add(&wlr_xdg_surface->surface->events.commit, &xdg_view->commit);
     wlr_xdg_surface->data = xdg_view;
     wlr_xdg_surface->surface->data = &xdg_view->view;
 
@@ -473,7 +482,7 @@ static void handle_new_xdg_surface(struct wl_listener *listener, void *data)
 
     /* create tree for surface and all sub-surfaces */
     xdg_view->view.surface_tree = ky_scene_xdg_surface_create(xdg_view->view.tree, wlr_xdg_surface);
-    /* event node will be destroyed when xdg_surface destroy */
+    /* The event node follows the toplevel role lifetime. */
     input_event_node_create(&xdg_view->view.surface_tree->node, &xdg_view_event_node_impl,
                             xdg_view_get_root, xdg_view_get_toplevel, xdg_view);
 
@@ -487,7 +496,14 @@ static void handle_new_xdg_surface(struct wl_listener *listener, void *data)
     xdg_view->map.notify = xdg_view_handle_map;
     wl_signal_add(&wlr_xdg_surface->surface->events.map, &xdg_view->map);
     xdg_view->destroy.notify = xdg_view_handle_destroy;
-    wl_signal_add(&wlr_xdg_surface->events.destroy, &xdg_view->destroy);
+    wl_signal_add(&toplevel->events.destroy, &xdg_view->destroy);
+}
+
+static void handle_xdg_shell_destroy(struct wl_listener *listener, void *data)
+{
+    struct view_manager *manager = wl_container_of(listener, manager, xdg_shell_destroy);
+    wl_list_remove(&manager->new_xdg_surface.link);
+    wl_list_remove(&manager->xdg_shell_destroy.link);
 }
 
 bool xdg_shell_init(struct view_manager *view_manager)
@@ -500,7 +516,9 @@ bool xdg_shell_init(struct view_manager *view_manager)
     }
 
     view_manager->new_xdg_surface.notify = handle_new_xdg_surface;
-    wl_signal_add(&xdg_shell->events.new_surface, &view_manager->new_xdg_surface);
+    wl_signal_add(&xdg_shell->events.new_toplevel, &view_manager->new_xdg_surface);
+    view_manager->xdg_shell_destroy.notify = handle_xdg_shell_destroy;
+    wl_signal_add(&xdg_shell->events.destroy, &view_manager->xdg_shell_destroy);
 
     return true;
 }

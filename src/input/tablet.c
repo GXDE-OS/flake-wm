@@ -151,7 +151,7 @@ static void tablet_pad_handle_tablet_destroy(struct wl_listener *listener, void 
 static void attach_tablet_pad(struct tablet_pad *tablet_pad, struct tablet *tablet)
 {
     kywc_log(KYWC_DEBUG, "Attaching tablet pad \"%s\" to tablet tool \"%s\"",
-             tablet_pad->input->wlr_input->name, tablet->input->wlr_input->name);
+             (tablet_pad->input->wlr_input->name ? tablet_pad->input->wlr_input->name : "unnamed"), (tablet->input->wlr_input->name ? tablet->input->wlr_input->name : "unnamed"));
 
     tablet_pad->tablet = tablet;
     wl_list_remove(&tablet_pad->tablet_destroy.link);
@@ -336,12 +336,12 @@ static void handle_new_input(struct wl_listener *listener, void *data)
 {
     struct input *input = data;
     /* input has been configured, only care about tablet_tool and tablet_pad */
-    if (input->prop.type != WLR_INPUT_DEVICE_TABLET_TOOL &&
+    if (input->prop.type != WLR_INPUT_DEVICE_TABLET &&
         input->prop.type != WLR_INPUT_DEVICE_TABLET_PAD) {
         return;
     }
 
-    if (input->prop.type == WLR_INPUT_DEVICE_TABLET_TOOL) {
+    if (input->prop.type == WLR_INPUT_DEVICE_TABLET) {
         tablet_create(manager, input);
     } else {
         tablet_pad_create(manager, input);
@@ -406,7 +406,7 @@ static bool tablet_handle_tool_position(struct tablet_tool *tablet_tool)
     double sx = 0, sy = 0;
 
     struct wlr_surface *surface = tablet_get_surface(tablet_tool->tablet, &sx, &sy, NULL);
-    if ((surface && wlr_surface_accepts_tablet_v2(tablet_tool->tablet->tablet, surface)) ||
+    if ((surface && wlr_surface_accepts_tablet_v2(surface, tablet_tool->tablet->tablet)) ||
         wlr_tablet_tool_v2_has_implicit_grab(tablet_tool->tablet_tool)) {
         if (surface) {
             wlr_tablet_v2_tablet_tool_notify_proximity_in(tablet_tool->tablet_tool,
@@ -516,7 +516,7 @@ bool tablet_handle_tool_tip(struct wlr_tablet_tool_tip_event *event)
 
     struct wlr_surface *toplevel = NULL;
     struct wlr_surface *surface = tablet_get_surface(tablet_tool->tablet, NULL, NULL, &toplevel);
-    if (!surface || !wlr_surface_accepts_tablet_v2(tablet_tool->tablet->tablet, surface)) {
+    if (!surface || !wlr_surface_accepts_tablet_v2(surface, tablet_tool->tablet->tablet)) {
         if (event->state == WLR_TABLET_TOOL_TIP_UP) {
             wlr_tablet_v2_tablet_tool_notify_up(tablet_tool->tablet_tool);
         }
@@ -553,7 +553,7 @@ bool tablet_handle_tool_button(struct wlr_tablet_tool_button_event *event)
     }
 
     struct wlr_surface *surface = tablet_get_surface(tablet_tool->tablet, NULL, NULL, NULL);
-    if (!surface || !wlr_surface_accepts_tablet_v2(tablet_tool->tablet->tablet, surface)) {
+    if (!surface || !wlr_surface_accepts_tablet_v2(surface, tablet_tool->tablet->tablet)) {
         return false;
     }
 
@@ -586,7 +586,7 @@ static void tablet_pad_set_focus(struct tablet_pad *tablet_pad, struct wlr_surfa
         tablet_pad->current_surface = NULL;
     }
 
-    if (surface == NULL || !wlr_surface_accepts_tablet_v2(tablet_pad->tablet->tablet, surface)) {
+    if (surface == NULL || !wlr_surface_accepts_tablet_v2(surface, tablet_pad->tablet->tablet)) {
         return;
     }
 

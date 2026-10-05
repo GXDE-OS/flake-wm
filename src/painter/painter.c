@@ -22,6 +22,7 @@ static struct painter_buffer *painter_buffer_from_wlr_buffer(struct wlr_buffer *
 
 static void painter_buffer_destroy(struct wlr_buffer *wlr_buffer)
 {
+    wlr_buffer_finish(wlr_buffer);
     struct painter_buffer *buffer = painter_buffer_from_wlr_buffer(wlr_buffer);
     if (buffer->own_data) {
         free(buffer->data);

@@ -22,27 +22,47 @@
 #define WAIT_GPU_TIMEOUT 1500      // ms
 #define MAX_NUM_GPUS 8
 
+struct session_wait {
+    struct wl_listener destroy;
+    bool destroyed;
+};
+
+static void session_wait_handle_destroy(struct wl_listener *listener, void *data)
+{
+    struct session_wait *wait = wl_container_of(listener, wait, destroy);
+    wait->destroyed = true;
+    wl_list_remove(&wait->destroy.link);
+}
+
 static struct wlr_session *session_create_and_wait(struct wl_display *disp)
 {
-    struct wlr_session *session = wlr_session_create(disp);
+    struct wlr_session *session = wlr_session_create(wl_display_get_event_loop(disp));
     if (!session) {
         kywc_log(KYWC_ERROR, "Failed to start a session");
         return NULL;
     }
+
+    struct session_wait wait = { .destroy.notify = session_wait_handle_destroy };
+    wl_signal_add(&session->events.destroy, &wait.destroy);
 
     if (!session->active) {
         kywc_log(KYWC_INFO, "Waiting for a session to become active");
 
         int64_t started_at = current_time_msec();
         int64_t timeout = WAIT_SESSION_TIMEOUT;
-        struct wl_event_loop *event_loop = wl_display_get_event_loop(session->display);
+        struct wl_event_loop *event_loop = wl_display_get_event_loop(disp);
 
         while (!session->active) {
             int ret = wl_event_loop_dispatch(event_loop, (int)timeout);
+            /* Dispatch can destroy the session. Never inspect it afterwards. */
+            if (wait.destroyed) {
+                kywc_log(KYWC_ERROR, "Session destroyed while waiting for activation");
+                return NULL;
+            }
             if (ret < 0) {
                 kywc_log_errno(KYWC_ERROR, "Failed to wait for session active: "
                                            "wl_event_loop_dispatch failed");
-                return NULL;
+                goto error;
             }
 
             int64_t now = current_time_msec();
@@ -54,11 +74,17 @@ static struct wlr_session *session_create_and_wait(struct wl_display *disp)
 
         if (!session->active) {
             kywc_log(KYWC_ERROR, "Timeout waiting session to become active");
-            return NULL;
+            goto error;
         }
     }
 
+    wl_list_remove(&wait.destroy.link);
     return session;
+
+error:
+    wl_list_remove(&wait.destroy.link);
+    wlr_session_destroy(session);
+    return NULL;
 }
 
 static int explicit_find_fbs(struct wlr_session *session, int dev_len, char *dev[static dev_len],
@@ -161,6 +187,33 @@ static void frambffer_devices_release(char **devices, int n)
     }
 }
 
+struct primary_fbdev_watch {
+    struct wl_display *display;
+    struct wl_listener primary_destroy, multi_destroy;
+};
+
+static void primary_fbdev_watch_finish(struct primary_fbdev_watch *watch)
+{
+    wl_list_remove(&watch->primary_destroy.link);
+    wl_list_remove(&watch->multi_destroy.link);
+    free(watch);
+}
+
+static void handle_primary_fbdev_destroy(struct wl_listener *listener, void *data)
+{
+    struct primary_fbdev_watch *watch = wl_container_of(listener, watch, primary_destroy);
+    wl_display_terminate(watch->display);
+    primary_fbdev_watch_finish(watch);
+}
+
+static void handle_fbdev_multi_destroy(struct wl_listener *listener, void *data)
+{
+    struct primary_fbdev_watch *watch = wl_container_of(listener, watch, multi_destroy);
+    /* Multi emits destroy before destroying children: normal teardown should
+     * detach the primary listener, not terminate/re-enter backend destruction. */
+    primary_fbdev_watch_finish(watch);
+}
+
 static bool attempt_fbdev_backend(struct wl_display *display, struct wlr_backend *backend,
                                   struct wlr_session *session)
 {
@@ -180,7 +233,18 @@ static bool attempt_fbdev_backend(struct wl_display *display, struct wlr_backend
         return false;
     }
 
-    wlr_multi_backend_add(backend, fbdev);
+    struct primary_fbdev_watch *watch = calloc(1, sizeof(*watch));
+    if (!watch || !wlr_multi_backend_add(backend, fbdev)) {
+        free(watch);
+        wlr_backend_destroy(fbdev);
+        frambffer_devices_release(devices, n);
+        return false;
+    }
+    watch->display = display;
+    watch->primary_destroy.notify = handle_primary_fbdev_destroy;
+    wl_signal_add(&fbdev->events.destroy, &watch->primary_destroy);
+    watch->multi_destroy.notify = handle_fbdev_multi_destroy;
+    wl_signal_add(&backend->events.destroy, &watch->multi_destroy);
     frambffer_devices_release(devices, n);
 
     return true;
@@ -194,7 +258,7 @@ static struct wlr_backend *ky_fbdev_backend_create(struct wl_display *display,
     }
 
     struct wlr_session *session = NULL;
-    struct wlr_backend *multi = wlr_multi_backend_create(display);
+    struct wlr_backend *multi = wlr_multi_backend_create(wl_display_get_event_loop(display));
     if (!multi) {
         kywc_log(KYWC_ERROR, "Could not allocate multibackend");
         return NULL;
@@ -212,7 +276,7 @@ static struct wlr_backend *ky_fbdev_backend_create(struct wl_display *display,
         goto error;
     }
 
-    struct wlr_backend *libinput = wlr_libinput_backend_create(display, session);
+    struct wlr_backend *libinput = wlr_libinput_backend_create(session);
     if (libinput) {
         wlr_multi_backend_add(multi, libinput);
     } else {
@@ -305,12 +369,12 @@ struct wlr_backend *ky_backend_autocreate(struct wl_display *display,
     }
 
     if (getenv("WAYLAND_DISPLAY") || getenv("WAYLAND_SOCKET") || getenv("DISPLAY")) {
-        return wlr_backend_autocreate(display, session_ptr);
+        return wlr_backend_autocreate(wl_display_get_event_loop(display), session_ptr);
     }
 
     struct wlr_backend *backend = NULL;
     if (find_drm_cards(display)) {
-        backend = wlr_backend_autocreate(display, session_ptr);
+        backend = wlr_backend_autocreate(wl_display_get_event_loop(display), session_ptr);
     }
     return backend ? backend : ky_fbdev_backend_create(display, session_ptr);
 }

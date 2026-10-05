@@ -1,0 +1,4 @@
+libwayland-server 0 gxde-wlcom
+libwayland-client 0 gxde-wlcom
+libdrm 2 gxde-wlcom
+libpixman-1 0 gxde-wlcom

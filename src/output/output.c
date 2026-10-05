@@ -1127,6 +1127,16 @@ void output_manager_add_output_pending_state(struct output *output, struct kywc_
              state->color_temp);
 }
 
+static void handle_backend_destroy(struct wl_listener *listener, void *data)
+{
+    wl_list_remove(&output_manager->new_output.link);
+    wl_list_remove(&output_manager->backend_destroy.link);
+    output_manager->server->backend = NULL;
+    if (!output_manager->server->terminate) {
+        wl_display_terminate(output_manager->server->display);
+    }
+}
+
 struct output_manager *output_manager_create(struct server *server)
 {
     output_manager = calloc(1, sizeof(struct output_manager));
@@ -1156,6 +1166,8 @@ struct output_manager *output_manager_create(struct server *server)
     xdg_output_manager_v1_create(server);
     output_manager->new_output.notify = handle_new_output;
     wl_signal_add(&server->backend->events.new_output, &output_manager->new_output);
+    output_manager->backend_destroy.notify = handle_backend_destroy;
+    wl_signal_add(&server->backend->events.destroy, &output_manager->backend_destroy);
 
     struct wlr_output *wlr_output = wlr_headless_add_output(server->headless_backend, 1920, 1080);
     wlr_output_set_name(wlr_output, "FALLBACK");
@@ -1390,10 +1402,10 @@ bool output_state_attempt_gamma(struct output *output, struct wlr_output_state *
     uint32_t brightness = output->base.state.brightness;
     uint32_t color_temp = output->base.state.color_temp;
 
-    output_set_gamma_lut(output->wlr_output, output->base.prop.gamma_size, state, color_temp,
-                         brightness);
-    output->gamma_changed = false;
-
+    if (!output_set_gamma_lut(output->wlr_output, output->base.prop.gamma_size, state, color_temp,
+                              brightness)) {
+        return false;
+    }
     return true;
 }
 
@@ -1499,7 +1511,8 @@ static bool output_set_state(struct output *output, struct kywc_output_state *st
 
     output->vrr_policy = state->vrr_policy;
 
-    if (enabled && output_gamma_changed(output, state)) {
+    if (enabled && (output_gamma_changed(output, state) ||
+                    !output->base.state.enabled || !output->base.state.power)) {
         output->gamma_changed = true;
         if (output_use_hardware_gamma(output)) {
             output_schedule_frame(output->wlr_output);
@@ -1563,7 +1576,11 @@ static void output_do_update_usable_area(struct output *output, struct kywc_box 
 {
     *usable = output->geometry;
     wl_signal_emit_mutable(&output->events.update_usable_area, usable);
+    usable->width = usable->width > 0 ? usable->width : 0;
+    usable->height = usable->height > 0 ? usable->height : 0;
     wl_signal_emit_mutable(&output->events.update_late_usable_area, usable);
+    usable->width = usable->width > 0 ? usable->width : 0;
+    usable->height = usable->height > 0 ? usable->height : 0;
 }
 
 static void output_emit_usable_area(struct output *output)

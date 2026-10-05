@@ -165,7 +165,7 @@ static void seat_update_capabilities(struct seat *seat)
             seat->caps |= WL_SEAT_CAPABILITY_KEYBOARD;
             break;
         case WLR_INPUT_DEVICE_POINTER:
-        case WLR_INPUT_DEVICE_TABLET_TOOL:
+        case WLR_INPUT_DEVICE_TABLET:
             seat->caps |= WL_SEAT_CAPABILITY_POINTER;
             break;
         case WLR_INPUT_DEVICE_TOUCH:
@@ -190,7 +190,7 @@ void seat_add_input(struct seat *seat, struct input *input)
     switch (input->prop.type) {
     case WLR_INPUT_DEVICE_POINTER:
     case WLR_INPUT_DEVICE_TOUCH:
-    case WLR_INPUT_DEVICE_TABLET_TOOL:
+    case WLR_INPUT_DEVICE_TABLET:
         curosr_add_input(seat, input);
         break;
     case WLR_INPUT_DEVICE_KEYBOARD:
@@ -215,7 +215,7 @@ void seat_remove_input(struct input *input)
     switch (input->prop.type) {
     case WLR_INPUT_DEVICE_POINTER:
     case WLR_INPUT_DEVICE_TOUCH:
-    case WLR_INPUT_DEVICE_TABLET_TOOL:
+    case WLR_INPUT_DEVICE_TABLET:
         cursor_remove_input(input);
         break;
     case WLR_INPUT_DEVICE_KEYBOARD:
@@ -378,7 +378,7 @@ void seat_cancel_grabs(struct seat *seat)
         struct wlr_touch_point *point =
             wl_container_of(seat->wlr_seat->touch_state.touch_points.next, point, link);
         if (point->surface) {
-            wlr_seat_touch_notify_cancel(seat->wlr_seat, point->surface);
+            wlr_seat_touch_notify_cancel(seat->wlr_seat, point->client);
         } else {
             wlr_seat_touch_notify_up(seat->wlr_seat, current_time_msec(), point->touch_id);
         }
@@ -413,7 +413,7 @@ void seat_notify_button(struct seat *seat, uint32_t time, uint32_t button, bool 
 
     struct wlr_seat *wlr_seat = seat->wlr_seat;
 
-    enum wlr_button_state state = pressed ? WLR_BUTTON_PRESSED : WLR_BUTTON_RELEASED;
+    enum wl_pointer_button_state state = pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED;
     wlr_seat_pointer_notify_button(wlr_seat, time, button, state);
 }
 
@@ -487,7 +487,7 @@ void seat_feed_pointer_button(struct seat *seat, uint32_t button, bool pressed)
 void seat_feed_pointer_axis(struct seat *seat, uint32_t axis, double step)
 {
     cursor_feed_axis(seat->cursor, axis, WL_POINTER_AXIS_SOURCE_WHEEL, step, 0,
-                     current_time_msec());
+                     current_time_msec(), WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
     wlr_seat_pointer_notify_frame(seat->wlr_seat);
 }
 

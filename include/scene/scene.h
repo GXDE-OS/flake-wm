@@ -10,7 +10,7 @@
 #include <pixman.h>
 #include <time.h>
 
-#include <wlr/types/wlr_damage_ring.h>
+#include "src/patches/damage_ring.h"
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/util/addon.h>
@@ -196,6 +196,8 @@ struct ky_scene_tree {
 struct ky_scene {
     struct ky_scene_tree tree;
     ky_scene_node_destroy_func_t tree_destroy;
+    /* Borrowed owner, for fail-closed GPU completion errors. */
+    struct wl_display *display;
 
     struct wl_list outputs;
 
@@ -234,6 +236,9 @@ struct ky_scene_outputs_update_event {
 struct ky_scene_output_sample_event {
     struct ky_scene_output *output;
     bool direct_scanout;
+    bool presentation;
+    struct wlr_drm_syncobj_timeline *release_timeline;
+    uint64_t release_point;
 };
 
 struct ky_scene_buffer {
@@ -244,6 +249,12 @@ struct ky_scene_buffer {
     struct wlr_buffer *buffer;
     /* May be NULL */
     struct wlr_texture *texture;
+    struct wl_listener texture_renderer_destroy;
+    unsigned import_failures;
+
+    /* Acquire point belonging to this buffer, not to a later surface commit. */
+    struct wlr_drm_syncobj_timeline *wait_timeline;
+    uint64_t wait_point;
 
     struct wlr_fbox src_box;
     int dst_width, dst_height;
@@ -287,7 +298,7 @@ struct ky_scene_output {
     struct wlr_buffer *buffer;
     bool commit_failed;
 
-    struct wlr_damage_ring damage_ring;
+    struct ky_damage_ring damage_ring;
     pixman_region32_t collected_damage;
 
     int x, y;

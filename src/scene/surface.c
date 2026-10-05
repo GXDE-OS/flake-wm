@@ -5,13 +5,17 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <wlr/render/drm_syncobj.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_presentation_time.h>
+#include <wlr/types/wlr_output.h>
+#include <kywc/log.h>
 
 #include "output.h"
 #include "scene/surface.h"
+#include "src/patches/buffer_completion.h"
 
 static void handle_scene_buffer_outputs_update(struct wl_listener *listener, void *data)
 {
@@ -22,6 +26,8 @@ static void handle_scene_buffer_outputs_update(struct wl_listener *listener, voi
     double scale = surface->buffer->primary_output->output->scale;
     wlr_fractional_scale_v1_notify_scale(surface->surface, scale);
     wlr_surface_set_preferred_buffer_scale(surface->surface, ceil(scale));
+    wlr_surface_set_preferred_buffer_transform(
+        surface->surface, surface->buffer->primary_output->output->transform);
 }
 
 static void handle_scene_buffer_output_enter(struct wl_listener *listener, void *data)
@@ -46,7 +52,19 @@ static void handle_scene_buffer_output_sample(struct wl_listener *listener, void
     const struct ky_scene_output_sample_event *event = data;
     struct ky_scene_output *scene_output = event->output;
 
-    if (surface->buffer->primary_output != scene_output) {
+    /* Release synchronization applies to every consumer, including secondary
+     * outputs. Presentation feedback below intentionally uses only one output. */
+    struct wlr_linux_drm_syncobj_surface_v1_state *sync_state =
+        wlr_linux_drm_syncobj_v1_get_surface_state(surface->surface);
+    if (sync_state && event->release_timeline &&
+        !ky_buffer_hold_until(
+            surface->buffer->buffer, event->release_timeline, event->release_point,
+            wl_client_get_display(wl_resource_get_client(surface->surface->resource)))) {
+        kywc_log(KYWC_ERROR, "Cannot track GPU completion; terminating without early buffer release");
+        wl_display_terminate(wl_client_get_display(wl_resource_get_client(surface->surface->resource)));
+    }
+
+    if (!event->presentation || surface->buffer->primary_output != scene_output) {
         return;
     }
 
@@ -56,10 +74,10 @@ static void handle_scene_buffer_output_sample(struct wl_listener *listener, void
     }
 
     if (event->direct_scanout) {
-        wlr_presentation_surface_scanned_out_on_output(root->presentation, surface->surface,
+        wlr_presentation_surface_scanned_out_on_output(surface->surface,
                                                        scene_output->output);
     } else {
-        wlr_presentation_surface_textured_on_output(root->presentation, surface->surface,
+        wlr_presentation_surface_textured_on_output(surface->surface,
                                                     scene_output->output);
     }
 }
@@ -85,7 +103,7 @@ static void scene_surface_handle_surface_destroy(struct wl_listener *listener, v
 // for mutation.
 static void client_buffer_mark_next_can_damage(struct wlr_client_buffer *buffer)
 {
-    buffer->n_ignore_locks++;
+    buffer->WLR_PRIVATE.n_ignore_locks++;
 }
 
 static void scene_buffer_unmark_client_buffer(struct ky_scene_buffer *scene_buffer)
@@ -99,8 +117,8 @@ static void scene_buffer_unmark_client_buffer(struct ky_scene_buffer *scene_buff
         return;
     }
 
-    assert(buffer->n_ignore_locks > 0);
-    buffer->n_ignore_locks--;
+    assert(buffer->WLR_PRIVATE.n_ignore_locks > 0);
+    buffer->WLR_PRIVATE.n_ignore_locks--;
 }
 
 static void set_buffer_with_surface_state(struct ky_scene_buffer *scene_buffer,
@@ -124,7 +142,7 @@ static void set_buffer_with_surface_state(struct ky_scene_buffer *scene_buffer,
 
         ky_scene_buffer_set_buffer_with_damage(scene_buffer, &surface->buffer->base,
                                                &surface->buffer_damage);
-    } else if (surface->current.buffer && surface->has_buffer) {
+    } else if (surface->current.buffer && wlr_surface_has_buffer(surface)) {
         /**
          * DMA-BUF client
          * Use the raw buffer directly. Wlroots 0.17.4-ok does NOT wrap DMA-BUF
@@ -155,32 +173,30 @@ static void set_buffer_with_surface_state(struct ky_scene_buffer *scene_buffer,
     } else {
         ky_scene_buffer_set_buffer(scene_buffer, NULL);
     }
+
+    struct wlr_linux_drm_syncobj_surface_v1_state *sync_state =
+        wlr_linux_drm_syncobj_v1_get_surface_state(surface);
+    if (scene_buffer->buffer && sync_state && sync_state->acquire_timeline) {
+        scene_buffer->wait_timeline =
+            wlr_drm_syncobj_timeline_ref(sync_state->acquire_timeline);
+        scene_buffer->wait_point = sync_state->acquire_point;
+    }
 }
 
 /**
- * Explicit sync: tie the client's release point to the lifetime of the lock we
- * just took on its buffer.
- *
- * Without this the release merger only drops to zero refs when the *next*
- * commit runs state_finish() on it, so the client is told its buffer is free
- * while we may still be sampling it. Registering here defers the release point
- * until wlr_buffer.events.release fires, i.e. until the scene actually lets go.
- *
- * No-op for clients that did not commit through wp_linux_drm_syncobj_v1: their
- * release_merger is NULL and the helper returns early.
- * ----------------------------------------------------------------------------
- * 显式同步：将客户端的release点绑定到我们刚刚对其buffer所加锁的生命周期上。
- *
- * 如果没有这一步，release merger只有在*下一次*commit对其调用state_finish()时
- * 引用计数才会归零，于是我们可能还在采样该buffer，却已经告诉客户端它可以复用了。
- * 在此处注册可将release点推迟到wlr_buffer.events.release触发时，也就是场景真正
- * 释放该buffer之时。
- *
- * 对于未通过wp_linux_drm_syncobj_v1提交的客户端，其release_merger为NULL，
- * 该辅助函数会提前返回，因此这里是个空操作。
+ * Transitional release lifetime guard. Keep the merger alive until the raw
+ * source buffer is released, rather than until its client wrapper is released.
+ * This does NOT itself guarantee completion of asynchronous GPU reads. Sample
+ * events additionally hold the raw source until OpenGL/Vulkan/KMS completion.
+ * This avoids the unchecked sync-file merger error paths in wlroots 0.20.2.
+ * Hardware-path validation remains incomplete (WLR_UPGRADE.md).
+ * Clients without an explicit release point are a no-op in the wlroots helper.
  */
 static void scene_surface_signal_release(struct ky_scene_surface *surface)
 {
+    if (!(surface->surface->current.committed & WLR_SURFACE_STATE_BUFFER)) {
+        return;
+    }
     struct wlr_buffer *buffer = surface->buffer->buffer;
     if (buffer == NULL) {
         return;
@@ -192,7 +208,17 @@ static void scene_surface_signal_release(struct ky_scene_surface *surface)
         return;
     }
 
-    wlr_linux_drm_syncobj_v1_state_signal_release_with_buffer(state, buffer);
+    /* A client wrapper can be released while its DMA-BUF source is still in
+     * use by KMS or a texture. Match the source lifetime (upstream 128cd07e),
+     * not the wrapper lifetime. Sample-time completion holds extend the raw
+     * buffer lifetime across asynchronous GPU work; this guard alone is not enough. */
+    struct wlr_client_buffer *client_buffer = wlr_client_buffer_get(buffer);
+    if (client_buffer) {
+        buffer = client_buffer->source;
+    }
+    if (buffer && !wlr_linux_drm_syncobj_v1_state_signal_release_with_buffer(state, buffer)) {
+        wl_client_post_no_memory(wl_resource_get_client(surface->surface->resource));
+    }
 }
 
 static void handle_scene_surface_surface_commit(struct wl_listener *listener, void *data)

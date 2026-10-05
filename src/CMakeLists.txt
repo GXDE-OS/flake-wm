@@ -5,6 +5,12 @@ target_sources(gxde-wlcom PRIVATE
   server.c
   gxde_identifier.c
   app_id_resolver.c
+  patches/matrix.c
+  patches/damage_ring.c
+  patches/linux_dmabuf.c
+  patches/vulkan_sync.c
+  patches/buffer_completion.c
+  patches/text_source.c
 
   plugin/config.c
   plugin/plugin.c
@@ -73,3 +79,9 @@ target_link_options(gxde-wlcom PRIVATE
 )
 
 install(TARGETS gxde-wlcom RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(WLCOM_PRIVATE_LIBDIR)
+  file(RELATIVE_PATH _wlcom_private_lib_rel
+    "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}"
+    "${CMAKE_INSTALL_PREFIX}/${WLCOM_PRIVATE_LIBDIR}")
+  set_property(TARGET gxde-wlcom PROPERTY INSTALL_RPATH "\$ORIGIN/${_wlcom_private_lib_rel}")
+endif()

@@ -6,6 +6,13 @@
 * **Commit date**: Tue Jul 7 23:46:09 2026 +0200
 * **Clone date**: Tue Aug 25 09:34:26 +0800
 * **License**: [MIT License](./wlroots/LICENSE)
+* **Note**: Pristine official sources, compiled without overlays or patches. The old `src/patches/wlroots/0.17` tree is an inactive historical reference. Migration status and compositor-owned adaptations are tracked in [WLR_UPGRADE.md](../WLR_UPGRADE.md); behaviour parity is not yet fully validated.
+
+The Wayland, libdrm, Pixman, xkbcommon and wayland-protocols fallback snapshots
+were imported from FlakeWM commit `5accc6dd6ba8abbfc7d554583869b14d34f78674`.
+They are built only when the system dependency is too old. Selected runtime
+libraries are installed in an application-private directory, not over system
+libraries. See [WLR_UPGRADE.md](../WLR_UPGRADE.md) for minimum versions.
 
 ## Wayland
 * **Upstream**: https://gitlab.freedesktop.org/wayland/wayland

@@ -141,35 +141,49 @@ static struct layer_output *layer_output_from_wlr_output(struct wlr_output *wlr_
     return NULL;
 }
 
+static int bounded_exclusive_zone(int32_t zone, int32_t margin, int available)
+{
+    int64_t amount = (int64_t)zone + margin;
+    if (available <= 0 || amount <= 0) {
+        return 0;
+    }
+    return amount < available ? (int)amount : available;
+}
+
 static void layer_surface_exclusive_zone(struct wlr_layer_surface_v1_state *state,
                                          struct kywc_box *usable_area)
 {
+    int amount;
     switch (state->anchor) {
     case ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP:
     case (ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
           ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT):
         // Anchor top
-        usable_area->y += state->exclusive_zone + state->margin.top;
-        usable_area->height -= state->exclusive_zone + state->margin.top;
+        amount = bounded_exclusive_zone(state->exclusive_zone, state->margin.top, usable_area->height);
+        usable_area->y += amount;
+        usable_area->height -= amount;
         break;
     case ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM:
     case (ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
           ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT):
         // Anchor bottom
-        usable_area->height -= state->exclusive_zone + state->margin.bottom;
+        amount = bounded_exclusive_zone(state->exclusive_zone, state->margin.bottom, usable_area->height);
+        usable_area->height -= amount;
         break;
     case ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT:
     case (ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
           ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT):
         // Anchor left
-        usable_area->x += state->exclusive_zone + state->margin.left;
-        usable_area->width -= state->exclusive_zone + state->margin.left;
+        amount = bounded_exclusive_zone(state->exclusive_zone, state->margin.left, usable_area->width);
+        usable_area->x += amount;
+        usable_area->width -= amount;
         break;
     case ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT:
     case (ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
           ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT):
         // Anchor right
-        usable_area->width -= state->exclusive_zone + state->margin.right;
+        amount = bounded_exclusive_zone(state->exclusive_zone, state->margin.right, usable_area->width);
+        usable_area->width -= amount;
         break;
     }
 }
@@ -276,6 +290,18 @@ static void layer_shell_configure_surface(struct layer_shell *layer_shell,
     }
 }
 
+static void layer_shell_update_layer(struct layer_shell *shell)
+{
+    uint32_t layer = shell->layer_surface->current.layer;
+    if (shell->tree->node.parent == manager->layers[layer].tree) {
+        return;
+    }
+    struct layer_output *output = layer_output_from_wlr_output(shell->layer_surface->output);
+    wl_list_remove(&shell->link);
+    wl_list_insert(&output->shells[layer], &shell->link);
+    ky_scene_node_reparent(&shell->tree->node, manager->layers[layer].tree);
+}
+
 static void layer_shell_handle_commit(struct wl_listener *listener, void *data)
 {
     struct layer_shell *layer_shell = wl_container_of(listener, layer_shell, commit);
@@ -287,6 +313,9 @@ static void layer_shell_handle_commit(struct wl_listener *listener, void *data)
 
     struct output *output = output_from_wlr_output(layer_surface->output);
 
+    /* Association with a layer is independent of whether a buffer is mapped. */
+    layer_shell_update_layer(layer_shell);
+
     if (!layer_surface->surface->mapped) {
         /* is not mapped, usable area will not be changed */
         layer_shell_configure_surface(layer_shell, &output->geometry, &output->usable_area);
@@ -295,11 +324,7 @@ static void layer_shell_handle_commit(struct wl_listener *listener, void *data)
 
     uint32_t committed = layer_surface->current.committed;
 
-    if (committed & WLR_LAYER_SURFACE_V1_STATE_LAYER) {
-        ky_scene_node_reparent(&layer_shell->tree->node,
-                               manager->layers[layer_surface->current.layer].tree);
-        committed &= ~WLR_LAYER_SURFACE_V1_STATE_LAYER;
-    }
+    /* Keep LAYER in committed: even a layer-only change reorders exclusive zones. */
 
     if (committed & WLR_LAYER_SURFACE_V1_STATE_KEYBOARD_INTERACTIVITY) {
         layer_shell_keyboard_interactivity(layer_shell, input_manager_get_default_seat());
@@ -324,6 +349,11 @@ static void layer_shell_handle_map(struct wl_listener *listener, void *data)
 {
     struct layer_shell *layer_shell = wl_container_of(listener, layer_shell, map);
     struct wlr_layer_surface_v1 *layer_surface = layer_shell->layer_surface;
+
+    /* map may precede the public commit signal for the first buffer. */
+    if (layer_surface->output) {
+        layer_shell_update_layer(layer_shell);
+    }
 
     /* layer-shell first configure is done in commit */
     ky_scene_node_set_enabled(&layer_shell->tree->node, true);
@@ -639,7 +669,15 @@ static void handle_new_output(struct wl_listener *listener, void *data)
 static void handle_destroy(struct wl_listener *listener, void *data)
 {
     wl_list_remove(&manager->destroy.link);
+    wl_list_remove(&manager->new_surface.link);
     wl_list_remove(&manager->new_output.link);
+    /* Protocol globals die with wl_display, but backends/outputs now die
+     * later with its event loop. Detach output listeners while their list
+     * head and manager are still alive. */
+    struct layer_output *output, *tmp;
+    wl_list_for_each_safe(output, tmp, &manager->outputs, link) {
+        handle_output_destroy(&output->destroy, NULL);
+    }
     free(manager);
     manager = NULL;
 }

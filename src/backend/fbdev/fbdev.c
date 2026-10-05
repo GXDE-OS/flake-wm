@@ -330,6 +330,7 @@ bool fbdev_output_offscreen(struct fbdev_output *output)
 
     fbdev_output_disable(output, false);
     close(output->fd);
+    output->fd = -1;
 
     return true;
 }
@@ -339,8 +340,14 @@ static void output_destroy(struct wlr_output *wlr_output)
     struct fbdev_output *output = fbdev_output_from_output(wlr_output);
     wl_list_remove(&output->link);
 
+    /* The output implementation owns finish since wlroots 0.20. This also
+     * cancels our deferred presentation callbacks via events.destroy. */
+    wlr_output_finish(wlr_output);
+
     fbdev_output_disable(output, false);
-    close(output->fd);
+    if (output->fd >= 0) {
+        close(output->fd);
+    }
 
     free((void *)output->device);
     free(output);
@@ -418,9 +425,18 @@ static void output_defer_present(struct wlr_output *output, struct wlr_output_ev
     deferred->output_destroy.notify = deferred_present_event_handle_output_destroy;
     wl_signal_add(&output->events.destroy, &deferred->output_destroy);
 
-    struct wl_event_loop *ev = wl_display_get_event_loop(output->display);
+    struct wl_event_loop *ev = output->event_loop;
     deferred->idle_source =
         wl_event_loop_add_idle(ev, deferred_present_event_handle_idle, deferred);
+}
+
+static bool fbdev_pixel_layout_valid(struct fbdev_output *output, uint32_t format, size_t stride)
+{
+    const struct fbdev_screeninfo *info = &output->screen_info;
+    size_t row_bytes = (size_t)info->x_resolution * info->bits_per_pixel / 8;
+    return format == info->pixel_format && stride >= row_bytes &&
+           info->line_length >= row_bytes && info->y_resolution > 0 &&
+           info->line_length <= info->buffer_length / info->y_resolution;
 }
 
 static bool fbdev_output_state_update_fb(struct fbdev_output *output,
@@ -438,7 +454,12 @@ static bool fbdev_output_state_update_fb(struct fbdev_output *output,
         return false;
     }
 
-    assert(output->screen_info.x_resolution * output->screen_info.bits_per_pixel / 8 == stride);
+    size_t row_bytes = (size_t)output->screen_info.x_resolution *
+                       output->screen_info.bits_per_pixel / 8;
+    if (!data || !fbdev_pixel_layout_valid(output, format, stride)) {
+        wlr_buffer_end_data_ptr_access(state->buffer);
+        return false;
+    }
 
     pixman_region32_t clipped;
     pixman_region32_init_rect(&clipped, 0, 0, output->screen_info.x_resolution,
@@ -450,15 +471,15 @@ static bool fbdev_output_state_update_fb(struct fbdev_output *output,
     }
 
     /* Copy shadow fb */
-    uint32_t padding = output->screen_info.line_length - stride;
     uint32_t pixel_bytes = output->screen_info.bits_per_pixel / 8;
-    uint32_t offset, size, offset_src, offset_dst;
+    size_t offset, size, offset_src, offset_dst;
     uint8_t *src, *dst;
 
     int rects_len;
     const pixman_box32_t *rects = pixman_region32_rectangles(&clipped, &rects_len);
     for (int i = 0; i < rects_len; ++i) {
-        if (rects[i].x2 - rects[i].x1 == state->buffer->width && padding == 0) {
+        if (rects[i].x2 - rects[i].x1 == state->buffer->width &&
+            stride == row_bytes && output->screen_info.line_length == row_bytes) {
             offset = stride * rects[i].y1;
             src = (uint8_t *)data + offset;
             dst = (uint8_t *)output->fb + offset;
@@ -470,7 +491,7 @@ static bool fbdev_output_state_update_fb(struct fbdev_output *output,
         for (int32_t y = rects[i].y1; y < rects[i].y2; ++y) {
             offset_src = y * stride + rects[i].x1 * pixel_bytes;
             src = (uint8_t *)data + offset_src;
-            offset_dst = y * (stride + padding) + rects[i].x1 * pixel_bytes;
+            offset_dst = y * output->screen_info.line_length + rects[i].x1 * pixel_bytes;
             dst = (uint8_t *)output->fb + offset_dst;
             size = (rects[i].x2 - rects[i].x1) * pixel_bytes;
             memcpy(dst, src, size);
@@ -521,9 +542,43 @@ static bool fbdev_output_test(struct wlr_output *wlr_output, struct fbdev_state 
     };
 
     if (state->base->committed & WLR_OUTPUT_STATE_MODE) {
-        struct fbdev_mode *mode = wl_container_of(state->base->mode, mode, wlr_mode);
-        state->mode_info = mode->mode_info;
-        return state->base->mode_type != WLR_OUTPUT_STATE_MODE_CUSTOM;
+        if (state->base->mode_type != WLR_OUTPUT_STATE_MODE_FIXED ||
+            state->base->mode != &output->mode.wlr_mode) {
+            return false;
+        }
+        state->mode_info = output->mode.mode_info;
+    }
+
+    if (state->base->committed & WLR_OUTPUT_STATE_BUFFER) {
+        const struct wlr_output_state *base = state->base;
+        int width = output->screen_info.x_resolution;
+        int height = output->screen_info.y_resolution;
+        if (!base->buffer || base->buffer->width != width || base->buffer->height != height) {
+            return false;
+        }
+        /* fbdev copies pixels 1:1. Zero size is the API's full-buffer default;
+         * explicitly specifying the same full rectangle is also supported. */
+        const struct wlr_fbox *src = &base->buffer_src_box;
+        const struct wlr_box *dst = &base->buffer_dst_box;
+        if (src->x != 0 || src->y != 0 || dst->x != 0 || dst->y != 0 ||
+            !((src->width == 0 && src->height == 0) ||
+              (src->width == width && src->height == height)) ||
+            !((dst->width == 0 && dst->height == 0) ||
+              (dst->width == width && dst->height == height))) {
+            return false;
+        }
+        void *data;
+        uint32_t format;
+        size_t stride;
+        if (!wlr_buffer_begin_data_ptr_access(base->buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ,
+                                              &data, &format, &stride)) {
+            return false;
+        }
+        bool valid = data && fbdev_pixel_layout_valid(output, format, stride);
+        wlr_buffer_end_data_ptr_access(base->buffer);
+        if (!valid) {
+            return false;
+        }
     }
 
     return true;
@@ -562,7 +617,9 @@ static bool fbdev_output_commit(struct wlr_output *wlr_output, const struct wlr_
     }
 
     if (pending.base->committed & WLR_OUTPUT_STATE_BUFFER && output->wlr_output.enabled) {
-        fbdev_output_state_update_fb(output, pending.base);
+        if (!fbdev_output_state_update_fb(output, pending.base)) {
+            return false;
+        }
     }
 
     if (output_pending_enabled(wlr_output, pending.base)) {
@@ -577,8 +634,15 @@ static bool fbdev_output_commit(struct wlr_output *wlr_output, const struct wlr_
     return true;
 }
 
+static bool output_test(struct wlr_output *output, const struct wlr_output_state *state)
+{
+    struct fbdev_state pending = { .base = state };
+    return fbdev_output_test(output, &pending);
+}
+
 static const struct wlr_output_impl output_impl = {
     .destroy = output_destroy,
+    .test = output_test,
     .commit = fbdev_output_commit,
 };
 
@@ -599,8 +663,11 @@ struct wlr_output *fbdev_output_create(struct wlr_backend *wlr_backend, const ch
 
     struct wlr_output_state state;
     wlr_output_state_init(&state);
+    wlr_output_state_set_subpixel(&state, WL_OUTPUT_SUBPIXEL_UNKNOWN);
+    wlr_output_state_set_render_format(&state, output->screen_info.pixel_format);
     struct fbdev_backend *backend = get_fbdev_backend_from_backend(wlr_backend);
-    wlr_output_init(&output->wlr_output, wlr_backend, &output_impl, backend->display, &state);
+    wlr_output_init(&output->wlr_output, wlr_backend, &output_impl,
+                    wl_display_get_event_loop(backend->display), &state);
     wlr_output_state_finish(&state);
 
     char name[8];
@@ -610,8 +677,6 @@ struct wlr_output *fbdev_output_create(struct wlr_backend *wlr_backend, const ch
     wlr_output_set_description(&output->wlr_output, output->screen_info.desc);
     kywc_log(KYWC_INFO, "fbdev desc: %s", output->screen_info.desc);
 
-    wlr_output_set_subpixel(&output->wlr_output, WL_OUTPUT_SUBPIXEL_UNKNOWN);
-    wlr_output_set_render_format(&output->wlr_output, output->screen_info.pixel_format);
     kywc_log(KYWC_INFO, "fbdev output render format: 0x%" PRIX32, output->screen_info.pixel_format);
 
     wlr_output_lock_software_cursors(&output->wlr_output, true);

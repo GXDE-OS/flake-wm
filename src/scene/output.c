@@ -6,6 +6,8 @@
 #include <assert.h>
 #include <stdlib.h>
 
+#include <wlr/backend.h>
+#include <wlr/render/drm_syncobj.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_output_layout.h>
@@ -121,7 +123,7 @@ void ky_scene_output_layout_add_output(struct ky_scene_output_layout *sol,
 
 void ky_scene_output_damage_whole(struct ky_scene_output *scene_output)
 {
-    wlr_damage_ring_add_whole(&scene_output->damage_ring);
+    ky_damage_ring_add_whole(&scene_output->damage_ring);
     output_schedule_frame(scene_output->output);
 }
 
@@ -170,9 +172,9 @@ static void scene_output_update_geometry(struct ky_scene_output *scene_output, b
 {
     int width, height;
     wlr_output_effective_resolution(scene_output->output, &width, &height);
-    wlr_damage_ring_set_bounds(&scene_output->damage_ring, width, height);
+    ky_damage_ring_set_bounds(&scene_output->damage_ring, width, height);
 
-    wlr_damage_ring_add_whole(&scene_output->damage_ring);
+    ky_damage_ring_add_whole(&scene_output->damage_ring);
     output_schedule_frame(scene_output->output);
 
     ky_scene_node_update_outputs(&scene_output->scene->tree.node, &scene_output->scene->outputs,
@@ -225,7 +227,7 @@ static void scene_output_handle_damage(struct wl_listener *listener, void *data)
     pixman_region32_init(&damage);
     wlr_region_scale(&damage, event->damage, 1 / event->output->scale);
 
-    if (wlr_damage_ring_add(&scene_output->damage_ring, &damage)) {
+    if (ky_damage_ring_add(&scene_output->damage_ring, &damage)) {
         output_schedule_frame(scene_output->output);
     }
 
@@ -250,7 +252,7 @@ struct ky_scene_output *ky_scene_output_create(struct ky_scene *scene, struct wl
     scene_output->scene = scene;
     wlr_addon_init(&scene_output->addon, &output->addons, scene, &output_addon_impl);
 
-    wlr_damage_ring_init(&scene_output->damage_ring);
+    ky_damage_ring_init(&scene_output->damage_ring);
     pixman_region32_init(&scene_output->collected_damage);
 
     int prev_output_index = -1;
@@ -302,7 +304,7 @@ void ky_scene_output_destroy(struct ky_scene_output *scene_output)
                                  scene_output, NULL);
 
     wlr_addon_finish(&scene_output->addon);
-    wlr_damage_ring_finish(&scene_output->damage_ring);
+    ky_damage_ring_finish(&scene_output->damage_ring);
     pixman_region32_fini(&scene_output->collected_damage);
     wlr_buffer_unlock(scene_output->buffer);
 
@@ -379,8 +381,7 @@ static bool scene_output_render(struct ky_scene_output *scene_output,
         return false;
     }
 
-    int buffer_age;
-    struct wlr_buffer *buffer = wlr_swapchain_acquire(output->swapchain, &buffer_age);
+    struct wlr_buffer *buffer = wlr_swapchain_acquire(output->swapchain);
     if (buffer == NULL) {
         KY_PROFILE_ZONE_END(zone);
         return false;
@@ -397,12 +398,13 @@ static bool scene_output_render(struct ky_scene_output *scene_output,
 
     target->buffer = buffer;
     target->render_pass = render_pass;
+    ky_scene_render_target_begin_sync(target);
 
     pixman_region32_t frame_damage;
     pixman_region32_init(&frame_damage);
 
     // target damage is accumulated damage in the output, but in layout coord
-    wlr_damage_ring_get_buffer_damage(&scene_output->damage_ring, buffer_age, &target->damage);
+    ky_damage_ring_get_buffer_damage(&scene_output->damage_ring, buffer, &target->damage);
 
     if (pixman_region32_not_empty(&target->damage)) {
         // translate to scene layout coord
@@ -427,18 +429,21 @@ static bool scene_output_render(struct ky_scene_output *scene_output,
         pixman_region32_subtract(&frame_damage, &frame_damage, &target->excluded_damage);
         pixman_region32_translate(&frame_damage, -target->logical.x, -target->logical.y);
 
-        wlr_damage_ring_add(&scene_output->damage_ring, &frame_damage);
+        ky_damage_ring_add(&scene_output->damage_ring, &frame_damage);
         pixman_region32_copy(&frame_damage, &scene_output->damage_ring.current);
     }
 
-    wlr_damage_ring_rotate(&scene_output->damage_ring);
+    ky_damage_ring_rotate_buffer(&scene_output->damage_ring, buffer);
 
     ky_scene_output_render_post(target);
 
-    if (!ky_render_pass_submit(render_pass, output_from_wlr_output(output)->quirks)) {
+    /* Submit even on a synchronization error to release pass resources, but
+     * never commit its incomplete contents to the output. */
+    bool submitted = ky_scene_render_target_submit(target, output_from_wlr_output(output)->quirks);
+    if (!submitted || target->sync_failed) {
         wlr_buffer_unlock(buffer);
         pixman_region32_fini(&frame_damage);
-        wlr_damage_ring_add_whole(&scene_output->damage_ring);
+        ky_damage_ring_add_whole(&scene_output->damage_ring);
 
         KY_PROFILE_ZONE_END(zone);
         return false;
@@ -597,22 +602,33 @@ static bool ky_scene_try_direct_scanout(struct ky_scene_output *scene_output,
         wlr_buffer = client_buffer->source;
     }
     wlr_output_state_set_buffer(&pending, wlr_buffer);
+    if (scene_buffer->wait_timeline) {
+        wlr_output_state_set_wait_timeline(&pending, scene_buffer->wait_timeline,
+                                          scene_buffer->wait_point);
+        /* A fresh timeline avoids coupling release points of overlapping
+         * scan-outs. The backend signals it when this buffer is no longer
+         * scanned out, NOT when its first page flip starts (eff5aa52). */
+        if (output->backend->features.timeline) {
+            int drm_fd = wlr_backend_get_drm_fd(output->backend);
+            struct wlr_drm_syncobj_timeline *release =
+                drm_fd >= 0 ? wlr_drm_syncobj_timeline_create(drm_fd) : NULL;
+            if (!release) {
+                wlr_output_state_finish(&pending);
+                return false;
+            }
+            wlr_output_state_set_signal_timeline(&pending, release, 1);
+            wlr_drm_syncobj_timeline_unref(release);
+        }
+    }
 
     if (!wlr_output_test_state(scene_output->output, &pending)) {
         wlr_output_state_finish(&pending);
         return false;
     }
 
-    wlr_output_state_copy(state, &pending);
+    bool copied = wlr_output_state_copy(state, &pending);
     wlr_output_state_finish(&pending);
-
-    struct ky_scene_output_sample_event sample_event = {
-        .output = scene_output,
-        .direct_scanout = true,
-    };
-    wl_signal_emit_mutable(&scene_buffer->events.output_sample, &sample_event);
-
-    return true;
+    return copied;
 }
 
 static bool is_tearing_allowed(struct ky_scene *scene, struct ky_scene_buffer *buffer)
@@ -663,10 +679,12 @@ bool ky_scene_output_commit(struct ky_scene_output *scene_output,
         wlr_region_expand(&damage, &damage, 1);
     }
     /* union damage from output damage event */
-    wlr_damage_ring_add(&scene_output->damage_ring, &damage);
+    ky_damage_ring_add(&scene_output->damage_ring, &damage);
     pixman_region32_fini(&damage);
 
     if (!scene_output->output->needs_frame &&
+        !(output_from_wlr_output(output)->gamma_changed &&
+          output_use_hardware_gamma(output_from_wlr_output(output))) &&
         !pixman_region32_not_empty(&scene_output->damage_ring.current)) {
         return false;
     }
@@ -691,14 +709,34 @@ bool ky_scene_output_commit(struct ky_scene_output *scene_output,
                  scanout ? "enabled" : "disabled");
         if (!scanout) {
             // When exiting direct scan-out, damage everything
-            wlr_damage_ring_add_whole(&scene_output->damage_ring);
+            ky_damage_ring_add_whole(&scene_output->damage_ring);
         }
     }
     if (scanout) {
-        wlr_output_state_set_damage(&state, &scene_output->damage_ring.current);
+        pixman_region32_t buffer_damage;
+        pixman_region32_init(&buffer_damage);
+        pixman_region32_copy(&buffer_damage, &scene_output->damage_ring.current);
+        ky_scene_render_region(&buffer_damage, &target);
+        wlr_output_state_set_damage(&state, &buffer_damage);
+        pixman_region32_fini(&buffer_damage);
         output_state_attempt_tearing(output_from_wlr_output(output), &state, is_tearing);
-        wlr_damage_ring_rotate(&scene_output->damage_ring);
         bool ok = wlr_output_commit_state(scene_output->output, &state);
+        if (ok) {
+            if (state.committed & WLR_OUTPUT_STATE_COLOR_TRANSFORM) {
+                output_from_wlr_output(output)->gamma_changed = false;
+            }
+            struct ky_scene_output_sample_event sample_event = {
+                .output = scene_output,
+                .direct_scanout = true,
+                .presentation = true,
+                .release_timeline = state.signal_timeline,
+                .release_point = state.signal_point,
+            };
+            wl_signal_emit_mutable(&fullscreen->events.output_sample, &sample_event);
+            ky_damage_ring_rotate_buffer(&scene_output->damage_ring, NULL);
+        } else {
+            ky_damage_ring_add_whole(&scene_output->damage_ring);
+        }
         wlr_output_state_finish(&state);
         return ok;
     }
@@ -713,9 +751,12 @@ bool ky_scene_output_commit(struct ky_scene_output *scene_output,
         output_state_attempt_tearing(output_from_wlr_output(output), &state, is_tearing);
         ok = wlr_output_commit_state(scene_output->output, &state);
         if (ok) {
+            if (state.committed & WLR_OUTPUT_STATE_COLOR_TRANSFORM) {
+                output_from_wlr_output(output)->gamma_changed = false;
+            }
             wlr_buffer_unlock(scene_output->buffer);
             scene_output->buffer = wlr_buffer_lock(target.buffer);
-        } else if (!scene_output->commit_failed) {
+        } else {
             /* damage whole if output commit failed */
             ky_scene_output_damage_whole(scene_output);
         }

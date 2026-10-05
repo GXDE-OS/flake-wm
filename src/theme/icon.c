@@ -400,6 +400,7 @@ static void icon_destroy(struct icon *icon)
     free(icon->xpm_path);
     free(icon->svg_path);
     free(icon->png_path);
+    free(icon->ico_path);
     free(icon->svg_data);
     free(icon);
 }

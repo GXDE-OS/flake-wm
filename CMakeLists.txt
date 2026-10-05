@@ -176,6 +176,7 @@ pkg_check_modules(WLCOM_DEPS REQUIRED IMPORTED_TARGET
   cairo
   pango
   pangocairo
+  fontconfig
   "librsvg-2.0>=2.46"
   libjpeg
   libpng
@@ -184,6 +185,11 @@ pkg_check_modules(WLCOM_DEPS REQUIRED IMPORTED_TARGET
   "gbm>=17.1.0"
   openssl
 )
+
+# Foundational libraries must be identical to those used by wlroots.
+wlcom_pin_wlroots_dependencies(PkgConfig::WLCOM_DEPS)
+wlcom_pin_wlroots_dependencies(PkgConfig::WAYLAND_SERVER)
+wlcom_pin_wlroots_dependencies(PkgConfig::WAYLAND_CLIENT)
 
 if(WLCOM_XWAYLAND AND WLROOTS_HAVE_XWAYLAND)
   set(HAVE_XWAYLAND ON)

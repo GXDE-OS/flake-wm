@@ -46,7 +46,9 @@ struct input_manager {
     struct config *seat_config;
 
     struct wl_listener new_input;
+    struct wl_listener backend_destroy;
     struct wl_listener server_destroy;
+    struct wl_listener display_destroy;
 
     struct wlr_pointer_gestures_v1 *pointer_gestures;
     struct wlr_relative_pointer_manager_v1 *relative_pointer;
@@ -234,7 +236,8 @@ void cursor_feed_button(struct cursor *cursor, uint32_t button, bool pressed, ui
                         uint32_t double_click_time);
 
 void cursor_feed_axis(struct cursor *cursor, uint32_t orientation, uint32_t source, double delta,
-                      int32_t delta_discrete, uint32_t time);
+                      int32_t delta_discrete, uint32_t time,
+                      enum wl_pointer_axis_relative_direction relative_direction);
 
 /**
  * seat pointer constraint

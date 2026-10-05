@@ -22,7 +22,6 @@ struct xwayland_unmanaged {
     struct ky_scene_node *surface_node;
     struct wl_listener node_destroy;
 
-    struct wl_listener precommit;
     struct wl_listener associate;
     struct wl_listener dissociate;
     struct wl_listener map;
@@ -63,7 +62,7 @@ static bool xwayland_unmanaged_is_focusable(struct xwayland_unmanaged *unmanaged
 {
     struct wlr_xwayland_surface *wlr_xwayland_surface = unmanaged->wlr_xwayland_surface;
 
-    if (!wlr_xwayland_or_surface_wants_focus(wlr_xwayland_surface)) {
+    if (!wlr_xwayland_surface_override_redirect_wants_focus(wlr_xwayland_surface)) {
         return false;
     }
 
@@ -205,10 +204,12 @@ static uint32_t unmanaged_pointer_grab_button(struct wlr_seat_pointer_grab *grab
 }
 
 static void unmanaged_pointer_grab_axis(struct wlr_seat_pointer_grab *grab, uint32_t time,
-                                        enum wlr_axis_orientation orientation, double value,
-                                        int32_t value_discrete, enum wlr_axis_source source)
+                                        enum wl_pointer_axis orientation, double value,
+                                        int32_t value_discrete, enum wl_pointer_axis_source source,
+                                        enum wl_pointer_axis_relative_direction relative_direction)
 {
-    wlr_seat_pointer_send_axis(grab->seat, time, orientation, value, value_discrete, source);
+    wlr_seat_pointer_send_axis(grab->seat, time, orientation, value, value_discrete, source,
+                               relative_direction);
 }
 
 static void unmanaged_pointer_grab_frame(struct wlr_seat_pointer_grab *grab)
@@ -249,10 +250,11 @@ static void xwayland_unmanaged_grab_pointer(struct xwayland_unmanaged *unmanaged
 static void unmanaged_handle_map(struct wl_listener *listener, void *data)
 {
     struct xwayland_unmanaged *unmanaged = wl_container_of(listener, unmanaged, map);
+    xwayland_schedule_xwm_wake(unmanaged->xwayland);
     struct wlr_xwayland_surface *wlr_xwayland_surface = unmanaged->wlr_xwayland_surface;
 
-    /* Stack new surface on top */
-    wlr_xwayland_surface_restack(wlr_xwayland_surface, NULL, XCB_STACK_MODE_ABOVE);
+    /* Override-redirect stacking belongs to the X11 client. wlroots keeps
+     * managed windows below these and forbids restack() on OR surfaces. */
 
     xwayland_unmanaged_focus(unmanaged);
     xwayland_unmanaged_grab_pointer(unmanaged);
@@ -279,6 +281,7 @@ static void unmanaged_handle_map(struct wl_listener *listener, void *data)
 static void unmanaged_handle_unmap(struct wl_listener *listener, void *data)
 {
     struct xwayland_unmanaged *unmanaged = wl_container_of(listener, unmanaged, unmap);
+    xwayland_schedule_xwm_wake(unmanaged->xwayland);
 
     struct wlr_seat *wlr_seat = unmanaged->pointer_grab.seat;
     if (wlr_seat && wlr_seat->pointer_state.grab == &unmanaged->pointer_grab) {
@@ -304,33 +307,6 @@ static void unmanaged_handle_node_destroy(struct wl_listener *listener, void *da
     unmanaged->surface_node = NULL;
 }
 
-static void unmanaged_handle_precommit(struct wl_listener *listener, void *data)
-{
-    struct xwayland_unmanaged *unmanaged = wl_container_of(listener, unmanaged, precommit);
-    if (unmanaged->xwayland->scale == 1.0) {
-        return;
-    }
-
-    struct wlr_surface_state *pending = data;
-    pending->width = xwayland_unscale(pending->width);
-    pending->height = xwayland_unscale(pending->height);
-
-    float scale = 1.0 / unmanaged->xwayland->scale;
-    if (pending->committed & WLR_SURFACE_STATE_SURFACE_DAMAGE) {
-        wlr_region_scale(&pending->surface_damage, &pending->surface_damage, scale);
-    }
-    if (pending->committed & WLR_SURFACE_STATE_OPAQUE_REGION) {
-        wlr_region_scale(&pending->opaque, &pending->opaque, scale);
-    }
-    if (pending->committed & WLR_SURFACE_STATE_INPUT_REGION) {
-        wlr_region_scale(&pending->input, &pending->input, scale);
-    }
-    if (pending->committed & WLR_SURFACE_STATE_OFFSET) {
-        pending->dx = xwayland_unscale(pending->dx);
-        pending->dy = xwayland_unscale(pending->dy);
-    }
-}
-
 static void unmanaged_handle_associate(struct wl_listener *listener, void *data)
 {
     struct xwayland_unmanaged *unmanaged = wl_container_of(listener, unmanaged, associate);
@@ -351,13 +327,19 @@ static void unmanaged_handle_associate(struct wl_listener *listener, void *data)
     xwayland_surface_shape_select_input(wlr_xwayland_surface, true);
     xwayland_surface_apply_shape_region(wlr_xwayland_surface);
     xwayland_read_wm_window_opacity(wlr_xwayland_surface->window_id);
+    xwayland_schedule_xwm_wake(unmanaged->xwayland);
 
-    unmanaged->precommit.notify = unmanaged_handle_precommit;
-    wl_signal_add(&wlr_xwayland_surface->surface->events.precommit, &unmanaged->precommit);
     unmanaged->map.notify = unmanaged_handle_map;
     wl_signal_add(&wlr_xwayland_surface->surface->events.map, &unmanaged->map);
     unmanaged->node_destroy.notify = unmanaged_handle_node_destroy;
     wl_signal_add(&unmanaged->surface_node->events.destroy, &unmanaged->node_destroy);
+
+    /* The initial Wayland commit can precede the X11 association. */
+    if (wlr_xwayland_surface->surface->mapped) {
+        unmanaged_handle_map(&unmanaged->map, NULL);
+    } else if (wlr_surface_has_buffer(wlr_xwayland_surface->surface)) {
+        wlr_surface_map(wlr_xwayland_surface->surface);
+    }
 }
 
 static void unmanaged_handle_dissociate(struct wl_listener *listener, void *data)
@@ -366,7 +348,6 @@ static void unmanaged_handle_dissociate(struct wl_listener *listener, void *data
 
     ky_scene_node_destroy(unmanaged->surface_node);
 
-    wl_list_remove(&unmanaged->precommit.link);
     wl_list_remove(&unmanaged->map.link);
     wl_list_remove(&unmanaged->unmap.link);
 }
@@ -393,8 +374,10 @@ static void unmanaged_handle_set_override_redirect(struct wl_listener *listener,
     struct wlr_xwayland_surface *wlr_xwayland_surface = unmanaged->wlr_xwayland_surface;
     struct xwayland_server *xwayland = unmanaged->xwayland;
 
-    if (wlr_xwayland_surface->surface && wlr_xwayland_surface->surface->mapped) {
-        unmanaged_handle_unmap(&unmanaged->unmap, NULL);
+    if (wlr_xwayland_surface->surface) {
+        if (wlr_xwayland_surface->surface->mapped) {
+            unmanaged_handle_unmap(&unmanaged->unmap, NULL);
+        }
         unmanaged_handle_dissociate(&unmanaged->dissociate, NULL);
     }
     unmanaged_handle_destroy(&unmanaged->destroy, NULL);
@@ -430,22 +413,11 @@ void xwayland_unmanaged_create(struct xwayland_server *xwayland,
     wl_signal_add(&wlr_xwayland_surface->events.set_override_redirect,
                   &unmanaged->set_override_redirect);
 
-    wl_list_init(&unmanaged->precommit.link);
     wl_list_init(&unmanaged->map.link);
     wl_list_init(&unmanaged->unmap.link);
 
-    if (wlr_xwayland_surface->surface && wlr_xwayland_surface->surface->mapped) {
+    if (wlr_xwayland_surface->surface) {
         unmanaged_handle_associate(&unmanaged->associate, NULL);
-        unmanaged_handle_map(&unmanaged->map, NULL);
-    }
-}
-
-void xwayland_restack_unmanaged(struct xwayland_server *xwayland)
-{
-    /* Restack unmanaged surfaces on top */
-    struct xwayland_unmanaged *unmanaged;
-    wl_list_for_each(unmanaged, &xwayland->unmanaged_surfaces, link) {
-        wlr_xwayland_surface_restack(unmanaged->wlr_xwayland_surface, NULL, XCB_STACK_MODE_ABOVE);
     }
 }
 

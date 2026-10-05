@@ -322,22 +322,24 @@ static void cursor_handle_button(struct wl_listener *listener, void *data)
 
     cursor_set_hidden(cursor, false);
     struct input *input = input_from_wlr_input(&event->pointer->base);
-    cursor_feed_button(cursor, event->button, event->state == WLR_BUTTON_PRESSED, event->time_msec,
+    cursor_feed_button(cursor, event->button, event->state == WL_POINTER_BUTTON_STATE_PRESSED, event->time_msec,
                        input->state.double_click_time);
 }
 
 void cursor_feed_axis(struct cursor *cursor, uint32_t orientation, uint32_t source, double delta,
-                      int32_t delta_discrete, uint32_t time)
+                      int32_t delta_discrete, uint32_t time,
+                      enum wl_pointer_axis_relative_direction relative_direction)
 {
     struct seat *seat = cursor->seat;
     if (!session_lock_is_active() && seat->pointer_grab && seat->pointer_grab->interface->axis &&
         seat->pointer_grab->interface->axis(seat->pointer_grab, time,
-                                            orientation == WLR_AXIS_ORIENTATION_VERTICAL, delta)) {
+                                            orientation == WL_POINTER_AXIS_VERTICAL_SCROLL, delta)) {
         return;
     }
 
     /* Notify the client with pointer focus of the axis event. */
-    wlr_seat_pointer_notify_axis(seat->wlr_seat, time, orientation, delta, delta_discrete, source);
+    wlr_seat_pointer_notify_axis(seat->wlr_seat, time, orientation, delta, delta_discrete, source,
+                                 relative_direction);
 }
 
 static void cursor_handle_axis(struct wl_listener *listener, void *data)
@@ -357,7 +359,8 @@ static void cursor_handle_axis(struct wl_listener *listener, void *data)
     struct input *input = input_from_wlr_input(&event->pointer->base);
     cursor_feed_axis(cursor, event->orientation, event->source,
                      input->state.scroll_factor * event->delta,
-                     roundf(input->state.scroll_factor * event->delta_discrete), event->time_msec);
+                     roundf(input->state.scroll_factor * event->delta_discrete), event->time_msec,
+                     event->relative_direction);
 }
 
 static void cursor_handle_frame(struct wl_listener *listener, void *data)
@@ -676,28 +679,6 @@ static void cursor_handle_hold_end(struct wl_listener *listener, void *data)
                                           event->time_msec, event->cancelled || handled);
 }
 
-static void cursor_handle_surface_precommit(struct wl_listener *listener, void *data)
-{
-    float scale = xwayland_get_scale();
-    if (scale == 1.0) {
-        return;
-    }
-
-    struct cursor *cursor = wl_container_of(listener, cursor, surface_precommit);
-    struct wlr_surface_state *pending = data;
-
-    pending->width = xwayland_unscale(pending->width);
-    pending->height = xwayland_unscale(pending->height);
-
-    if (pending->committed & WLR_SURFACE_STATE_SURFACE_DAMAGE) {
-        wlr_region_scale(&pending->surface_damage, &pending->surface_damage, 1.0 / scale);
-    }
-    if (pending->committed & WLR_SURFACE_STATE_OFFSET) {
-        pending->dx = xwayland_unscale(pending->dx);
-        pending->dy = xwayland_unscale(pending->dy);
-    }
-}
-
 static void cursor_handle_surface_destroy(struct wl_listener *listener, void *data)
 {
     struct cursor *cursor = wl_container_of(listener, cursor, surface_destroy);
@@ -725,7 +706,7 @@ void cursor_set_surface(struct cursor *cursor, struct wlr_surface *surface, int3
 
             if (surface) {
                 cursor->surface = surface;
-                wl_signal_add(&surface->events.precommit, &cursor->surface_precommit);
+                /* Xwayland owns client_commit scaling for every X surface. */
                 wl_signal_add(&surface->events.destroy, &cursor->surface_destroy);
             }
         }
@@ -865,7 +846,6 @@ struct cursor *cursor_create(struct seat *seat)
     cursor->request_set_cursor.notify = cursor_handle_request_set_cursor;
     wl_signal_add(&seat->wlr_seat->events.request_set_cursor, &cursor->request_set_cursor);
 
-    cursor->surface_precommit.notify = cursor_handle_surface_precommit;
     wl_list_init(&cursor->surface_precommit.link);
     cursor->surface_destroy.notify = cursor_handle_surface_destroy;
     wl_list_init(&cursor->surface_destroy.link);
@@ -1047,7 +1027,7 @@ static void cursor_constraint_warp_to_hint(struct cursor_constraint *constraint)
 {
     struct wlr_pointer_constraint_v1_state *current = &constraint->constraint->current;
 
-    if (!(current->committed & WLR_POINTER_CONSTRAINT_V1_STATE_CURSOR_HINT)) {
+    if (!current->cursor_hint.enabled) {
         return;
     }
 
@@ -1069,6 +1049,7 @@ static void cursor_constraint_warp_to_hint(struct cursor_constraint *constraint)
 static void cursor_constraint_deactivate(void *data)
 {
     struct cursor_constraint *constraint = data;
+    constraint->deactivate_idle = NULL;
     wlr_pointer_constraint_v1_send_deactivated(constraint->constraint);
 }
 
@@ -1093,7 +1074,11 @@ static void cursor_active_constraint(struct cursor *cursor, struct cursor_constr
 
         if (deactivate_later) {
             struct wl_event_loop *loop = wl_display_get_event_loop(cursor->seat->wlr_seat->display);
-            wl_event_loop_add_idle(loop, cursor_constraint_deactivate, old_constraint);
+            old_constraint->deactivate_idle =
+                wl_event_loop_add_idle(loop, cursor_constraint_deactivate, old_constraint);
+            if (!old_constraint->deactivate_idle) {
+                wl_resource_post_no_memory(old_constraint->constraint->resource);
+            }
         } else {
             wlr_pointer_constraint_v1_send_deactivated(old_constraint->constraint);
         }
@@ -1129,9 +1114,10 @@ static bool cursor_constraint_check_region(struct cursor_constraint *constraint)
 
 static void cursor_set_constraint(struct cursor *cursor, struct cursor_constraint *constraint);
 
-static void cursor_constraint_handle_set_region(struct wl_listener *listener, void *data)
+static void cursor_constraint_update_region(void *data)
 {
-    struct cursor_constraint *constraint = wl_container_of(listener, constraint, set_region);
+    struct cursor_constraint *constraint = data;
+    constraint->region_idle = NULL;
     struct wlr_pointer_constraint_v1 *wlr_constraint = constraint->constraint;
     struct cursor *cursor = constraint->cursor;
     /* check if the cursor is in the region */
@@ -1146,6 +1132,21 @@ static void cursor_constraint_handle_set_region(struct wl_listener *listener, vo
         cursor_active_constraint(cursor, NULL, oneshot);
         if (!oneshot) {
             cursor_set_constraint(cursor, constraint);
+        }
+    }
+}
+
+static void cursor_constraint_handle_set_region(struct wl_listener *listener, void *data)
+{
+    struct cursor_constraint *constraint = wl_container_of(listener, constraint, set_region);
+    /* 0.20 synced-state hooks run before surface commit listeners update the
+     * scene geometry. Inspect coordinates after that commit has completed. */
+    if (!constraint->region_idle) {
+        struct wl_display *display = constraint->cursor->seat->wlr_seat->display;
+        constraint->region_idle = wl_event_loop_add_idle(wl_display_get_event_loop(display),
+            cursor_constraint_update_region, constraint);
+        if (!constraint->region_idle) {
+            wl_resource_post_no_memory(constraint->constraint->resource);
         }
     }
 }
@@ -1245,6 +1246,13 @@ static void cursor_constraint_handle_destroy(struct wl_listener *listener, void 
 {
     struct cursor_constraint *constraint = wl_container_of(listener, constraint, destroy);
     struct cursor *cursor = constraint->cursor;
+
+    if (constraint->region_idle) {
+        wl_event_source_remove(constraint->region_idle);
+    }
+    if (constraint->deactivate_idle) {
+        wl_event_source_remove(constraint->deactivate_idle);
+    }
 
     wl_list_remove(&constraint->destroy.link);
     wl_list_remove(&constraint->set_region.link);

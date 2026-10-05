@@ -4,11 +4,13 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 #include <drm_fourcc.h>
 #include <gbm.h>
+#include <xf86drm.h>
 
 #include <wlr/backend.h>
 #include <wlr/config.h>
@@ -23,6 +25,7 @@
 #include "render/profile.h"
 #include "render/renderer.h"
 #include "renderer_p.h"
+#include "src/patches/linux_dmabuf.h"
 
 static struct single_plane_formats {
     struct wlr_drm_format_set formats;
@@ -36,6 +39,7 @@ static void handle_renderer_destroy(struct wl_listener *listener, void *data)
     wl_list_remove(&formats->destroy.link);
     wlr_drm_format_set_finish(&formats->formats);
     free(formats);
+    formats = NULL;
 }
 
 static void query_single_plane_formats(struct wlr_renderer *renderer)
@@ -61,7 +65,7 @@ static void query_single_plane_formats(struct wlr_renderer *renderer)
         goto out;
     }
 
-    const struct wlr_drm_format_set *render_formats = renderer->impl->get_render_formats(renderer);
+    const struct wlr_drm_format_set *render_formats = renderer->WLR_PRIVATE.impl->get_render_formats(renderer);
     if (!render_formats) {
         gbm_device_destroy(gbm_device);
         goto out;
@@ -111,13 +115,31 @@ out:
 struct wlr_renderer *ky_renderer_autocreate(struct wlr_backend *backend)
 {
     const char *api = getenv("KYWC_RENDERER");
-    if (api && strcmp(api, "pixman") == 0) {
+    const char *software = getenv("WLR_RENDERER_FORCE_SOFTWARE");
+    if ((api && strcmp(api, "pixman") == 0) || (software && strcmp(software, "1") == 0)) {
         return wlr_pixman_renderer_create();
     }
 
     struct wlr_renderer *renderer = NULL;
     /* get drm fd from backend */
     int drm_fd = wlr_backend_get_drm_fd(backend);
+    /* Match the upstream render-node override, also usable by an isolated
+     * headless backend. A render node never acquires KMS/VT ownership. */
+    const char *render_node = getenv("WLR_RENDER_DRM_DEVICE");
+    bool own_drm_fd = false;
+    if (render_node) {
+        drm_fd = open(render_node, O_RDWR | O_CLOEXEC);
+        if (drm_fd < 0) {
+            kywc_log_errno(KYWC_ERROR, "Cannot open requested render node %s", render_node);
+            return NULL;
+        }
+        if (drmGetNodeTypeFromFd(drm_fd) != DRM_NODE_RENDER) {
+            kywc_log(KYWC_ERROR, "Refusing non-render DRM node %s", render_node);
+            close(drm_fd);
+            return NULL;
+        }
+        own_drm_fd = true;
+    }
     if (drm_fd < 0) {
         kywc_log(KYWC_ERROR, "Cannot create hardware renderer: no DRM fd available");
     } else {
@@ -129,6 +151,14 @@ struct wlr_renderer *ky_renderer_autocreate(struct wlr_backend *backend)
 #endif
         } else {
             renderer = ky_opengl_renderer_create_with_drm_fd(drm_fd);
+        }
+    }
+
+    if (own_drm_fd) {
+        close(drm_fd);
+        if (!renderer) {
+            kywc_log(KYWC_ERROR, "Requested render-node renderer failed; refusing software fallback");
+            return NULL;
         }
     }
 
@@ -144,9 +174,28 @@ struct wlr_renderer *ky_renderer_autocreate(struct wlr_backend *backend)
         kywc_log(KYWC_ERROR, "Could not initialize renderer");
     }
 
+    const char *no_sync = getenv("WLR_RENDER_NO_EXPLICIT_SYNC");
+    if (renderer && no_sync && strcmp(no_sync, "1") == 0) {
+        renderer->features.timeline = false;
+    }
+
     KY_PROFILE_RENDER_CREATE(renderer);
 
     return renderer;
+}
+
+bool ky_renderer_supports_explicit_sync(struct wlr_renderer *renderer)
+{
+    if (wlr_renderer_is_opengl(renderer)) {
+        struct ky_egl *egl = ky_opengl_renderer_get_egl(renderer);
+        return epoxy_egl_version(egl->display) >= 15 &&
+            epoxy_has_egl_extension(egl->display, "EGL_ANDROID_native_fence_sync");
+    }
+#if WLR_HAS_VULKAN_RENDERER
+    return wlr_renderer_is_vk(renderer) && renderer->features.timeline;
+#else
+    return false;
+#endif
 }
 
 bool ky_renderer_init_wl_display(struct wlr_renderer *renderer, struct wlr_backend *backend,
@@ -157,12 +206,18 @@ bool ky_renderer_init_wl_display(struct wlr_renderer *renderer, struct wlr_backe
         return false;
     }
 
-    if (!wlr_renderer_get_dmabuf_texture_formats(renderer)) {
+    *linux_dmabuf_v1 = NULL;
+    if (wlr_renderer_get_drm_fd(renderer) < 0 ||
+        !wlr_renderer_get_texture_formats(renderer, WLR_BUFFER_CAP_DMABUF)) {
         kywc_log(KYWC_WARN, "Unable to initialize dmabuf");
         return true;
     }
 
     *linux_dmabuf_v1 = wlr_linux_dmabuf_v1_create_with_renderer(wl_display, 4, renderer);
+    if (!*linux_dmabuf_v1 ||
+        !ky_linux_dmabuf_init_vmware_check(*linux_dmabuf_v1, wlr_renderer_get_drm_fd(renderer))) {
+        return false;
+    }
 
     if (!ky_wayland_buffer_create(wl_display, renderer)) {
         /* create wl_drm if not created in driver */
@@ -180,13 +235,13 @@ bool ky_renderer_init_wl_display(struct wlr_renderer *renderer, struct wlr_backe
 const struct wlr_drm_format *ky_renderer_get_render_format(struct wlr_renderer *renderer,
                                                            uint32_t fmt, bool single_plane)
 {
-    if (!renderer->impl->get_render_formats) {
+    if (!renderer->WLR_PRIVATE.impl->get_render_formats) {
         return NULL;
     }
 
     const struct wlr_drm_format_set *render_formats =
         (formats && single_plane) ? &formats->formats
-                                  : renderer->impl->get_render_formats(renderer);
+                                  : renderer->WLR_PRIVATE.impl->get_render_formats(renderer);
     if (!render_formats) {
         kywc_log(KYWC_ERROR, "Failed to get render formats");
         return NULL;

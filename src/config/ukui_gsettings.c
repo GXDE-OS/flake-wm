@@ -250,8 +250,8 @@ static void handle_display_destroy(struct wl_listener *listener, void *data)
 {
     wl_list_remove(&settings->destroy.link);
 
-    g_object_unref(settings->cursor.settings);
-    g_object_unref(settings->style.settings);
+    g_clear_object(&settings->cursor.settings);
+    g_clear_object(&settings->style.settings);
 
     free(settings->cursor.theme);
     free(settings->style.font_name);

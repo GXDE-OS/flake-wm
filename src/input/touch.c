@@ -492,7 +492,7 @@ bool touch_handle_down(struct wlr_touch_down_event *event)
     struct wlr_surface *toplevel = NULL;
     double sx, sy;
     struct wlr_surface *surface = touch_get_surface(touch, &sx, &sy, &toplevel);
-    if (!surface || !wlr_surface_accepts_touch(seat->wlr_seat, surface)) {
+    if (!surface || !wlr_surface_accepts_touch(surface, seat->wlr_seat)) {
         return false;
     }
 
@@ -756,6 +756,7 @@ void touch_handle_cancel(struct wlr_touch_cancel_event *event, bool handle)
 
     if (point && handle && point->surface) {
         struct seat *seat = touch->input->seat;
-        wlr_seat_touch_notify_cancel(seat->wlr_seat, point->surface);
+        wlr_seat_touch_notify_cancel(seat->wlr_seat,
+            wlr_seat_client_for_wl_client(seat->wlr_seat, wl_resource_get_client(point->surface->resource)));
     }
 }

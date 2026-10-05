@@ -19,6 +19,13 @@ override_dh_strip:
 override_dh_auto_install:
 	dh_auto_install --destdir=debian/tmp
 
+override_dh_install:
+	dh_install
+	sh debian/install-private-libs.sh
+
+override_dh_shlibdeps:
+	dh_shlibdeps -- -xgxde-wlcom
+
 override_dh_clean:
 	dh_clean
 	rm -rf debian/build

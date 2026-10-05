@@ -477,7 +477,7 @@ bool ky_scene_is_tearing_needed(struct ky_scene *scene)
 
     struct wlr_tearing_control_v1 *hint;
     wl_list_for_each(hint, &scene->tearing_control_v1->surface_hints, link) {
-        if (hint->hint == WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC) {
+        if (hint->current == WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC) {
             return true;
         }
     }

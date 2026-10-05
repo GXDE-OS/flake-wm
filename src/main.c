@@ -3,12 +3,15 @@
 // SPDX-License-Identifier: GPL-1.0-or-later
 
 #define _POSIX_C_SOURCE 200809L
+#include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <libintl.h>
 #include <locale.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "server.h"
@@ -33,6 +36,8 @@ static int exit_value = 0;
 static bool session_start_scheduled = false;
 static struct wl_listener session_xwayland_ready;
 static struct wl_event_source *session_xwayland_timeout = NULL;
+static int child_pipe[2] = {-1, -1};
+static struct wl_event_source *child_source;
 
 static const struct option long_options[] = {
     { "help", no_argument, NULL, 'h' },    { "debug", no_argument, NULL, 'd' },
@@ -137,32 +142,46 @@ static void sig_handler(int signo, siginfo_t *sip, void *unused)
 
 static void child_handler(int signo, siginfo_t *sip, void *unused)
 {
-    if (sip->si_pid != server.session_pid) {
-        return;
-    }
+    /* Async-signal-safe notification only. A full pipe already has a pending
+     * notification; waitpid in the event loop determines the actual status. */
+    int saved_errno = errno;
+    char byte = 1;
+    ssize_t result;
+    do {
+        result = write(child_pipe[1], &byte, 1);
+    } while (result < 0 && errno == EINTR);
+    errno = saved_errno;
+}
 
-    switch (sip->si_code) {
-    case CLD_EXITED:
-        kywc_log(KYWC_ERROR, "session %d exited with %d", sip->si_pid, sip->si_status);
-        break;
-    case CLD_KILLED:
-    case CLD_DUMPED:;
-        const char *signame = strsignal(sip->si_status);
-        kywc_log(KYWC_ERROR, "session %d terminated with signal %d (%s)", sip->si_pid,
-                 sip->si_status, signame ? signame : "unknown");
-        break;
-    default:
-        kywc_log(KYWC_ERROR, "session %d terminated unexpectedly: %d", sip->si_pid, sip->si_code);
-        break;
+static int handle_child_ready(int fd, uint32_t mask, void *data)
+{
+    char bytes[64];
+    while (read(fd, bytes, sizeof(bytes)) > 0) {}
+    if (server.session_pid <= 0) {
+        return 0;
     }
-
-    spawn_wait(server.session_pid);
+    int status;
+    pid_t pid;
+    do {
+        pid = waitpid(server.session_pid, &status, WNOHANG);
+    } while (pid < 0 && errno == EINTR);
+    /* Never reap wlroots' or other subsystems' children. */
+    if (pid <= 0) {
+        return 0;
+    }
+    if (WIFEXITED(status)) {
+        kywc_log(KYWC_ERROR, "session %d exited with %d", pid, WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        kywc_log(KYWC_ERROR, "session %d terminated with signal %d (%s)", pid,
+                 WTERMSIG(status), strsignal(WTERMSIG(status)));
+    }
     server.session_pid = -1;
 
     if (server.options.binding_session) {
         kywc_log(KYWC_FATAL, "gxde-wlcom abort...");
         terminate(EXIT_SUCCESS);
     }
+    return 0;
 }
 
 static void start_session(void *data)
@@ -330,7 +349,25 @@ int main(int argc, char *argv[])
     /* WAYLAND_DISPLAY is set by server_start(). */
     start_virtualbox_wayland_helper();
 
-    /* child terminated or stopped */
+    /* Route child notifications through the event loop, not the logger from
+     * an asynchronous signal handler (which can interrupt libc locks). */
+    if (pipe(child_pipe) < 0) {
+        terminate(EXIT_FAILURE);
+        goto shutdown;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (fcntl(child_pipe[i], F_SETFL, O_NONBLOCK) < 0 ||
+            fcntl(child_pipe[i], F_SETFD, FD_CLOEXEC) < 0) {
+            terminate(EXIT_FAILURE);
+            goto shutdown;
+        }
+    }
+    child_source = wl_event_loop_add_fd(server.event_loop, child_pipe[0], WL_EVENT_READABLE,
+                                         handle_child_ready, NULL);
+    if (!child_source) {
+        terminate(EXIT_FAILURE);
+        goto shutdown;
+    }
     set_signal(SIGCHLD, child_handler);
 
     if (server.session_process) {
@@ -348,6 +385,13 @@ int main(int argc, char *argv[])
     }
 
 shutdown:
+    set_signal(SIGCHLD, SIG_DFL);
+    if (child_source) {
+        wl_event_source_remove(child_source);
+    }
+    for (int i = 0; i < 2; i++) {
+        if (child_pipe[i] >= 0) close(child_pipe[i]);
+    }
     server_finish(&server);
     logger_finish();
 

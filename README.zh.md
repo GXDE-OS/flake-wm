@@ -90,20 +90,15 @@ GXDE Wayland 合成器（亦称 `gxde-wlcom`）是基于 `wlroots` 开发的 Way
 
 ### Wlroots问题
 
-[libs/wlroots](./libs/wlroots)现在是官方wlroots `0.17.4`标签的纯净副本。
-从openKylin/GXDE继承的兼容改动由合成器自身维护在
-[src/patches/wlroots/0.17](./src/patches/wlroots/0.17)，并全部登记于
-[WLR_UPGRADE.md](./WLR_UPGRADE.md)。
+[libs/wlroots](./libs/wlroots)是官方 wlroots `0.20.2` 的纯净副本，直接静态构建，
+不覆盖源码、不应用补丁，也不安装派生的 wlroots 开发包。
+迁移**仍在进行中**，基础编译和 headless 测试不代表全部旧行为已验证。
+所有适配、回填和待验证事项见 [WLR_UPGRADE.md](./WLR_UPGRADE.md)。
 
-[cmake/wlroots.cmake](./cmake/wlroots.cmake)会把官方源码复制到构建目录，
-再用合成器内的兼容源码覆盖对应文件，然后调用Meson构建并静态链接。生成的源码树和wlroots本身都不会
-安装到系统中。
-
-目前继续静态构建，是为了保留既有硬件和XWayland行为，同时避免安装会覆盖
-`/usr/include/wlr`的派生开发包。Vendor保持纯净、每项回填都有账本后，迁移到新版
-官方库时就可以逐文件缩减兼容层。
-
-为避免与系统上现有包冲突起见，我们这么做了。
+[src/patches/wlroots/0.17](./src/patches/wlroots/0.17)暂留作历史行为对照，不参与构建。
+可独立的兼容逻辑放在合成器源码中。[cmake/wlroots.cmake](./cmake/wlroots.cmake)
+优先选择系统依赖，版本不足时隔离构建 `libs` 内的回退版本；动态库安装到应用私有
+目录，不覆盖系统库。可用 `WLCOM_ALLOW_VENDORED_WLROOTS_DEPS=OFF` 禁止回退。
 
 
 

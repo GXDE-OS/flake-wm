@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-1.0-or-later
 
 #define _POSIX_C_SOURCE 200809L
+#include <wlr/util/transform.h>
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -827,12 +828,19 @@ void capture_mark_wants_update(struct capture *capture, bool wants, bool force)
 void capture_read_buffer(struct wlr_buffer *buffer, uint32_t format, uint32_t stride,
                          struct wlr_box *box, void *data)
 {
-    if (!wlr_renderer_begin_with_buffer(manager->server->renderer, buffer)) {
+    struct wlr_texture *texture = wlr_texture_from_buffer(manager->server->renderer, buffer);
+    if (!texture) {
         return;
     }
-    wlr_renderer_read_pixels(manager->server->renderer, format, stride, box->width, box->height, 0,
-                             0, box->x, box->y, data);
-    wlr_renderer_end(manager->server->renderer);
+    const struct wlr_texture_read_pixels_options options = {
+        .format = format, .stride = stride, .data = data,
+        .src_box = { .width = box->width, .height = box->height },
+        .dst_x = box->x, .dst_y = box->y,
+    };
+    if (!wlr_texture_read_pixels(texture, &options)) {
+        kywc_log(KYWC_ERROR, "Failed to read capture texture");
+    }
+    wlr_texture_destroy(texture);
 }
 
 struct capture_data {

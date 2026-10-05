@@ -14,6 +14,8 @@
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/xwayland/shell.h>
+#include <wlr/xwayland/server.h>
+#include <wlr/util/region.h>
 
 #include "input/cursor.h"
 #include "input/seat.h"
@@ -333,7 +335,8 @@ static int xwayland_handle_shape_notify(xcb_shape_notify_event_t *notify)
 
 void xwayland_set_cursor(struct seat *seat)
 {
-    if (!xwayland || !xwayland->wlr_xwayland || xwayland->wlr_xwayland->seat != seat->wlr_seat) {
+    if (!xwayland || !xwayland->xcb_conn || !xwayland->screen ||
+        !xwayland->wlr_xwayland || xwayland->wlr_xwayland->seat != seat->wlr_seat) {
         return;
     }
 
@@ -342,8 +345,8 @@ void xwayland_set_cursor(struct seat *seat)
         wlr_xcursor_manager_get_xcursor(seat->cursor->xcursor_manager, "left_ptr", xwayland->scale);
     if (xcursor) {
         struct wlr_xcursor_image *image = xcursor->images[0];
-        wlr_xwayland_set_cursor(xwayland->wlr_xwayland, image->buffer, image->width * 4,
-                                image->width, image->height, image->hotspot_x, image->hotspot_y);
+        wlr_xwayland_set_cursor(xwayland->wlr_xwayland, wlr_xcursor_image_get_buffer(image),
+                                image->hotspot_x, image->hotspot_y);
     }
 
     xwayland_update_xresources(xwayland->xcb_conn);
@@ -385,6 +388,147 @@ void xwayland_update_hovered_surface(struct wlr_surface *surface)
 
     xwayland->hoverd_surface = surface;
     wl_signal_add(&surface->events.destroy, &xwayland->surface_destroy);
+}
+
+static void wake_xwm(void *data)
+{
+    struct xwayland_server *server = data;
+    server->xwm_wake_idle = NULL;
+    if (!server->ready || !server->wlr_xwayland) {
+        return;
+    }
+    xcb_connection_t *connection = wlr_xwayland_get_xwm_connection(server->wlr_xwayland);
+    if (!connection || xcb_connection_has_error(connection)) {
+        return;
+    }
+    /* wlroots 0.20.2 association can buffer events while reading properties.
+     * Its zero-mask event-loop check no longer drains those events. Request a
+     * harmless asynchronous reply to make the XWM socket readable again; never
+     * consume XWM events ourselves or wait synchronously here. */
+    xcb_get_input_focus_cookie_t cookie = xcb_get_input_focus(connection);
+    xcb_discard_reply(connection, cookie.sequence);
+    xcb_flush(connection);
+}
+
+void xwayland_schedule_xwm_wake(struct xwayland_server *server)
+{
+    if (server->server->terminate || !server->ready || !server->wlr_xwayland) {
+        return;
+    }
+    if (!server->xwm_wake_idle) {
+        server->xwm_wake_idle = wl_event_loop_add_idle(server->server->event_loop, wake_xwm, server);
+        if (!server->xwm_wake_idle) {
+            kywc_log(KYWC_ERROR, "Cannot schedule XWM event wake");
+        }
+    }
+}
+
+struct xwayland_surface_scale {
+    struct wlr_surface *surface;
+    struct wl_listener commit, destroy;
+};
+
+static void handle_surface_scale_commit(struct wl_listener *listener, void *data)
+{
+    struct xwayland_surface_scale *state = wl_container_of(listener, state, commit);
+    if (xwayland->scale == 1.0) {
+        return;
+    }
+    struct wlr_surface_state *pending = &state->surface->pending;
+    pending->width = xwayland_unscale(pending->width);
+    pending->height = xwayland_unscale(pending->height);
+    float scale = 1.0 / xwayland->scale;
+    if (pending->committed & WLR_SURFACE_STATE_SURFACE_DAMAGE) {
+        wlr_region_scale(&pending->surface_damage, &pending->surface_damage, scale);
+    }
+    if (pending->committed & WLR_SURFACE_STATE_OPAQUE_REGION) {
+        wlr_region_scale(&pending->opaque, &pending->opaque, scale);
+    }
+    if (pending->committed & WLR_SURFACE_STATE_INPUT_REGION) {
+        wlr_region_scale(&pending->input, &pending->input, scale);
+    }
+    if (pending->committed & WLR_SURFACE_STATE_OFFSET) {
+        pending->dx = xwayland_unscale(pending->dx);
+        pending->dy = xwayland_unscale(pending->dy);
+    }
+}
+
+static void handle_surface_scale_destroy(struct wl_listener *listener, void *data)
+{
+    struct xwayland_surface_scale *state = wl_container_of(listener, state, destroy);
+    wl_list_remove(&state->commit.link);
+    wl_list_remove(&state->destroy.link);
+    free(state);
+}
+
+static void handle_new_wlr_surface(struct wl_listener *listener, void *data)
+{
+    struct wlr_surface *surface = data;
+    /* Install before the very first commit, even if the X11 association has
+     * not arrived yet. Otherwise its initial dimensions/regions remain in
+     * physical coordinates while later commits use logical coordinates. */
+    if (wl_resource_get_client(surface->resource) != xwayland->wlr_xwayland->server->client) {
+        return;
+    }
+    struct xwayland_surface_scale *state = calloc(1, sizeof(*state));
+    if (!state) {
+        wl_resource_post_no_memory(surface->resource);
+        return;
+    }
+    state->surface = surface;
+    state->commit.notify = handle_surface_scale_commit;
+    wl_signal_add(&surface->events.client_commit, &state->commit);
+    state->destroy.notify = handle_surface_scale_destroy;
+    wl_signal_add(&surface->events.destroy, &state->destroy);
+}
+
+static void xwayland_forget_connection(struct xwayland_server *server)
+{
+    /* These belong to XWM, not us. Never issue X requests during client loss:
+     * XWM may already have disconnected, or may do so later in this signal. */
+    server->ready = false;
+    server->xcb_conn = NULL;
+    server->screen = NULL;
+    server->shape = NULL;
+    server->xfixes = NULL;
+    server->window_catcher = XCB_WINDOW_NONE;
+    if (server->xwm_wake_idle) {
+        wl_event_source_remove(server->xwm_wake_idle);
+        server->xwm_wake_idle = NULL;
+    }
+    xwayland_xsettings_destroy(server);
+    xwayland_end_drag_x11(server);
+}
+
+static void handle_xwayland_client_destroy(struct wl_listener *listener, void *data)
+{
+    struct xwayland_server *server = wl_container_of(listener, server, client_destroy);
+    wl_list_remove(&server->client_destroy.link);
+    wl_list_init(&server->client_destroy.link);
+    xwayland_forget_connection(server);
+}
+
+static void handle_xwayland_start(struct wl_listener *listener, void *data)
+{
+    struct xwayland_server *server = wl_container_of(listener, server, xwayland_start);
+    /* The upstream client-destroy callback can restart Xwayland before our
+     * callback runs. Detach the old client and invalidate its cache here too. */
+    wl_list_remove(&server->client_destroy.link);
+    wl_list_init(&server->client_destroy.link);
+    xwayland_forget_connection(server);
+    wl_client_add_destroy_listener(server->wlr_xwayland->server->client, &server->client_destroy);
+}
+
+static void handle_xwayland_destroy(struct wl_listener *listener, void *data)
+{
+    struct xwayland_server *server = wl_container_of(listener, server, xwayland_destroy);
+    xwayland_forget_connection(server);
+    wl_list_remove(&server->xwayland_destroy.link);
+    wl_list_remove(&server->xwayland_start.link);
+    wl_list_remove(&server->client_destroy.link);
+    wl_list_remove(&server->xwayland_ready.link);
+    wl_list_remove(&server->new_xwayland_surface.link);
+    server->wlr_xwayland = NULL;
 }
 
 static void handle_xwayland_ready(struct wl_listener *listener, void *data)
@@ -545,13 +689,19 @@ int xwayland_read_wm_window_opacity(xcb_window_t window_id)
         xcb_get_property(xwayland->xcb_conn, 0, window_id, xwayland->atoms[NET_WM_WINDOW_OPACITY],
                          XCB_ATOM_CARDINAL, 0, 1);
     xcb_get_property_reply_t *reply = xcb_get_property_reply(xwayland->xcb_conn, cookie, NULL);
-    if (!reply || reply->value_len != 1 || reply->format != 32) {
+    if (!reply) {
+        return 0;
+    }
+    /* An absent property restores the default. A failed/malformed read must
+     * not be confused with deletion. */
+    float opacity = 1.0f;
+    if (reply->type == XCB_ATOM_CARDINAL && reply->value_len == 1 && reply->format == 32) {
+        uint32_t *value = xcb_get_property_value(reply);
+        opacity = (double)value[0] / UINT32_MAX;
+    } else if (reply->type != XCB_ATOM_NONE) {
         free(reply);
         return 0;
     }
-
-    uint32_t *value = (uint32_t *)xcb_get_property_value(reply);
-    float opacity = value[0] == 0xffffffff ? 1.0 : value[0] * 1.0 / 0xffffffff;
     free(reply);
 
     if (!xwayland_unmanaged_set_opacity(xwayland, window_id, opacity)) {
@@ -606,8 +756,23 @@ int xwayland_read_application_menu(xcb_window_t window_id) {
     return 1;
 }
 
+static bool xwayland_size_hints_empty(xcb_window_t window, uint8_t state)
+{
+    if (state == XCB_PROPERTY_DELETE) {
+        return true;
+    }
+    xcb_get_property_cookie_t cookie = xcb_get_property(
+        xwayland->xcb_conn, false, window, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_ANY, 0, 0);
+    xcb_get_property_reply_t *reply = xcb_get_property_reply(xwayland->xcb_conn, cookie, NULL);
+    /* A zero-length query always has value_len=0; bytes_after is the full size. */
+    bool empty = reply && reply->bytes_after == 0 &&
+        (reply->type == XCB_ATOM_NONE || reply->type == XCB_ATOM_WM_SIZE_HINTS);
+    free(reply);
+    return empty;
+}
+
 /* return 0 as we only handle few things */
-static int xwayland_handle_event(struct wlr_xwm *xwm, xcb_generic_event_t *event)
+static bool xwayland_handle_event(struct wlr_xwayland *wlr_xwayland, xcb_generic_event_t *event)
 {
     const uint8_t response_type = event->response_type & 0x7f;
 
@@ -617,6 +782,14 @@ static int xwayland_handle_event(struct wlr_xwm *xwm, xcb_generic_event_t *event
 
     if (response_type == XCB_PROPERTY_NOTIFY) {
         xcb_property_notify_event_t *ev = (xcb_property_notify_event_t *)event;
+        if (ev->atom == XCB_ATOM_WM_NORMAL_HINTS) {
+            /* wlroots clears size_hints but does not emit set_size_hints for
+             * deletion. Reset our cache and let XWM process the event too. */
+            if (xwayland_size_hints_empty(ev->window, ev->state)) {
+                xwayland_view_reset_size_hints(xwayland, ev->window);
+            }
+            return 0;
+        }
         if (ev->atom == xwayland->atoms[NET_WM_STATE]) {
             return xwayland_read_wm_state(ev->window);
         } else if (ev->atom == xwayland->atoms[NET_WM_ICON]) {
@@ -716,8 +889,19 @@ bool xwayland_server_create(struct server *server)
 
     xwayland->new_xwayland_surface.notify = handle_new_xwayland_surface;
     wl_signal_add(&xwayland->wlr_xwayland->events.new_surface, &xwayland->new_xwayland_surface);
+    xwayland->new_wlr_surface.notify = handle_new_wlr_surface;
+    wl_signal_add(&server->compositor->events.new_surface, &xwayland->new_wlr_surface);
     xwayland->xwayland_ready.notify = handle_xwayland_ready;
     wl_signal_add(&xwayland->wlr_xwayland->events.ready, &xwayland->xwayland_ready);
+    xwayland->client_destroy.notify = handle_xwayland_client_destroy;
+    wl_list_init(&xwayland->client_destroy.link);
+    xwayland->xwayland_start.notify = handle_xwayland_start;
+    wl_signal_add(&xwayland->wlr_xwayland->server->events.start, &xwayland->xwayland_start);
+    if (xwayland->wlr_xwayland->server->client) {
+        handle_xwayland_start(&xwayland->xwayland_start, NULL);
+    }
+    xwayland->xwayland_destroy.notify = handle_xwayland_destroy;
+    wl_signal_add(&xwayland->wlr_xwayland->events.destroy, &xwayland->xwayland_destroy);
     xwayland->server_destroy.notify = handle_server_destroy;
     server_add_destroy_listener(server, &xwayland->server_destroy);
     xwayland->output_configured.notify = handle_output_configured;
@@ -758,23 +942,24 @@ void xwayland_server_destroy(void)
     if (!xwayland) {
         return;
     }
+    if (xwayland->xwm_wake_idle) {
+        wl_event_source_remove(xwayland->xwm_wake_idle);
+        xwayland->xwm_wake_idle = NULL;
+    }
 
-    wl_list_remove(&xwayland->xwayland_ready.link);
-    wl_list_remove(&xwayland->new_xwayland_surface.link);
+    wl_list_remove(&xwayland->new_wlr_surface.link);
     wl_list_remove(&xwayland->seat_destroy.link);
     xwayland_xsettings_destroy(xwayland);
 
     xwayland_end_drag_x11(xwayland);
 
-    struct wlr_xwayland *wlr_xwayland = xwayland->wlr_xwayland;
-    /* prevent xwayland_update_seat in hover */
-    xwayland->wlr_xwayland = NULL;
-    wlr_xwayland_destroy(wlr_xwayland);
+    wlr_xwayland_destroy(xwayland->wlr_xwayland);
 }
 
 void xwayland_refresh_xsettings(void)
 {
-    if (!xwayland || !xwayland->wlr_xwayland || !xwayland->wlr_xwayland->xwm) {
+    if (!xwayland || !xwayland->ready || !xwayland->xcb_conn ||
+        !xwayland->wlr_xwayland || !xwayland->wlr_xwayland->xwm) {
         return;
     }
 

@@ -5,7 +5,7 @@ Maintainer: Morose <chenlinxiang@kylinos.cn>
 Build-Depends:
  debhelper-compat (= 13),
  cmake (>= 3.21),
- meson (>= 0.59.0),
+ meson (>= 1.3.0),
  ninja-build,
  pkg-config,
  libdrm-dev,
@@ -25,10 +25,18 @@ Build-Depends:
  libxcb-render0-dev,
  libxcb-res0-dev,
  libxcb-ewmh-dev,
- libxcb-errors-dev,
+ libxcb-dri3-dev,
+ libxcb-present-dev,
+ libxcb-render-util0-dev,
+ libxcb-xinput-dev,
+ libvulkan-dev,
+ liblcms2-dev,
+ libffi-dev,
+ libexpat1-dev,
  xwayland,
  libcairo2-dev,
  libpango1.0-dev,
+ libfontconfig1-dev,
  librsvg2-dev,
  libjson-c-dev (>= 0.15),
  libssl-dev,
@@ -54,7 +62,6 @@ Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libliftoff0,
 Breaks: kylin-wayland-compositor-effects
 Replaces: kylin-wayland-compositor
 Conflicts: kylin-wayland-compositor

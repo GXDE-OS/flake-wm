@@ -14,6 +14,7 @@
 #include <wlr/types/wlr_pointer_gestures_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_tablet_tool.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 
@@ -163,17 +164,30 @@ static void handle_input_destroy(struct wl_listener *listener, void *data)
     input_destroy(input);
 }
 
+static void input_get_ids(struct wlr_input_device *device, unsigned int *vendor, unsigned int *product)
+{
+    *vendor = *product = 0;
+    if (wlr_input_device_is_libinput(device)) {
+        struct libinput_device *libinput = wlr_libinput_get_device_handle(device);
+        *vendor = libinput_device_get_id_vendor(libinput);
+        *product = libinput_device_get_id_product(libinput);
+    } else if (device->type == WLR_INPUT_DEVICE_TABLET) {
+        struct wlr_tablet *tablet = wlr_tablet_from_input_device(device);
+        *vendor = tablet->usb_vendor_id;
+        *product = tablet->usb_product_id;
+    }
+}
+
 static void input_get_prop(struct input *input, struct input_prop *prop)
 {
     struct wlr_input_device *wlr_input = input->wlr_input;
 
     input->prop.type = wlr_input->type;
-    input->prop.vendor = wlr_input->vendor;
-    input->prop.product = wlr_input->product;
+    input_get_ids(wlr_input, &input->prop.vendor, &input->prop.product);
     input->prop.is_virtual = strncmp(input->name, "V_", 2) == 0;
     input->prop.support_mapped_to_output = wlr_input->type == WLR_INPUT_DEVICE_POINTER ||
                                            wlr_input->type == WLR_INPUT_DEVICE_TOUCH ||
-                                           wlr_input->type == WLR_INPUT_DEVICE_TABLET_TOOL;
+                                           wlr_input->type == WLR_INPUT_DEVICE_TABLET;
 
     if (input->device) {
         libinput_get_prop(input, prop);
@@ -311,8 +325,10 @@ static void handle_new_input(struct wl_listener *listener, void *data)
 {
     struct wlr_input_device *wlr_input = data;
 
-    const char *name = kywc_identifier_generate("%d:%d:%d:%s", wlr_input->type, wlr_input->vendor,
-                                                wlr_input->product, wlr_input->name);
+    unsigned int vendor, product;
+    input_get_ids(wlr_input, &vendor, &product);
+    const char *name = kywc_identifier_generate("%d:%d:%d:%s", wlr_input->type, vendor,
+                                                product, (wlr_input->name ? wlr_input->name : "unnamed"));
 
     struct input *input = input_create(name, wlr_input);
     if (!input) {
@@ -329,7 +345,7 @@ static void handle_new_virtual_pointer(struct wl_listener *listener, void *data)
     struct wlr_virtual_pointer_v1 *pointer = event->new_pointer;
     struct wlr_input_device *wlr_input = &pointer->pointer.base;
 
-    const char *name = kywc_identifier_generate("V_%s", wlr_input->name);
+    const char *name = kywc_identifier_generate("V_%s", (wlr_input->name ? wlr_input->name : "unnamed"));
 
     struct input *input = input_create(name, wlr_input);
     if (!input) {
@@ -357,7 +373,7 @@ static void handle_new_virtual_keyboard(struct wl_listener *listener, void *data
     struct wlr_virtual_keyboard_v1 *keyboard = data;
     struct wlr_input_device *wlr_input = &keyboard->keyboard.base;
 
-    const char *name = kywc_identifier_generate("V_%s", wlr_input->name);
+    const char *name = kywc_identifier_generate("V_%s", (wlr_input->name ? wlr_input->name : "unnamed"));
 
     struct input *input = input_create(name, wlr_input);
     if (!input) {
@@ -461,6 +477,25 @@ static void compile_keymap(void *job, void *gdata, int index)
     get_or_create_keymap(&rules);
 }
 
+static void handle_input_backend_destroy(struct wl_listener *listener, void *data)
+{
+    wl_list_remove(&input_manager->new_input.link);
+    wl_list_init(&input_manager->new_input.link);
+    wl_list_remove(&input_manager->backend_destroy.link);
+    wl_list_init(&input_manager->backend_destroy.link);
+}
+
+static void handle_display_destroy(struct wl_listener *listener, void *data)
+{
+    wl_list_remove(&input_manager->display_destroy.link);
+    wl_list_remove(&input_manager->new_input.link);
+    wl_list_remove(&input_manager->backend_destroy.link);
+    wl_list_remove(&input_manager->new_virtual_pointer.link);
+    wl_list_remove(&input_manager->new_virtual_keyboard.link);
+    wl_list_remove(&input_manager->new_shortcuts_inhibit.link);
+    wl_list_remove(&input_manager->new_pointer_constraint.link);
+}
+
 struct input_manager *input_manager_create(struct server *server)
 {
     input_manager = calloc(1, sizeof(struct input_manager));
@@ -469,6 +504,8 @@ struct input_manager *input_manager_create(struct server *server)
     }
 
     input_manager->server = server;
+    input_manager->display_destroy.notify = handle_display_destroy;
+    wl_display_add_destroy_listener(server->display, &input_manager->display_destroy);
     wl_list_init(&input_manager->seats);
     wl_list_init(&input_manager->inputs);
     wl_signal_init(&input_manager->events.new_input);
@@ -485,6 +522,8 @@ struct input_manager *input_manager_create(struct server *server)
 
     input_manager->new_input.notify = handle_new_input;
     wl_signal_add(&server->backend->events.new_input, &input_manager->new_input);
+    input_manager->backend_destroy.notify = handle_input_backend_destroy;
+    wl_signal_add(&server->backend->events.destroy, &input_manager->backend_destroy);
 
     input_manager->virtual_pointer = wlr_virtual_pointer_manager_v1_create(server->display);
     input_manager->new_virtual_pointer.notify = handle_new_virtual_pointer;

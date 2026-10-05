@@ -75,6 +75,7 @@ static void wayland_buffer_destroy(struct ky_wayland_buffer *buffer)
     wl_list_remove(&buffer->resource_destroy.link);
     wl_list_remove(&buffer->release.link);
     wl_list_remove(&buffer->link);
+    wlr_buffer_finish(&buffer->base);
     free(buffer);
 }
 

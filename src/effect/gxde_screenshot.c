@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <wlr/render/wlr_texture.h>
 #include <string.h>
 
 #include <drm_fourcc.h>
@@ -315,12 +316,15 @@ static bool frame_handle_buffer_update_readback(struct gxde_screenshot_frame* fr
     }
 
     bool ok = false;
-    if (wlr_renderer_begin_with_buffer(frame->manager->server->renderer, src)) {
-        ok = wlr_renderer_read_pixels(frame->manager->server->renderer, dst_format, dst_stride,
-                width, height, 0, 0, 0, 0, dst_data);
-        wlr_renderer_end(frame->manager->server->renderer);
+    struct wlr_texture *texture = wlr_texture_from_buffer(frame->manager->server->renderer, src);
+    if (texture) {
+        const struct wlr_texture_read_pixels_options options = {
+            .format = dst_format, .stride = dst_stride, .data = dst_data,
+        };
+        ok = wlr_texture_read_pixels(texture, &options);
+        wlr_texture_destroy(texture);
     } else {
-        kywc_log(KYWC_WARN, "screenshot thumbnail: begin_with_buffer failed");
+        kywc_log(KYWC_WARN, "screenshot thumbnail: importing texture failed");
     }
 
     wlr_buffer_end_data_ptr_access(frame->cpu_buffer);

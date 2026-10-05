@@ -107,6 +107,8 @@ struct cursor_constraint {
     struct wl_listener set_region;
     struct wl_listener destroy;
     struct wl_listener surface_unmap;
+    struct wl_event_source *region_idle;
+    struct wl_event_source *deactivate_idle;
 };
 
 struct cursor *cursor_create(struct seat *seat);

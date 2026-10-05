@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-1.0-or-later
 
+#include <wlr/util/transform.h>
 #include <assert.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -17,6 +18,7 @@
 #include <wlr/util/region.h>
 
 #include "effect/blur.h"
+#include "render/opengl.h"
 #include "render/pass.h"
 #include "render/pixel_format.h"
 #include "render/profile.h"
@@ -323,47 +325,43 @@ static void buffer_collect_damage(struct ky_scene_node *node, int lx, int ly, bo
  * 
  * 因此，我们可以确保我们不会读取到任何未渲染的buffer。
  */
-static void scene_buffer_wait_acquire(struct ky_scene_buffer *scene_buffer,
+static bool scene_buffer_wait_acquire(struct ky_scene_buffer *scene_buffer,
                                       struct wlr_renderer *renderer)
 {
-    struct ky_scene_surface *scene_surface = ky_scene_surface_try_from_buffer(scene_buffer);
-    if (scene_surface == NULL) {
-        return;
+    if (scene_buffer->wait_timeline == NULL || renderer->features.timeline) {
+        /* Native timeline renderers receive the point in texture options. */
+        return true;
     }
-    struct wlr_linux_drm_syncobj_surface_v1_state *state =
-        wlr_linux_drm_syncobj_v1_get_surface_state(scene_surface->surface);
-    if (state == NULL || state->acquire_timeline == NULL) {
-        return;
-    }
-    int fd = wlr_drm_syncobj_timeline_export_sync_file(state->acquire_timeline,
-                                                       state->acquire_point);
+    int fd = wlr_drm_syncobj_timeline_export_sync_file(scene_buffer->wait_timeline,
+                                                       scene_buffer->wait_point);
     if (fd < 0) {
-        /**
-         * The acquire point has not materialised yet. This backport dropped
-         * upstream's wait-before-signal commit blocking, so there is nothing
-         * left to wait on here and we are about to sample a buffer whose GPU
-         * writes may still be in flight.
-         *
-         * Rate limited so that a persistent case shows up at the default WARN
-         * level without flooding ~/.xsession-errors.
-         * ------------------------------------------------------------------------
-         * acquire point尚未materialize。本backport移除了上游的wait-before-signal
-         * 提交阻塞，因此此处已无可等待之物，我们即将采样一个GPU写入可能尚未完成的
-         * buffer。
-         *
-         * 做了限流，使该问题若持续存在能在默认WARN级别下可见，又不会刷爆
-         * ~/.xsession-errors。
-         */
+        /* Official 0.20 blocks surface commits until the point materializes.
+         * An export error is still possible: never sample without a wait.
+         * Rate-limit diagnostics for a persistent driver/export failure. */
         static unsigned long skipped;
         if (++skipped == 1 || skipped % 500 == 0) {
             kywc_log(KYWC_WARN,
-                     "explicit sync: acquire point not materialised, sampled "
-                     "without waiting (%lu times so far)",
+                     "explicit sync: cannot export acquire point; rejecting frame "
+                     "(%lu times so far)",
                      skipped);
         }
-        return;
+        return false;
     }
-    ky_renderer_wait_acquire_fd(renderer, fd);
+    return ky_renderer_wait_acquire_fd(renderer, fd);
+}
+
+static void scene_buffer_clear_texture(struct ky_scene_buffer *buffer)
+{
+    wl_list_remove(&buffer->texture_renderer_destroy.link);
+    wl_list_init(&buffer->texture_renderer_destroy.link);
+    wlr_texture_destroy(buffer->texture);
+    buffer->texture = NULL;
+}
+
+static void scene_buffer_handle_renderer_destroy(struct wl_listener *listener, void *data)
+{
+    struct ky_scene_buffer *buffer = wl_container_of(listener, buffer, texture_renderer_destroy);
+    scene_buffer_clear_texture(buffer);
 }
 
 static struct wlr_texture *scene_buffer_get_texture(struct ky_scene_buffer *scene_buffer,
@@ -380,13 +378,27 @@ static struct wlr_texture *scene_buffer_get_texture(struct ky_scene_buffer *scen
     }
 
     scene_buffer->texture = wlr_texture_from_buffer(renderer, scene_buffer->buffer);
+    if (scene_buffer->texture) {
+        scene_buffer->texture_renderer_destroy.notify = scene_buffer_handle_renderer_destroy;
+        wl_signal_add(&renderer->events.destroy, &scene_buffer->texture_renderer_destroy);
+    }
     return scene_buffer->texture;
+}
+
+static void scene_buffer_import_failed(struct ky_scene_buffer *buffer,
+                                      struct ky_scene_render_target *target)
+{
+    target->sync_failed = true;
+    if (buffer->import_failures == 0) {
+        buffer->import_failures = 1;
+        wlr_output_schedule_frame(target->output->output);
+    }
 }
 
 static void buffer_render(struct ky_scene_node *node, int lx, int ly,
                           struct ky_scene_render_target *target)
 {
-    if (!node->enabled) {
+    if (!node->enabled || target->sync_failed) {
         return;
     }
 
@@ -429,6 +441,10 @@ static void buffer_render(struct ky_scene_node *node, int lx, int ly,
     struct wlr_texture *texture =
         scene_buffer_get_texture(scene_buffer, target->output->output->renderer);
     if (texture == NULL) {
+        /* Never present a partial scene or consume its damage. Allow one
+         * automatic retry per attachment, then wait for new content/events
+         * instead of spinning on a permanently unsupported import. */
+        scene_buffer_import_failed(scene_buffer, target);
         pixman_region32_fini(&render_region);
         return;
     }
@@ -447,7 +463,15 @@ static void buffer_render(struct ky_scene_node *node, int lx, int ly,
      * 因此若缺少这次等待，对这类客户端就完全没有同步可言，我们会采样到GPU写入
      * 尚未完成的buffer。
      */
-    scene_buffer_wait_acquire(scene_buffer, target->output->output->renderer);
+    struct wlr_renderer *renderer = target->output->output->renderer;
+    if ((scene_buffer->wait_timeline && !wlr_renderer_is_opengl(renderer) &&
+         !target->release_timeline) || !scene_buffer_wait_acquire(scene_buffer, renderer)) {
+        /* If allocating a Vulkan completion point failed, do not enqueue a
+         * read whose release cannot be tracked, even if acquire is supported. */
+        target->sync_failed = true;
+        pixman_region32_fini(&render_region);
+        return;
+    }
 
     struct wlr_box dst_box = {
         .x = lx - target->logical.x,
@@ -492,6 +516,8 @@ static void buffer_render(struct ky_scene_node *node, int lx, int ly,
     struct ky_render_texture_options options = {
         .base = {
             .texture = texture,
+            .wait_timeline = renderer->features.timeline ? scene_buffer->wait_timeline : NULL,
+            .wait_point = scene_buffer->wait_point,
             .src_box = scene_buffer->src_box,
             .dst_box = dst_box,
             .transform = transform,
@@ -558,13 +584,24 @@ static void buffer_render(struct ky_scene_node *node, int lx, int ly,
 
     KY_PROFILE_RENDER_ZONE_END(ky_render_pass_get_renderer(target->render_pass));
 
-    if (target->options & KY_SCENE_RENDER_ENABLE_PRESENTATION) {
+    struct wlr_drm_syncobj_timeline *release = NULL;
+    if (scene_buffer->wait_timeline && wlr_render_pass_is_opengl(target->render_pass)) {
+        release = ky_opengl_render_pass_signal_sample(target->render_pass);
+    } else if (scene_buffer->wait_timeline && target->release_timeline) {
+        release = wlr_drm_syncobj_timeline_ref(target->release_timeline);
+    }
+    bool presentation = target->options & KY_SCENE_RENDER_ENABLE_PRESENTATION;
+    if (presentation || release) {
         struct ky_scene_output_sample_event sample_event = {
             .output = target->output,
             .direct_scanout = false,
+            .presentation = presentation,
+            .release_timeline = release,
+            .release_point = 1,
         };
         wl_signal_emit_mutable(&scene_buffer->events.output_sample, &sample_event);
     }
+    wlr_drm_syncobj_timeline_unref(release);
 
     if (scene_buffer->primary_output == target->output && !node->sent_dmabuf_feedback) {
         struct wlr_linux_dmabuf_feedback_v1_init_options options = {
@@ -607,6 +644,7 @@ void ky_scene_buffer_init(struct ky_scene_buffer *scene_buffer, struct ky_scene_
         .opacity = 1,
     };
     ky_scene_node_init(&scene_buffer->node, parent);
+    wl_list_init(&scene_buffer->texture_renderer_destroy.link);
 
     scene_buffer->node.type = KY_SCENE_NODE_BUFFER;
 
@@ -675,6 +713,9 @@ void ky_scene_buffer_set_buffer_with_damage(struct ky_scene_buffer *scene_buffer
                                             const pixman_region32_t *damage)
 {
     assert(buffer || !damage);
+    wlr_drm_syncobj_timeline_unref(scene_buffer->wait_timeline);
+    scene_buffer->wait_timeline = NULL;
+    scene_buffer->wait_point = 0;
     /* do nothing when still no buffer */
     if (!scene_buffer->buffer && !buffer) {
         return;
@@ -683,12 +724,15 @@ void ky_scene_buffer_set_buffer_with_damage(struct ky_scene_buffer *scene_buffer
     int old_width, old_height, new_width, new_height;
     bool get_or_lost_buffer = !scene_buffer->buffer || !buffer;
 
-    wlr_texture_destroy(scene_buffer->texture);
-    scene_buffer->texture = NULL;
+    scene_buffer_clear_texture(scene_buffer);
+    scene_buffer->import_failures = 0;
 
     buffer_get_dest_size(scene_buffer, &old_width, &old_height);
+    /* Lock first: callers may reattach the same buffer and our old lock may
+     * be the final one keeping a dropped buffer alive. */
+    struct wlr_buffer *next_buffer = buffer ? wlr_buffer_lock(buffer) : NULL;
     wlr_buffer_unlock(scene_buffer->buffer);
-    scene_buffer->buffer = buffer ? wlr_buffer_lock(buffer) : NULL;
+    scene_buffer->buffer = next_buffer;
     buffer_get_dest_size(scene_buffer, &new_width, &new_height);
 
     /* return early if the scene buffer output no need to update */
@@ -704,6 +748,9 @@ void ky_scene_buffer_set_buffer_with_damage(struct ky_scene_buffer *scene_buffer
             ky_scene_node_push_damage(&scene_buffer->node, KY_SCENE_DAMAGE_HARMLESS, &region);
         }
         pixman_region32_fini(&region);
+        if (get_or_lost_buffer) {
+            ky_scene_node_update_outputs(&scene_buffer->node, NULL, NULL, NULL);
+        }
         return;
     }
 

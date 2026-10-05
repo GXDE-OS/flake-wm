@@ -6,6 +6,7 @@
 
 #include <stdlib.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/render/color.h>
 
 #include "output_p.h"
 
@@ -309,22 +310,26 @@ static void fill_gamma_ramp_with_colortemp(uint16_t *gamma_ramp, uint32_t ramp_s
     }
 }
 
-void output_set_gamma_lut(struct wlr_output *wlr_output, size_t gamma_size,
+bool output_set_gamma_lut(struct wlr_output *wlr_output, size_t gamma_size,
                           struct wlr_output_state *wlr_state, uint32_t color_temp,
                           uint32_t brightness)
 {
     uint16_t *gamma_ramp = malloc(gamma_size * sizeof(uint16_t) * 3);
-    fill_gamma_ramp_with_colortemp(gamma_ramp, gamma_size, color_temp, brightness);
-    if (wlr_state) {
-        wlr_output_state_set_gamma_lut(wlr_state, gamma_size, &gamma_ramp[0],
-                                       &gamma_ramp[1 * gamma_size], &gamma_ramp[2 * gamma_size]);
-    } else {
-        wlr_output_set_gamma(wlr_output, gamma_size, &gamma_ramp[0], &gamma_ramp[1 * gamma_size],
-                             &gamma_ramp[2 * gamma_size]);
+    if (!gamma_ramp) {
+        return false;
     }
+    fill_gamma_ramp_with_colortemp(gamma_ramp, gamma_size, color_temp, brightness);
+    struct wlr_color_transform *transform = wlr_color_transform_init_lut_3x1d(
+        gamma_size, gamma_ramp, gamma_ramp + gamma_size, gamma_ramp + 2 * gamma_size);
     free(gamma_ramp);
+    if (!transform) {
+        return false;
+    }
+    wlr_output_state_set_color_transform(wlr_state, transform);
+    wlr_color_transform_unref(transform);
 
     kywc_log(KYWC_DEBUG, "output:%s set gamma lut colr_tempe: %d", wlr_output->name, color_temp);
+    return true;
 }
 
 bool output_set_colortemp(struct kywc_output *kywc_output, uint32_t color_temp)

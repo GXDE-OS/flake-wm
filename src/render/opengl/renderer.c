@@ -9,7 +9,7 @@
 
 #include <drm_fourcc.h>
 #include <kywc/log.h>
-#include <wlr/types/wlr_matrix.h>
+#include "src/patches/matrix.h"
 
 #include "render/opengl.h"
 #include "render/pixel_format.h"
@@ -95,20 +95,13 @@ static const struct wlr_render_timer_impl render_timer_impl;
 
 bool wlr_renderer_is_opengl(struct wlr_renderer *wlr_renderer)
 {
-    return wlr_renderer->impl == &renderer_impl;
+    return wlr_renderer->WLR_PRIVATE.impl == &renderer_impl;
 }
 
 struct ky_opengl_renderer *ky_opengl_renderer_from_wlr_renderer(struct wlr_renderer *wlr_renderer)
 {
-    assert(wlr_renderer->impl == &renderer_impl);
+    assert(wlr_renderer->WLR_PRIVATE.impl == &renderer_impl);
     struct ky_opengl_renderer *renderer = wl_container_of(wlr_renderer, renderer, wlr_renderer);
-    return renderer;
-}
-
-static struct ky_opengl_renderer *gl_get_renderer_in_context(struct wlr_renderer *wlr_renderer)
-{
-    struct ky_opengl_renderer *renderer = ky_opengl_renderer_from_wlr_renderer(wlr_renderer);
-    assert(renderer->current_buffer != NULL);
     return renderer;
 }
 
@@ -179,6 +172,12 @@ static struct ky_opengl_buffer *get_or_create_buffer(struct ky_opengl_renderer *
     if (buffer->image == EGL_NO_IMAGE_KHR) {
         goto error_buffer;
     }
+    /* Texture imports have their own EXTERNAL_OES path; this cache is only
+     * for render targets, which require a renderbuffer-compatible image. */
+    if (external_only) {
+        kywc_log(KYWC_ERROR, "DMA-BUF render target is external-only");
+        goto error_image;
+    }
 
     ky_opengl_push_debug(renderer);
 
@@ -209,105 +208,12 @@ static struct ky_opengl_buffer *get_or_create_buffer(struct ky_opengl_renderer *
     return buffer;
 
 error_image:
+    glDeleteFramebuffers(1, &buffer->fbo);
+    glDeleteRenderbuffers(1, &buffer->rbo);
     ky_egl_destroy_image(renderer->egl, buffer->image);
 error_buffer:
     free(buffer);
     return NULL;
-}
-
-static bool gl_bind_buffer(struct wlr_renderer *wlr_renderer, struct wlr_buffer *wlr_buffer)
-{
-    struct ky_opengl_renderer *renderer = ky_opengl_renderer_from_wlr_renderer(wlr_renderer);
-
-    if (renderer->current_buffer != NULL) {
-        ky_opengl_push_debug(renderer);
-        glFlush();
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        ky_opengl_pop_debug(renderer);
-
-        wlr_buffer_unlock(renderer->current_buffer->buffer);
-        renderer->current_buffer = NULL;
-    }
-
-    if (wlr_buffer == NULL) {
-        ky_egl_unset_current(renderer->egl);
-        return true;
-    }
-
-    ky_egl_make_current(renderer->egl, NULL);
-
-    struct ky_opengl_buffer *buffer = get_or_create_buffer(renderer, wlr_buffer);
-    if (buffer == NULL) {
-        return false;
-    }
-
-    wlr_buffer_lock(wlr_buffer);
-    renderer->current_buffer = buffer;
-
-    ky_opengl_push_debug(renderer);
-    glBindFramebuffer(GL_FRAMEBUFFER, renderer->current_buffer->fbo);
-    ky_opengl_pop_debug(renderer);
-
-    return true;
-}
-
-static const char *reset_status_str(GLenum status)
-{
-    switch (status) {
-    case GL_GUILTY_CONTEXT_RESET_KHR:
-        return "guilty";
-    case GL_INNOCENT_CONTEXT_RESET_KHR:
-        return "innocent";
-    case GL_UNKNOWN_CONTEXT_RESET_KHR:
-        return "unknown";
-    default:
-        return "<invalid>";
-    }
-}
-
-static bool gl_begin(struct wlr_renderer *wlr_renderer, uint32_t width, uint32_t height)
-{
-    struct ky_opengl_renderer *renderer = gl_get_renderer_in_context(wlr_renderer);
-
-    ky_opengl_push_debug(renderer);
-
-    if (renderer->exts.KHR_robustness) {
-        GLenum status = glGetGraphicsResetStatusKHR();
-        if (status != GL_NO_ERROR) {
-            kywc_log(KYWC_ERROR, "GPU reset (%s)", reset_status_str(status));
-            wl_signal_emit_mutable(&wlr_renderer->events.lost, NULL);
-            return false;
-        }
-    }
-
-    glViewport(0, 0, width, height);
-    renderer->viewport_width = width;
-    renderer->viewport_height = height;
-
-    // refresh projection matrix
-    ky_opengl_matrix_projection(renderer->projection, width, height,
-                                WL_OUTPUT_TRANSFORM_FLIPPED_180);
-
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-
-    // XXX: maybe we should save output projection and remove some of the need
-    // for users to sling matrices themselves
-
-    ky_opengl_pop_debug(renderer);
-
-    return true;
-}
-
-static void gl_end(struct wlr_renderer *wlr_renderer)
-{
-    gl_get_renderer_in_context(wlr_renderer);
-    // no-op
-}
-
-static const uint32_t *gl_get_shm_texture_formats(struct wlr_renderer *wlr_renderer, size_t *len)
-{
-    struct ky_opengl_renderer *renderer = ky_opengl_renderer_from_wlr_renderer(wlr_renderer);
-    return ky_opengl_get_shm_formats(renderer, len);
 }
 
 static const struct wlr_drm_format_set *
@@ -327,85 +233,30 @@ gl_get_dmabuf_texture_formats(struct wlr_renderer *wlr_renderer)
     return &renderer->egl->dmabuf_texture_formats;
 }
 
+static const struct wlr_drm_format_set *gl_get_texture_formats(struct wlr_renderer *wlr_renderer,
+                                                              uint32_t buffer_caps)
+{
+    struct ky_opengl_renderer *renderer = ky_opengl_renderer_from_wlr_renderer(wlr_renderer);
+    if (buffer_caps & WLR_BUFFER_CAP_DMABUF) {
+        return gl_get_dmabuf_texture_formats(wlr_renderer);
+    }
+    if (buffer_caps & WLR_BUFFER_CAP_DATA_PTR) {
+        if (renderer->shm_texture_formats.len == 0) {
+            size_t len;
+            const uint32_t *formats = ky_opengl_get_shm_formats(renderer, &len);
+            for (size_t i = 0; i < len; i++) {
+                wlr_drm_format_set_add(&renderer->shm_texture_formats, formats[i], DRM_FORMAT_MOD_INVALID);
+            }
+        }
+        return &renderer->shm_texture_formats;
+    }
+    return NULL;
+}
+
 static const struct wlr_drm_format_set *gl_get_render_formats(struct wlr_renderer *wlr_renderer)
 {
     struct ky_opengl_renderer *renderer = ky_opengl_renderer_from_wlr_renderer(wlr_renderer);
     return &renderer->egl->dmabuf_render_formats;
-}
-
-static uint32_t gl_preferred_read_format(struct wlr_renderer *wlr_renderer)
-{
-    struct ky_opengl_renderer *renderer = gl_get_renderer_in_context(wlr_renderer);
-
-    ky_opengl_push_debug(renderer);
-
-    GLint gl_format = -1, gl_type = -1, alpha_size = -1;
-    glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &gl_format);
-    glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &gl_type);
-    glGetIntegerv(GL_ALPHA_BITS, &alpha_size);
-
-    ky_opengl_pop_debug(renderer);
-
-    const struct ky_pixel_format *fmt = ky_pixel_format_from_gl(gl_format, gl_type, alpha_size > 0);
-    if (fmt != NULL) {
-        return fmt->drm_format;
-    }
-
-    if (renderer->exts.EXT_read_format_bgra) {
-        return DRM_FORMAT_XRGB8888;
-    }
-    return DRM_FORMAT_XBGR8888;
-}
-
-static bool gl_read_pixels(struct wlr_renderer *wlr_renderer, uint32_t drm_format, uint32_t stride,
-                           uint32_t width, uint32_t height, uint32_t src_x, uint32_t src_y,
-                           uint32_t dst_x, uint32_t dst_y, void *data)
-{
-    struct ky_opengl_renderer *renderer = gl_get_renderer_in_context(wlr_renderer);
-
-    const struct ky_pixel_format *fmt = ky_pixel_format_from_drm(drm_format);
-    if (fmt == NULL || !ky_opengl_pixel_format_is_supported(renderer, fmt)) {
-        kywc_log(KYWC_ERROR, "Cannot read pixels: unsupported pixel format 0x%" PRIX32, drm_format);
-        return false;
-    }
-
-    if (fmt->gl_format == GL_BGRA_EXT && !renderer->exts.EXT_read_format_bgra) {
-        kywc_log(KYWC_ERROR, "Cannot read pixels: missing GL_EXT_read_format_bgra extension");
-        return false;
-    }
-
-    if (ky_pixel_format_pixels_per_block(fmt) != 1) {
-        kywc_log(KYWC_ERROR, "Cannot read pixels: block formats are not supported");
-        return false;
-    }
-
-    ky_opengl_push_debug(renderer);
-
-    // Make sure any pending drawing is finished before we try to read it
-    glFinish();
-
-    glGetError(); // Clear the error flag
-
-    unsigned char *p = (unsigned char *)data + dst_y * stride;
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    uint32_t pack_stride = ky_pixel_format_min_stride(fmt, width);
-    if (pack_stride == stride && dst_x == 0) {
-        // Under these particular conditions, we can read the pixels with only
-        // one glReadPixels call
-        glReadPixels(src_x, src_y, width, height, fmt->gl_format, fmt->gl_type, p);
-    } else {
-        // Unfortunately GLES2 doesn't support GL_PACK_ROW_LENGTH, so we have to read
-        // the lines out row by row
-        for (size_t i = 0; i < height; ++i) {
-            uint32_t y = src_y + i;
-            glReadPixels(src_x, y, width, 1, fmt->gl_format, fmt->gl_type,
-                         p + i * stride + dst_x * fmt->bytes_per_block);
-        }
-    }
-
-    ky_opengl_pop_debug(renderer);
-
-    return glGetError() == GL_NO_ERROR;
 }
 
 static int gl_get_drm_fd(struct wlr_renderer *wlr_renderer)
@@ -417,11 +268,6 @@ static int gl_get_drm_fd(struct wlr_renderer *wlr_renderer)
     }
 
     return renderer->drm_fd;
-}
-
-static uint32_t gl_get_render_buffer_caps(struct wlr_renderer *wlr_renderer)
-{
-    return WLR_BUFFER_CAP_DMABUF;
 }
 
 struct ky_egl *ky_opengl_renderer_get_egl(struct wlr_renderer *wlr_renderer)
@@ -465,6 +311,7 @@ static void gl_destroy(struct wlr_renderer *wlr_renderer)
         close(renderer->drm_fd);
     }
 
+    wlr_drm_format_set_finish(&renderer->shm_texture_formats);
     free(renderer);
 }
 
@@ -487,11 +334,13 @@ static struct wlr_render_pass *gl_begin_buffer_pass(struct wlr_renderer *wlr_ren
 
     struct ky_opengl_buffer *buffer = get_or_create_buffer(renderer, wlr_buffer);
     if (!buffer) {
+        ky_egl_restore_context(&prev_ctx);
         return NULL;
     }
 
     struct ky_opengl_render_pass *pass = ky_opengl_begin_buffer_pass(buffer, &prev_ctx, timer);
     if (!pass) {
+        ky_egl_restore_context(&prev_ctx);
         return NULL;
     }
     return &pass->base;
@@ -500,7 +349,7 @@ static struct wlr_render_pass *gl_begin_buffer_pass(struct wlr_renderer *wlr_ren
 static struct wlr_render_timer *gl_render_timer_create(struct wlr_renderer *wlr_renderer)
 {
     struct ky_opengl_renderer *renderer = ky_opengl_renderer_from_wlr_renderer(wlr_renderer);
-    if (!renderer->exts.EXT_disjoint_timer_query) {
+    if (!renderer->exts.EXT_disjoint_timer_query && !renderer->exts.core_timer_query) {
         kywc_log(KYWC_ERROR, "can't create timer, EXT_disjoint_timer_query not available");
         return NULL;
     }
@@ -514,7 +363,11 @@ static struct wlr_render_timer *gl_render_timer_create(struct wlr_renderer *wlr_
 
     struct ky_egl_context prev_ctx;
     ky_egl_make_current(renderer->egl, &prev_ctx);
-    glGenQueriesEXT(1, &timer->id);
+    if (renderer->exts.core_timer_query) {
+        glGenQueries(1, &timer->id);
+    } else {
+        glGenQueriesEXT(1, &timer->id);
+    }
     ky_egl_restore_context(&prev_ctx);
 
     return &timer->base;
@@ -533,8 +386,10 @@ static int gl_get_render_time(struct wlr_render_timer *wlr_timer)
     struct ky_egl_context prev_ctx;
     ky_egl_make_current(renderer->egl, &prev_ctx);
 
-    GLint64 disjoint;
-    glGetInteger64v(GL_GPU_DISJOINT_EXT, &disjoint);
+    GLint disjoint = 0;
+    if (renderer->exts.EXT_disjoint_timer_query) {
+        glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint);
+    }
     if (disjoint) {
         kywc_log(KYWC_ERROR, "a disjoint operation occurred and the render timer is invalid");
         ky_egl_restore_context(&prev_ctx);
@@ -542,7 +397,13 @@ static int gl_get_render_time(struct wlr_render_timer *wlr_timer)
     }
 
     GLint available;
-    glGetQueryObjectivEXT(timer->id, GL_QUERY_RESULT_AVAILABLE_EXT, &available);
+    if (renderer->exts.core_timer_query) {
+        glGetQueryObjectiv(timer->id, GL_QUERY_RESULT_AVAILABLE, &available);
+    } else {
+        GLuint result;
+        glGetQueryObjectuivEXT(timer->id, GL_QUERY_RESULT_AVAILABLE_EXT, &result);
+        available = result;
+    }
     if (!available) {
         kywc_log(KYWC_ERROR, "timer was read too early, gpu isn't done!");
         ky_egl_restore_context(&prev_ctx);
@@ -550,7 +411,11 @@ static int gl_get_render_time(struct wlr_render_timer *wlr_timer)
     }
 
     GLuint64 gl_render_end;
-    glGetQueryObjectui64vEXT(timer->id, GL_QUERY_RESULT_EXT, &gl_render_end);
+    if (renderer->exts.core_timer_query) {
+        glGetQueryObjectui64v(timer->id, GL_QUERY_RESULT, &gl_render_end);
+    } else {
+        glGetQueryObjectui64vEXT(timer->id, GL_QUERY_RESULT_EXT, &gl_render_end);
+    }
 
     int64_t cpu_nsec_total =
         timespec_to_nsec(&timer->cpu_end) - timespec_to_nsec(&timer->cpu_start);
@@ -566,23 +431,20 @@ static void gl_render_timer_destroy(struct wlr_render_timer *wlr_timer)
 
     struct ky_egl_context prev_ctx;
     ky_egl_make_current(renderer->egl, &prev_ctx);
-    glDeleteQueriesEXT(1, &timer->id);
+    if (renderer->exts.core_timer_query) {
+        glDeleteQueries(1, &timer->id);
+    } else {
+        glDeleteQueriesEXT(1, &timer->id);
+    }
     ky_egl_restore_context(&prev_ctx);
     free(timer);
 }
 
 static const struct wlr_renderer_impl renderer_impl = {
     .destroy = gl_destroy,
-    .bind_buffer = gl_bind_buffer,
-    .begin = gl_begin,
-    .end = gl_end,
-    .get_shm_texture_formats = gl_get_shm_texture_formats,
-    .get_dmabuf_texture_formats = gl_get_dmabuf_texture_formats,
+    .get_texture_formats = gl_get_texture_formats,
     .get_render_formats = gl_get_render_formats,
-    .preferred_read_format = gl_preferred_read_format,
-    .read_pixels = gl_read_pixels,
     .get_drm_fd = gl_get_drm_fd,
-    .get_render_buffer_caps = gl_get_render_buffer_caps,
     .texture_from_buffer = ky_opengl_texture_from_buffer,
     .begin_buffer_pass = gl_begin_buffer_pass,
     .render_timer_create = gl_render_timer_create,
@@ -717,7 +579,7 @@ static struct wlr_renderer *ky_opengl_renderer_create(struct ky_egl *egl)
     if (renderer == NULL) {
         return NULL;
     }
-    wlr_renderer_init(&renderer->wlr_renderer, &renderer_impl);
+    wlr_renderer_init(&renderer->wlr_renderer, &renderer_impl, WLR_BUFFER_CAP_DMABUF);
 
     wl_list_init(&renderer->buffers);
     wl_list_init(&renderer->textures);
@@ -781,7 +643,13 @@ static struct wlr_renderer *ky_opengl_renderer_create(struct ky_egl *egl)
         }
     }
 
-    renderer->exts.EXT_disjoint_timer_query = epoxy_has_gl_extension("GL_EXT_disjoint_timer_query");
+    /* CPU timestamp sampling needs GetInteger64v. Disable optional profiling
+     * on ES2 instead of calling an unavailable entry point. */
+    renderer->exts.EXT_disjoint_timer_query =
+        epoxy_has_gl_extension("GL_EXT_disjoint_timer_query") &&
+        epoxy_gl_version() >= (renderer->egl->is_gles ? 30 : 32);
+    renderer->exts.core_timer_query = !renderer->egl->is_gles &&
+        (epoxy_gl_version() >= 33 || epoxy_has_gl_extension("GL_ARB_timer_query"));
 
     renderer->exts.KHR_debug = epoxy_has_gl_extension("GL_KHR_debug");
     if (renderer->exts.KHR_debug) {

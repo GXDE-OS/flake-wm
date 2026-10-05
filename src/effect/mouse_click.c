@@ -29,7 +29,7 @@ struct seat_mouse {
 static void handle_mouse_button(struct wl_listener *listener, void *data)
 {
     struct wlr_pointer_button_event *event = data;
-    if (event->state != WLR_BUTTON_PRESSED) {
+    if (event->state != WL_POINTER_BUTTON_STATE_PRESSED) {
         return;
     }
     struct seat_mouse *seat_mouse = wl_container_of(listener, seat_mouse, mouse_button);

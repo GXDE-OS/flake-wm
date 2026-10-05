@@ -19,7 +19,7 @@ static const char *service_seat_interface = "com.kylin.Wlcom.Seat";
 
 static const char *input_type_map[] = {
     [WLR_INPUT_DEVICE_KEYBOARD] = "keyboard",    [WLR_INPUT_DEVICE_POINTER] = "pointer",
-    [WLR_INPUT_DEVICE_TOUCH] = "touch",          [WLR_INPUT_DEVICE_TABLET_TOOL] = "table-tool",
+    [WLR_INPUT_DEVICE_TOUCH] = "touch",          [WLR_INPUT_DEVICE_TABLET] = "table-tool",
     [WLR_INPUT_DEVICE_TABLET_PAD] = "table-pad", [WLR_INPUT_DEVICE_SWITCH] = "switch",
 };
 

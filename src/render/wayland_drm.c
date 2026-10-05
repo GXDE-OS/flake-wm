@@ -61,11 +61,12 @@ static struct wayland_drm_buffer *drm_buffer_from_buffer(struct wlr_buffer *wlr_
 static void buffer_destroy(struct wlr_buffer *wlr_buffer)
 {
     struct wayland_drm_buffer *buffer = drm_buffer_from_buffer(wlr_buffer);
+    wl_list_remove(&buffer->release.link);
+    wlr_buffer_finish(wlr_buffer);
     if (buffer->resource != NULL) {
         wl_resource_set_user_data(buffer->resource, NULL);
     }
     wlr_dmabuf_attributes_finish(&buffer->dmabuf);
-    wl_list_remove(&buffer->release.link);
     free(buffer);
 }
 
@@ -204,7 +205,7 @@ static void drm_bind(struct wl_client *client, void *data, uint32_t version, uin
     wl_drm_send_capabilities(resource, WL_DRM_CAPABILITY_PRIME);
 
     const struct wlr_drm_format_set *formats =
-        wlr_renderer_get_dmabuf_texture_formats(drm->renderer);
+        wlr_renderer_get_texture_formats(drm->renderer, WLR_BUFFER_CAP_DMABUF);
     for (size_t i = 0; i < formats->len; i++) {
         const struct wlr_drm_format *fmt = &formats->formats[i];
         for (size_t i = 0; i < fmt->len; ++i) {

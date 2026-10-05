@@ -46,6 +46,8 @@ static void handle_display_destroy(struct wl_listener *listener, void *data)
     wl_list_remove(&management->display_destroy.link);
     wl_list_remove(&management->new_output.link);
     wl_list_remove(&management->configured.link);
+    wl_list_remove(&management->output_apply.link);
+    wl_list_remove(&management->power_set_mode.link);
 }
 
 static void manager_update_configuration(void)

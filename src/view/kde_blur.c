@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include <wlr/types/wlr_compositor.h>
-#include <wlr/types/wlr_region.h>
+#include <wlr/types/wlr_compositor.h>
 
 #include "blur-protocol.h"
 #include "scene/surface.h"

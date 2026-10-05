@@ -2,15 +2,67 @@
 //
 // SPDX-License-Identifier: GPL-1.0-or-later
 
+#include <wlr/util/transform.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/util/region.h>
 
 #include "effect/blur.h"
 #include "effect/effect.h"
 #include "render/pass.h"
+#include "render/opengl.h"
 #include "render/profile.h"
 #include "scene/render.h"
 #include "util/region.h"
+#include <wlr/config.h>
+#include <wlr/render/drm_syncobj.h>
+#if WLR_HAS_VULKAN_RENDERER
+#include <wlr/render/vulkan.h>
+#endif
+#include "src/patches/vulkan_sync.h"
+
+void ky_scene_render_target_begin_sync(struct ky_scene_render_target *target)
+{
+#if WLR_HAS_VULKAN_RENDERER
+    struct wlr_renderer *renderer = target->output->output->renderer;
+    if (wlr_renderer_is_vk(renderer) && renderer->features.timeline) {
+        int fd = wlr_renderer_get_drm_fd(renderer);
+        target->release_timeline = fd >= 0 ? wlr_drm_syncobj_timeline_create(fd) : NULL;
+        if (!target->release_timeline) {
+            target->sync_failed = true;
+        }
+    }
+#endif
+}
+
+bool ky_scene_render_target_submit(struct ky_scene_render_target *target, uint32_t quirks)
+{
+    bool submitted = ky_render_pass_submit(target->render_pass, quirks);
+    target->render_pass = NULL;
+    bool completion_failed = false;
+#if WLR_HAS_VULKAN_RENDERER
+    if (target->wait_software_cursor) {
+        VkDevice device = wlr_vk_renderer_get_device(target->output->output->renderer);
+        if (vkDeviceWaitIdle(device) != VK_SUCCESS) {
+            target->sync_failed = true;
+            completion_failed = true;
+        }
+    }
+#endif
+    bool signalled = true;
+    if (target->release_timeline) {
+        /* Preserve wlroots' implicit output/intermediate-buffer synchronization. */
+        signalled = ky_vulkan_signal_completion(target->output->output->renderer,
+            target->release_timeline, target->output->output->event_loop);
+        wlr_drm_syncobj_timeline_unref(target->release_timeline);
+        target->release_timeline = NULL;
+    }
+    if ((!signalled || completion_failed) && target->output->scene->display) {
+        /* Sampled sources remain held by completion waiters. Stop accepting
+         * more work rather than accumulating unsignalled buffers indefinitely. */
+        wl_display_terminate(target->output->scene->display);
+    }
+    return submitted && signalled && !target->sync_failed;
+}
 
 static int scale_length(int length, int offset, float scale)
 {
@@ -82,6 +134,11 @@ void ky_scene_render_target_add_software_cursors(struct ky_scene_render_target *
         if (texture == NULL) {
             continue;
         }
+        if (cursor->wait_timeline && !output->renderer->features.timeline &&
+            !wlr_renderer_is_opengl(output->renderer)) {
+            target->sync_failed = true;
+            continue;
+        }
 
         if (!need_render) {
             pixman_region32_copy(&damage, &target->damage);
@@ -121,8 +178,22 @@ void ky_scene_render_target_add_software_cursors(struct ky_scene_render_target *
             .dst_box = box,
             .clip = &cursor_damage,
             .transform = output->transform,
+            .wait_timeline = cursor->wait_timeline,
+            .wait_point = cursor->wait_point,
         };
         wlr_render_pass_add_texture(target->render_pass, &options);
+        if (cursor->wait_timeline) {
+            if (wlr_render_pass_is_opengl(target->render_pass)) {
+                /* The GL pass owns the current context here. The public output
+                 * cursor has no raw source buffer we could hold asynchronously. */
+                glFinish();
+            }
+#if WLR_HAS_VULKAN_RENDERER
+            else if (wlr_renderer_is_vk(output->renderer)) {
+                target->wait_software_cursor = true;
+            }
+#endif
+        }
         pixman_region32_fini(&cursor_damage);
     }
 

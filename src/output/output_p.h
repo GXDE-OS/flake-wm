@@ -33,6 +33,7 @@ struct output_manager {
     struct config *layout_config;
 
     struct wl_listener new_output;
+    struct wl_listener backend_destroy;
     struct wl_listener configured;
     struct wl_listener server_destroy;
     struct wl_listener server_suspend;
@@ -51,7 +52,7 @@ bool output_read_config(struct output *output, struct kywc_output_state *state);
 void output_write_config(struct output *output);
 
 struct wlr_output_state;
-void output_set_gamma_lut(struct wlr_output *wlr_output, size_t gamma_size,
+bool output_set_gamma_lut(struct wlr_output *wlr_output, size_t gamma_size,
                           struct wlr_output_state *wlr_state, uint32_t color_temp,
                           uint32_t brightness);
 

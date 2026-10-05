@@ -1792,7 +1792,8 @@ bool present_windows_create(struct view_manager *view_manager)
     pv->keyboard_grab = (struct seat_keyboard_grab){ .interface = &keyboard_impl, .data = pv };
     pv->touch_grab = (struct seat_touch_grab){ .interface = &touch_impl, .data = pv };
     pv->server_destroy.notify = handle_server_destroy;
-    server_add_destroy_listener(view_manager->server, &pv->server_destroy);
+    /* Timers and grabs must be released before display/event-loop teardown. */
+    wl_signal_add(&view_manager->server->events.terminate, &pv->server_destroy);
 
     struct key_binding *binding =
         kywc_key_binding_create("Win+a:no", "toggle present windows (all desktops)");

@@ -90,22 +90,18 @@ Libraries or programs required at build time:
 
 ### The Wlroots Issue
 
-The source in [libs/wlroots](./libs/wlroots) is a pristine copy of the official
-wlroots `0.17.4` tag. The compatibility changes inherited from openKylin/GXDE
-are owned by this compositor in [src/patches/wlroots/0.17](./src/patches/wlroots/0.17)
-and tracked in [WLR_UPGRADE.md](./WLR_UPGRADE.md).
+The source in [libs/wlroots](./libs/wlroots) is pristine official wlroots `0.20.2`,
+built statically without overlays or patches. No forked wlroots development
+package is installed. **Migration is still in progress**: successful builds and
+headless tests do not establish full parity with the old fork. See
+[WLR_UPGRADE.md](./WLR_UPGRADE.md) for adaptations and outstanding validation.
 
-[cmake/wlroots.cmake](./cmake/wlroots.cmake) copies the official source into the
-build directory, overlays the compositor-owned compatibility sources, builds it
-with Meson and links it statically. Neither the generated source tree nor
-wlroots itself is installed
-system-wide.
-
-The temporary static build preserves the established hardware and XWayland
-behaviour without installing a forked `wlroots` development package that would
-overwrite `/usr/include/wlr`. Keeping the Vendor tree clean and every backport
-accounted for makes the compatibility overlay removable file by file when
-moving to a newer official library.
+[src/patches/wlroots/0.17](./src/patches/wlroots/0.17) is an inactive historical
+reference. Independent compatibility logic lives in compositor sources.
+[cmake/wlroots.cmake](./cmake/wlroots.cmake) prefers system dependencies and builds
+isolated fallbacks from `libs` only when necessary. Runtime fallbacks are installed
+privately, not over system libraries. Set `WLCOM_ALLOW_VENDORED_WLROOTS_DEPS=OFF`
+to forbid fallbacks.
 
 
 

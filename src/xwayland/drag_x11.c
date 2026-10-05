@@ -66,7 +66,7 @@ static void handle_cursor_button(struct wl_listener *listener, void *data)
     struct xwayland_drag_x11 *drag_x11 = wl_container_of(listener, drag_x11, cursor_button);
     // default left button drag, TODO: other button drag
     struct wlr_pointer_button_event *event = data;
-    if (event->button != BTN_LEFT || event->state != WLR_BUTTON_RELEASED) {
+    if (event->button != BTN_LEFT || event->state != WL_POINTER_BUTTON_STATE_RELEASED) {
         return;
     }
 
@@ -126,7 +126,7 @@ static void data_offer_destroy(struct wlr_data_offer *offer)
         return;
     }
 
-    wl_list_remove(&offer->source_destroy.link);
+    wl_list_remove(&offer->WLR_PRIVATE.source_destroy.link);
     wl_list_remove(&offer->link);
 
     if (offer->type == WLR_DATA_OFFER_DRAG && offer->source) {
@@ -329,7 +329,7 @@ static void data_offer_handle_resource_destroy(struct wl_resource *resource)
 
 static void data_offer_handle_source_destroy(struct wl_listener *listener, void *data)
 {
-    struct wlr_data_offer *offer = wl_container_of(listener, offer, source_destroy);
+    struct wlr_data_offer *offer = wl_container_of(listener, offer, WLR_PRIVATE.source_destroy);
     // Prevent data_offer_destroy from destroying the source again
     offer->source = NULL;
     data_offer_destroy(offer);
@@ -369,8 +369,8 @@ static struct wlr_data_offer *data_offer_create(struct wlr_seat *wlr_seat,
         break;
     }
 
-    offer->source_destroy.notify = data_offer_handle_source_destroy;
-    wl_signal_add(&source->events.destroy, &offer->source_destroy);
+    offer->WLR_PRIVATE.source_destroy.notify = data_offer_handle_source_destroy;
+    wl_signal_add(&source->events.destroy, &offer->WLR_PRIVATE.source_destroy);
 
     wl_data_device_send_data_offer(device_resource, offer->resource);
 
@@ -482,12 +482,12 @@ void xwayland_end_drag_x11(struct xwayland_server *xwayland)
     wl_list_remove(&drag_x11->surface_destroy.link);
     wl_list_remove(&drag_x11->seat_client_destroy.link);
 
-    struct xwayland_data_transfer *transfer;
-    wl_list_for_each(transfer, &drag_x11->transfers, link) {
+    struct xwayland_data_transfer *transfer, *tmp;
+    wl_list_for_each_safe(transfer, tmp, &drag_x11->transfers, link) {
         xwayland_data_transfer_destroy(transfer);
     }
 
-    if (xwayland->wlr_xwayland->xwm) {
+    if (xwayland->xcb_conn && xwayland->wlr_xwayland && xwayland->wlr_xwayland->xwm) {
         xwayland_map_selection_window(xwayland, xwayland->window_catcher, NULL, false);
     }
 

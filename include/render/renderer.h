@@ -12,6 +12,7 @@ struct wlr_allocator;
 struct wlr_linux_dmabuf_v1;
 
 struct wlr_renderer *ky_renderer_autocreate(struct wlr_backend *backend);
+bool ky_renderer_supports_explicit_sync(struct wlr_renderer *renderer);
 
 bool ky_renderer_init_wl_display(struct wlr_renderer *renderer, struct wlr_backend *backend,
                                  struct wl_display *wl_display,

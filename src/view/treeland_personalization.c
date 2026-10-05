@@ -299,7 +299,7 @@ static bool surface_get_geometry(struct wlr_surface *surface, struct wlr_box *ge
     if (xdg_surface) {
         /* wl_surface can include transparent CSD margins. Treeland decorates
          * the shell surface's windowGeometry instead of those margins. */
-        wlr_xdg_surface_get_geometry(xdg_surface, geometry);
+        *geometry = xdg_surface->geometry;
     }
 
     struct wlr_box surface_box = {

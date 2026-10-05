@@ -78,6 +78,18 @@ Thumbs.db
 
 # (Emacs/Flymake) compile_commands.json used for project setup
 /compile_commands.json
+/build-wlr020/
+
+# Debian package build output (keep packaging sources and helper scripts)
+/obj-*/
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.debhelper.log
+/debian/*.substvars
+/debian/gxde-wlcom/
+/debian/gxde-wlcom-client/
+/debian/tmp/
 
 # AI Agents
 .claude/*

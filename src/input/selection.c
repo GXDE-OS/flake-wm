@@ -23,6 +23,7 @@
 #include "server.h"
 #include "util/dbus.h"
 #include "view/view.h"
+#include "src/patches/text_source.h"
 
 struct selection_manager {
     struct wl_listener new_seat;
@@ -253,6 +254,9 @@ static void handle_start_drag(struct wl_listener *listener, void *data)
     struct selection *selection = wl_container_of(listener, selection, start_drag);
     struct wlr_drag *wlr_drag = data;
     struct wlr_drag_icon *drag_icon = wlr_drag->icon;
+
+    /* Before the XWM start-drag listener advertises the MIME targets. */
+    ky_text_source_add_utf8(wlr_drag->source);
 
     selection->drag = wlr_drag;
     selection->drag_icon = drag_icon;

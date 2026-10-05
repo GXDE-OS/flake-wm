@@ -1550,7 +1550,8 @@ bool multitask_view_create(struct view_manager *view_manager)
         (struct seat_keyboard_grab){ .interface = &keyboard_impl, .data = overview };
     overview->touch_grab = (struct seat_touch_grab){ .interface = &touch_impl, .data = overview };
     overview->server_destroy.notify = handle_server_destroy;
-    server_add_destroy_listener(view_manager->server, &overview->server_destroy);
+    /* Timers and grabs must be released before display/event-loop teardown. */
+    wl_signal_add(&view_manager->server->events.terminate, &overview->server_destroy);
 
     const char *shortcuts[] = {
         "Win+Tab:no",

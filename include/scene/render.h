@@ -29,6 +29,13 @@ struct ky_scene_render_target {
     struct wlr_buffer *buffer;
     struct ky_scene_output *output;
     struct wlr_render_pass *render_pass;
+    /* Never present a frame which skipped an unsynchronised client buffer. */
+    bool sync_failed;
+    /* Output cursor API exposes textures, not their source buffers. Drain the
+     * queue before dispatching client commits which could release that source. */
+    bool wait_software_cursor;
+    /* Independent point per pass: nested thumbnails can submit before parents. */
+    struct wlr_drm_syncobj_timeline *release_timeline;
 
     /* current layout damage in logical coord */
     pixman_region32_t damage;
@@ -80,6 +87,9 @@ struct ky_scene_render_texture_options {
  * translate logical coord box to render target buffer coord
  */
 void ky_scene_render_box(struct wlr_box *box, struct ky_scene_render_target *target);
+
+void ky_scene_render_target_begin_sync(struct ky_scene_render_target *target);
+bool ky_scene_render_target_submit(struct ky_scene_render_target *target, uint32_t quirks);
 
 void ky_scene_render_region(pixman_region32_t *region, struct ky_scene_render_target *target);
 

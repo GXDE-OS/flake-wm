@@ -14,6 +14,8 @@ struct decoration_manager {
 
     struct wl_listener xdg_toplevel_decoration;
     struct wl_listener server_decoration;
+    struct wl_listener xdg_manager_destroy;
+    struct wl_listener server_manager_destroy;
     struct wl_listener server_destroy;
 };
 
@@ -29,6 +31,7 @@ struct decoration {
 
     struct wlr_xdg_toplevel_decoration_v1 *xdg_deco;
     struct wl_listener xdg_deco_request_mode;
+    struct wl_listener xdg_deco_surface_commit;
     struct wl_listener xdg_deco_destroy;
 
     struct view *view;
@@ -115,6 +118,7 @@ static void handle_xdg_deco_destroy(struct wl_listener *listener, void *data)
 
     wl_list_remove(&deco->xdg_deco_destroy.link);
     wl_list_remove(&deco->xdg_deco_request_mode.link);
+    wl_list_remove(&deco->xdg_deco_surface_commit.link);
     deco->xdg_deco = NULL;
 
     decoration_consider_destroy(deco);
@@ -124,6 +128,9 @@ static void handle_xdg_deco_request_mode(struct wl_listener *listener, void *dat
 {
     struct decoration *deco = wl_container_of(listener, deco, xdg_deco_request_mode);
     struct wlr_xdg_toplevel_decoration_v1 *wlr_xdg_decoration = data;
+    if (!wlr_xdg_decoration->toplevel->base->initialized) {
+        return; // wlroots 0.18+ forbids configuring before the initial commit.
+    }
     enum wlr_xdg_toplevel_decoration_v1_mode mode = wlr_xdg_decoration->requested_mode;
 
     if (mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE) {
@@ -149,6 +156,14 @@ static void handle_xdg_deco_request_mode(struct wl_listener *listener, void *dat
     decoration_apply(deco);
 }
 
+static void handle_xdg_deco_surface_commit(struct wl_listener *listener, void *data)
+{
+    struct decoration *deco = wl_container_of(listener, deco, xdg_deco_surface_commit);
+    if (deco->xdg_deco->toplevel->base->initial_commit) {
+        handle_xdg_deco_request_mode(&deco->xdg_deco_request_mode, deco->xdg_deco);
+    }
+}
+
 static void xdg_toplevel_decoration(struct wl_listener *listener, void *data)
 {
     struct wlr_xdg_toplevel_decoration_v1 *wlr_xdg_decoration = data;
@@ -163,10 +178,11 @@ static void xdg_toplevel_decoration(struct wl_listener *listener, void *data)
     wl_signal_add(&wlr_xdg_decoration->events.destroy, &deco->xdg_deco_destroy);
     deco->xdg_deco_request_mode.notify = handle_xdg_deco_request_mode;
     wl_signal_add(&wlr_xdg_decoration->events.request_mode, &deco->xdg_deco_request_mode);
-
-    handle_xdg_deco_request_mode(&deco->xdg_deco_request_mode, wlr_xdg_decoration);
+    deco->xdg_deco_surface_commit.notify = handle_xdg_deco_surface_commit;
+    wl_signal_add(&surface->events.commit, &deco->xdg_deco_surface_commit);
 
     deco->xdg_deco = wlr_xdg_decoration;
+    handle_xdg_deco_request_mode(&deco->xdg_deco_request_mode, wlr_xdg_decoration);
 }
 
 static void handle_server_deco_apply_mode(struct wl_listener *listener, void *data)
@@ -224,6 +240,18 @@ static void handle_server_destroy(struct wl_listener *listener, void *data)
     manager = NULL;
 }
 
+static void handle_xdg_manager_destroy(struct wl_listener *listener, void *data)
+{
+    wl_list_remove(&manager->xdg_toplevel_decoration.link);
+    wl_list_remove(&manager->xdg_manager_destroy.link);
+}
+
+static void handle_server_manager_destroy(struct wl_listener *listener, void *data)
+{
+    wl_list_remove(&manager->server_decoration.link);
+    wl_list_remove(&manager->server_manager_destroy.link);
+}
+
 bool decoration_manager_create(struct view_manager *view_manager)
 {
     manager = calloc(1, sizeof(struct decoration_manager));
@@ -237,6 +265,8 @@ bool decoration_manager_create(struct view_manager *view_manager)
         kywc_log(KYWC_ERROR, "unable to create the XDG deco manager");
     } else {
         manager->xdg_toplevel_decoration.notify = xdg_toplevel_decoration;
+        manager->xdg_manager_destroy.notify = handle_xdg_manager_destroy;
+        wl_signal_add(&xdg_decoration_manager->events.destroy, &manager->xdg_manager_destroy);
         wl_signal_add(&xdg_decoration_manager->events.new_toplevel_decoration,
                       &manager->xdg_toplevel_decoration);
     }
@@ -249,6 +279,8 @@ bool decoration_manager_create(struct view_manager *view_manager)
         uint32_t default_mode = WLR_SERVER_DECORATION_MANAGER_MODE_SERVER;
         wlr_server_decoration_manager_set_default_mode(server_decoration_manager, default_mode);
         manager->server_decoration.notify = server_decoration;
+        manager->server_manager_destroy.notify = handle_server_manager_destroy;
+        wl_signal_add(&server_decoration_manager->events.destroy, &manager->server_manager_destroy);
         wl_signal_add(&server_decoration_manager->events.new_decoration,
                       &manager->server_decoration);
     }

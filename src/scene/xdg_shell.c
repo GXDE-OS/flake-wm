@@ -41,7 +41,7 @@ static void scene_xdg_surface_update_position(struct ky_scene_xdg_surface *scene
     struct wlr_xdg_surface *xdg_surface = scene_xdg_surface->xdg_surface;
 
     struct wlr_box geo = { 0 };
-    wlr_xdg_surface_get_geometry(xdg_surface, &geo);
+    geo = xdg_surface->geometry;
     ky_scene_node_set_position(&scene_xdg_surface->surface_tree->node, -geo.x, -geo.y);
 
     if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
@@ -88,7 +88,17 @@ struct ky_scene_tree *ky_scene_xdg_surface_create(struct ky_scene_tree *parent,
     wl_signal_add(&scene_xdg_surface->tree->node.events.destroy, &scene_xdg_surface->tree_destroy);
 
     scene_xdg_surface->xdg_surface_destroy.notify = scene_xdg_surface_handle_xdg_surface_destroy;
-    wl_signal_add(&xdg_surface->events.destroy, &scene_xdg_surface->xdg_surface_destroy);
+    /* Since wlroots c8583889, destroying a role does not destroy its base.
+     * This tree represents that role, not every later role using the base. */
+    if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
+        wl_signal_add(&xdg_surface->toplevel->events.destroy,
+                      &scene_xdg_surface->xdg_surface_destroy);
+    } else if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
+        wl_signal_add(&xdg_surface->popup->events.destroy,
+                      &scene_xdg_surface->xdg_surface_destroy);
+    } else {
+        wl_signal_add(&xdg_surface->events.destroy, &scene_xdg_surface->xdg_surface_destroy);
+    }
 
     scene_xdg_surface->xdg_surface_commit.notify = scene_xdg_surface_handle_xdg_surface_commit;
     wl_signal_add(&xdg_surface->surface->events.commit, &scene_xdg_surface->xdg_surface_commit);

@@ -321,14 +321,20 @@ static struct wlr_buffer *node_thumbnail_render(struct thumbnail_buffer *thumbna
         .options = KY_SCENE_RENDER_DISABLE_VISIBILITY | KY_SCENE_RENDER_DISABLE_BLUR |
                    KY_SCENE_RENDER_DISABLE_EFFECT,
     };
+    ky_scene_render_target_begin_sync(&target);
     pixman_region32_init_rect(&target.damage, 0, 0, bounding_box.width, bounding_box.height);
 
     bool old_state = source_node->enabled;
     source_node->enabled = true;
     source_node->impl.render(source_node, -bounding_box.x, -bounding_box.y, &target);
     source_node->enabled = old_state;
-    wlr_render_pass_submit(target.render_pass);
+    bool submitted = ky_scene_render_target_submit(&target, 0);
     pixman_region32_fini(&target.damage);
+
+    if (!submitted || target.sync_failed) {
+        wlr_buffer_drop(buffer);
+        return NULL;
+    }
 
     return buffer;
 }
@@ -383,6 +389,7 @@ static struct wlr_buffer *view_thumbnail_render(struct thumbnail_buffer *thumbna
         target.options |= KY_SCENE_RENDER_ENABLE_SECURITY;
     }
 
+    ky_scene_render_target_begin_sync(&target);
     pixman_region32_init_rect(&target.damage, 0, 0, bounding_box.width, bounding_box.height);
 
     struct ky_scene_node *source_node = view_thumbnail->source_node;
@@ -390,8 +397,13 @@ static struct wlr_buffer *view_thumbnail_render(struct thumbnail_buffer *thumbna
     source_node->enabled = true;
     source_node->impl.render(source_node, -bounding_box.x, -bounding_box.y, &target);
     source_node->enabled = old_state;
-    wlr_render_pass_submit(target.render_pass);
+    bool submitted = ky_scene_render_target_submit(&target, 0);
     pixman_region32_fini(&target.damage);
+
+    if (!submitted || target.sync_failed) {
+        wlr_buffer_drop(buffer);
+        return NULL;
+    }
 
     return buffer;
 }
@@ -629,7 +641,10 @@ static struct wlr_buffer *workspace_thumbnail_render(struct thumbnail_buffer *th
         wlr_render_pass_add_texture(render_pass, &options);
         wlr_texture_destroy(tex);
     }
-    wlr_render_pass_submit(render_pass);
+    if (!wlr_render_pass_submit(render_pass)) {
+        wlr_buffer_drop(buffer);
+        return NULL;
+    }
 
     return buffer;
 }
@@ -953,6 +968,7 @@ static struct wlr_buffer *output_thumbnail_render(struct thumbnail_buffer *thumb
         .render_pass = render_pass,
         .options = KY_SCENE_RENDER_DISABLE_VISIBILITY,
     };
+    ky_scene_render_target_begin_sync(&target);
     pixman_region32_init_rect(&target.damage, target.logical.x, target.logical.y,
                               target.logical.width, target.logical.height);
 
@@ -963,8 +979,13 @@ static struct wlr_buffer *output_thumbnail_render(struct thumbnail_buffer *thumb
 
     struct ky_scene_node *root = &src_output->scene->tree.node;
     root->impl.render(root, root->x, root->y, &target);
-    wlr_render_pass_submit(target.render_pass);
+    bool submitted = ky_scene_render_target_submit(&target, 0);
     pixman_region32_fini(&target.damage);
+
+    if (!submitted || target.sync_failed) {
+        wlr_buffer_drop(buffer);
+        return NULL;
+    }
 
     return buffer;
 }

@@ -163,8 +163,73 @@ static void gl_texture_unref(struct wlr_texture *wlr_texture)
     }
 }
 
+/* Readback moved from renderers to textures in wlroots 0.18. Keep the FBO
+ * scoped to this operation: readback may run between compositor render passes. */
+static bool gl_texture_read_pixels(struct wlr_texture *wlr_texture,
+                                  const struct wlr_texture_read_pixels_options *options)
+{
+    struct ky_opengl_texture *texture = ky_opengl_texture_from_wlr_texture(wlr_texture);
+    const struct ky_pixel_format *fmt = ky_pixel_format_from_drm(options->format);
+    if (texture->target != GL_TEXTURE_2D || !fmt ||
+        !ky_opengl_pixel_format_is_supported(texture->renderer, fmt) ||
+        ky_pixel_format_pixels_per_block(fmt) != 1 ||
+        (fmt->gl_format == GL_BGRA_EXT && !texture->renderer->exts.EXT_read_format_bgra)) {
+        return false;
+    }
+
+    struct wlr_box src;
+    wlr_texture_read_pixels_options_get_src_box(options, wlr_texture, &src);
+    if (!options->data || src.x < 0 || src.y < 0 || src.width <= 0 || src.height <= 0 ||
+        (uint64_t)src.x + src.width > wlr_texture->width ||
+        (uint64_t)src.y + src.height > wlr_texture->height ||
+        (uint64_t)options->dst_x + src.width > options->stride / fmt->bytes_per_block ||
+        (uint64_t)options->dst_y + src.height > SIZE_MAX / (options->stride ? options->stride : 1)) {
+        return false;
+    }
+    struct ky_egl_context prev_ctx;
+    if (!ky_egl_make_current(texture->renderer->egl, &prev_ctx)) {
+        return false;
+    }
+    GLint previous_fbo, alignment;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
+    GLuint fbo;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture->target, texture->tex, 0);
+    bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    if (ok) {
+        glFinish();
+        glGetError();
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        unsigned char *data = (unsigned char *)options->data + (size_t)options->dst_y * options->stride +
+                              (size_t)options->dst_x * fmt->bytes_per_block;
+        for (int y = 0; y < src.height; y++) {
+            glReadPixels(src.x, src.y + y, src.width, 1, fmt->gl_format, fmt->gl_type,
+                         data + y * options->stride);
+        }
+        ok = glGetError() == GL_NO_ERROR;
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, alignment);
+    glBindFramebuffer(GL_FRAMEBUFFER, previous_fbo);
+    glDeleteFramebuffers(1, &fbo);
+    ky_egl_restore_context(&prev_ctx);
+    return ok;
+}
+
+static uint32_t gl_texture_preferred_read_format(struct wlr_texture *wlr_texture)
+{
+    struct ky_opengl_texture *texture = ky_opengl_texture_from_wlr_texture(wlr_texture);
+    if (texture->target != GL_TEXTURE_2D) {
+        return DRM_FORMAT_INVALID;
+    }
+    return texture->renderer->exts.EXT_read_format_bgra ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_ABGR8888;
+}
+
 static const struct wlr_texture_impl texture_impl = {
     .update_from_buffer = gl_texture_update_from_buffer,
+    .read_pixels = gl_texture_read_pixels,
+    .preferred_read_format = gl_texture_preferred_read_format,
     .destroy = gl_texture_unref,
 };
 

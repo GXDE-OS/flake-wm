@@ -56,6 +56,7 @@ struct input_method_relay {
     struct wl_listener input_method_commit;
     struct wl_listener input_method_grab_keyboard;
     struct wl_listener input_method_keyboard_grab_destroy;
+    struct wlr_input_method_keyboard_grab_v2 *keyboard_grab;
     struct wl_listener input_method_destroy;
 
     struct wl_list input_popups;
@@ -495,8 +496,8 @@ static void handle_input_method_commit(struct wl_listener *listener, void *data)
         return;
     }
 
-    struct wlr_input_method_v2 *context = data;
-    assert(context == relay->wlr_input_method);
+    struct wlr_input_method_v2 *context = relay->wlr_input_method;
+    assert(context);
 
     if (text_input->text_input_v3) {
         if (context->current.preedit.text) {
@@ -545,8 +546,10 @@ static void handle_input_method_keyboard_grab_destroy(struct wl_listener *listen
 {
     struct input_method_relay *relay =
         wl_container_of(listener, relay, input_method_keyboard_grab_destroy);
-    struct wlr_input_method_keyboard_grab_v2 *keyboard_grab = data;
+    struct wlr_input_method_keyboard_grab_v2 *keyboard_grab = relay->keyboard_grab;
     wl_list_remove(&relay->input_method_keyboard_grab_destroy.link);
+    wl_list_init(&relay->input_method_keyboard_grab_destroy.link);
+    relay->keyboard_grab = NULL;
 
     if (keyboard_grab->keyboard) {
         // send modifier state to original client
@@ -559,6 +562,8 @@ static void handle_input_method_grab_keyboard(struct wl_listener *listener, void
 {
     struct input_method_relay *relay = wl_container_of(listener, relay, input_method_grab_keyboard);
     struct wlr_input_method_keyboard_grab_v2 *keyboard_grab = data;
+    assert(!relay->keyboard_grab);
+    relay->keyboard_grab = keyboard_grab;
 
     // send modifier state to grab
     struct wlr_keyboard *active_keyboard = wlr_seat_get_keyboard(relay->seat->wlr_seat);
@@ -571,8 +576,13 @@ static void handle_input_method_grab_keyboard(struct wl_listener *listener, void
 static void handle_input_method_destroy(struct wl_listener *listener, void *data)
 {
     struct input_method_relay *relay = wl_container_of(listener, relay, input_method_destroy);
-    struct wlr_input_method_v2 *context = data;
-    assert(context == relay->wlr_input_method);
+    /* Normally wlroots destroys the grab first. Seat teardown can detach the
+     * relay first instead; never leave a grab listener in a freed relay. */
+    if (relay->keyboard_grab) {
+        wl_list_remove(&relay->input_method_keyboard_grab_destroy.link);
+        wl_list_init(&relay->input_method_keyboard_grab_destroy.link);
+        relay->keyboard_grab = NULL;
+    }
     relay->wlr_input_method = NULL;
 
     wl_list_remove(&relay->input_method_commit.link);
@@ -812,7 +822,7 @@ static void handle_new_seat(struct wl_listener *listener, void *data)
     wl_signal_add(&seat->events.destroy, &relay->seat_destroy);
 
     relay->new_input_method.notify = handle_new_input_method;
-    wl_signal_add(&manager->input_method->events.input_method, &relay->new_input_method);
+    wl_signal_add(&manager->input_method->events.new_input_method, &relay->new_input_method);
     relay->input_method_v2_destroy.notify = handle_input_method_v2_destroy;
     wl_signal_add(&manager->input_method->events.destroy, &relay->input_method_v2_destroy);
 
@@ -822,7 +832,7 @@ static void handle_new_seat(struct wl_listener *listener, void *data)
     wl_signal_add(&manager->text_input_v2->events.destroy, &relay->text_input_v2_destroy);
 
     relay->new_text_input_v3.notify = handle_new_text_input_v3;
-    wl_signal_add(&manager->text_input_v3->events.text_input, &relay->new_text_input_v3);
+    wl_signal_add(&manager->text_input_v3->events.new_text_input, &relay->new_text_input_v3);
     relay->text_input_v3_destroy.notify = handle_text_input_v3_destroy;
     wl_signal_add(&manager->text_input_v3->events.destroy, &relay->text_input_v3_destroy);
 }

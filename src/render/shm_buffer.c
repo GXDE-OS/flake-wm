@@ -71,6 +71,7 @@ static struct shm_buffer *shm_buffer_from_buffer(struct wlr_buffer *wlr_buffer)
 
 static void shm_buffer_destroy(struct wlr_buffer *wlr_buffer)
 {
+    wlr_buffer_finish(wlr_buffer);
     struct shm_buffer *buffer = shm_buffer_from_buffer(wlr_buffer);
     munmap(buffer->data, buffer->size);
     close(buffer->shm.fd);

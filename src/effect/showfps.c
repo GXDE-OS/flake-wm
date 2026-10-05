@@ -82,7 +82,7 @@ static void output_handle_present(struct wl_listener *listener, void *data)
 {
     struct frame_output *output = wl_container_of(listener, output, present);
     struct wlr_output_event_present *event = data;
-    int time = event->when->tv_sec * 1000 + event->when->tv_nsec / 1000000;
+    int time = event->when.tv_sec * 1000 + event->when.tv_nsec / 1000000;
 
     output->frames[output->frames_pos] = time;
     if (++output->frames_pos == MAX_FRAMES) {

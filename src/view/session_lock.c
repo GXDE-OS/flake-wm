@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <stdlib.h>
+#include <wlr/types/wlr_output.h>
 
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_session_lock_v1.h>

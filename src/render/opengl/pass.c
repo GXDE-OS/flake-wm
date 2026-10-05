@@ -7,8 +7,10 @@
 #include <pixman.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
+#include <wlr/render/drm_syncobj.h>
 
-#include <wlr/types/wlr_matrix.h>
+#include "src/patches/matrix.h"
 
 #include <kywc/boxes.h>
 #include <kywc/log.h>
@@ -48,12 +50,18 @@ static bool _render_pass_submit(struct wlr_render_pass *wlr_pass, uint32_t quirk
 
     if (timer) {
         // clear disjoint flag
-        GLint64 disjoint;
-        glGetInteger64v(GL_GPU_DISJOINT_EXT, &disjoint);
-        // set up the query
-        glQueryCounterEXT(timer->id, GL_TIMESTAMP_EXT);
-        // get end-of-CPU-work time in GL time domain
-        glGetInteger64v(GL_TIMESTAMP_EXT, &timer->gl_cpu_end);
+        if (renderer->exts.EXT_disjoint_timer_query) {
+            GLint disjoint;
+            glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint);
+        }
+        // Query entry points differ between desktop core/ARB and GLES EXT.
+        if (renderer->exts.core_timer_query) {
+            glQueryCounter(timer->id, GL_TIMESTAMP);
+            glGetInteger64v(GL_TIMESTAMP, &timer->gl_cpu_end);
+        } else {
+            glQueryCounterEXT(timer->id, GL_TIMESTAMP_EXT);
+            glGetInteger64v(GL_TIMESTAMP_EXT, &timer->gl_cpu_end);
+        }
         // get end-of-CPU-work time in CPU time domain
         clock_gettime(CLOCK_MONOTONIC, &timer->cpu_end);
     }
@@ -70,15 +78,59 @@ static bool _render_pass_submit(struct wlr_render_pass *wlr_pass, uint32_t quirk
     ky_egl_restore_context(&pass->prev_ctx);
 
     wlr_buffer_unlock(pass->buffer->buffer);
+    bool ok = !pass->failed;
     free(pass);
 
     KY_PROFILE_ZONE_END(zone);
-    return true;
+    return ok;
 }
 
 static bool render_pass_submit(struct wlr_render_pass *wlr_pass)
 {
     return _render_pass_submit(wlr_pass, 0);
+}
+
+struct wlr_drm_syncobj_timeline *
+ky_opengl_render_pass_signal_sample(struct wlr_render_pass *wlr_pass)
+{
+    struct ky_opengl_render_pass *pass = ky_opengl_render_pass_from_wlr_render_pass(wlr_pass);
+    struct ky_egl *egl = pass->renderer->egl;
+    struct wlr_drm_syncobj_timeline *timeline = NULL;
+    int fd = wlr_renderer_get_drm_fd(&pass->renderer->wlr_renderer);
+    if (fd < 0 || !epoxy_has_egl_extension(egl->display, "EGL_ANDROID_native_fence_sync")) {
+        goto finish;
+    }
+    timeline = wlr_drm_syncobj_timeline_create(fd);
+    if (!timeline) {
+        goto finish;
+    }
+    EGLSyncKHR sync = eglCreateSyncKHR(egl->display, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    if (sync == EGL_NO_SYNC_KHR) {
+        goto finish;
+    }
+    /* Materialize the fence before exporting it. This does not wait on CPU. */
+    glFlush();
+    int fence_fd = eglDupNativeFenceFDANDROID(egl->display, sync);
+    eglDestroySyncKHR(egl->display, sync);
+    if (fence_fd < 0) {
+        goto finish;
+    }
+    bool ok = wlr_drm_syncobj_timeline_import_sync_file(timeline, 1, fence_fd);
+    close(fence_fd);
+    if (ok) {
+        return timeline;
+    }
+
+finish:
+    wlr_drm_syncobj_timeline_unref(timeline);
+    /* Never turn an export/allocation failure into an early client release. */
+    glFinish();
+    static bool warned;
+    if (!warned) {
+        kywc_log(KYWC_WARN, "explicit sync: release fence unavailable; using glFinish");
+        warned = true;
+    }
+    return NULL;
 }
 
 static void render(struct wlr_renderer *renderer, const struct wlr_box *box, const pixman_region32_t *clip, GLint attrib)
@@ -187,6 +239,19 @@ void ky_opengl_render_pass_add_texture(struct wlr_render_pass *wlr_pass,
     struct ky_opengl_texture *texture = ky_opengl_texture_from_wlr_texture(wlr_options->texture);
     struct ky_opengl_renderer *renderer = pass->buffer->renderer;
     struct wlr_buffer *target_buffer = pass->buffer->buffer;
+    if (pass->failed) {
+        return;
+    }
+    if (wlr_options->wait_timeline) {
+        int fd = wlr_drm_syncobj_timeline_export_sync_file(wlr_options->wait_timeline,
+                                                         wlr_options->wait_point);
+        /* ky_egl_wait_acquire_fd takes ownership of the exported fd. */
+        if (fd < 0 || !ky_egl_wait_acquire_fd(renderer->egl, fd)) {
+            kywc_log(KYWC_ERROR, "Cannot wait for texture acquire point");
+            pass->failed = true;
+            return;
+        }
+    }
     bool has_radius = ky_render_pass_options_has_radius(&options->radius);
     bool has_border = options->border.width > 0.0f && options->border.color.a > 0.0f;
 

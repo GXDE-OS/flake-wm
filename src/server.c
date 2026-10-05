@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include <pango/pangocairo.h>
+#include <fontconfig/fontconfig.h>
 #include <systemd/sd-bus.h>
 #include <systemd/sd-login.h>
 
@@ -116,6 +117,35 @@ static void handle_session_active(struct wl_listener *listener, void *data)
     wl_signal_emit_mutable(&server->events.active, NULL);
 }
 
+static void handle_session_destroy(struct wl_listener *listener, void *data)
+{
+    struct server *server = wl_container_of(listener, server, session_destroy);
+    wl_list_remove(&server->session_active.link);
+    wl_list_remove(&server->session_destroy.link);
+    server->session = NULL;
+    if (!server->terminate) {
+        wl_display_terminate(server->display);
+    }
+}
+
+static void handle_renderer_lost(struct wl_listener *listener, void *data)
+{
+    struct server *server = wl_container_of(listener, server, renderer_lost);
+    kywc_log(KYWC_ERROR, "Renderer lost; terminating the compositor safely");
+    wl_display_terminate(server->display);
+}
+
+static void handle_renderer_destroy(struct wl_listener *listener, void *data)
+{
+    struct server *server = wl_container_of(listener, server, renderer_destroy);
+    wl_list_remove(&server->renderer_lost.link);
+    wl_list_remove(&server->renderer_destroy.link);
+    server->renderer = NULL;
+    if (!server->terminate) {
+        wl_display_terminate(server->display);
+    }
+}
+
 static bool wlroots_server_init(struct server *server)
 {
     /* verbosity is not used when we replaced log_callback */
@@ -131,13 +161,15 @@ static bool wlroots_server_init(struct server *server)
         server->active = server->session->active;
         server->session_active.notify = handle_session_active;
         wl_signal_add(&server->session->events.active, &server->session_active);
+        server->session_destroy.notify = handle_session_destroy;
+        wl_signal_add(&server->session->events.destroy, &server->session_destroy);
         server_get_active_vt(server);
     } else {
         // mark active if in nested backend
         server->active = true;
     }
 
-    server->headless_backend = wlr_headless_backend_create(server->display);
+    server->headless_backend = wlr_headless_backend_create(server->event_loop);
     if (!server->headless_backend) {
         kywc_log(KYWC_FATAL, "unable to create headless backend");
         return false;
@@ -150,6 +182,11 @@ static bool wlroots_server_init(struct server *server)
         return false;
     }
 
+    server->renderer_lost.notify = handle_renderer_lost;
+    wl_signal_add(&server->renderer->events.lost, &server->renderer_lost);
+    server->renderer_destroy.notify = handle_renderer_destroy;
+    wl_signal_add(&server->renderer->events.destroy, &server->renderer_destroy);
+
     server->allocator = wlr_allocator_autocreate(server->backend, server->renderer);
     if (!server->allocator) {
         kywc_log(KYWC_FATAL, "unable to create allocator");
@@ -160,8 +197,11 @@ static bool wlroots_server_init(struct server *server)
     server->compositor = wlr_compositor_create(server->display, 6, server->renderer);
     wlr_subcompositor_create(server->display);
 
-    ky_renderer_init_wl_display(server->renderer, server->backend, server->display,
-                                &server->linux_dmabuf_v1);
+    if (!ky_renderer_init_wl_display(server->renderer, server->backend, server->display,
+                                     &server->linux_dmabuf_v1)) {
+        kywc_log(KYWC_FATAL, "unable to initialize renderer buffer protocols");
+        return false;
+    }
 
     /**
      * Explicit sync (backported from wp_linux_drm_syncobj_v1) ->
@@ -174,11 +214,12 @@ static bool wlroots_server_init(struct server *server)
      * black -- the flicker seen while scrolling in Chromium or animating in
      * Flutter apps.
      *
-     * Both halves of the fence handshake are in place now:
+     * Migration status (not yet a fully validated handshake):
      *   - acquire: waited GPU-side via eglWaitSync in the render pass, see
      *     scene_buffer_wait_acquire() in scene/buffer.c.
-     *   - release: deferred to wlr_buffer.events.release, see
-     *     scene_surface_signal_release() in scene/surface.c.
+     *   - release: OpenGL sample fences, Vulkan queue completion and KMS release
+     *     points are wired; client/hardware validation remains incomplete.
+     *     Buffer lifetime alone is not a GPU completion guarantee. See WLR_UPGRADE.md.
      *
      * So this is ENABLED BY DEFAULT. Set KYWC_SYNCOBJ=0 to fall back to
      * implicit sync when debugging.
@@ -191,17 +232,24 @@ static bool wlroots_server_init(struct server *server)
      * 场景下并不可靠，于是我们会采样到客户端尚未渲染完成的buffer，它们看起来就是
      * 透明或全黑 —— 也就是在Chromium里滚动、或Flutter程序播放动画时看到的闪烁。
      *
-     * 目前fence握手的两侧都已就位：
+     * 迁移仍在进行，尚未完整验证：
      *   - acquire：在渲染通道中通过eglWaitSync于GPU端等待，参见
      *     scene/buffer.c中的scene_buffer_wait_acquire()。
-     *   - release：推迟至wlr_buffer.events.release，参见
-     *     scene/surface.c中的scene_surface_signal_release()。
+     *   - release：已接 OpenGL 采样 fence、Vulkan 队列完成点和 KMS 完成点；
+     *     客户端/硬件验证尚未完成。buffer 生命周期不能代替 GPU 完成保证，见 WLR_UPGRADE.md。
      *
      * 因此默认启用。调试时可设置KYWC_SYNCOBJ=0以退回隐式同步。
      */
     const char *syncobj_env = getenv("KYWC_SYNCOBJ");
-    if (syncobj_env == NULL || strcmp(syncobj_env, "0") != 0) {
+    const char *no_explicit_sync = getenv("WLR_RENDER_NO_EXPLICIT_SYNC");
+    if ((!syncobj_env || strcmp(syncobj_env, "0") != 0) &&
+        (!no_explicit_sync || strcmp(no_explicit_sync, "1") != 0) &&
+        server->backend->features.timeline &&
+        ky_renderer_supports_explicit_sync(server->renderer)) {
         int syncobj_drm_fd = wlr_backend_get_drm_fd(server->backend);
+        if (syncobj_drm_fd < 0) {
+            syncobj_drm_fd = wlr_renderer_get_drm_fd(server->renderer);
+        }
         if (syncobj_drm_fd >= 0) {
             if (wlr_linux_drm_syncobj_manager_v1_create(server->display, 1, syncobj_drm_fd)) {
                 kywc_log(KYWC_INFO, "Enabled linux-drm-syncobj-v1 (explicit sync)");
@@ -209,8 +257,12 @@ static bool wlroots_server_init(struct server *server)
         }
     }
 
-    server->layout = wlr_output_layout_create();
+    server->layout = wlr_output_layout_create(server->display);
     server->scene = ky_scene_create();
+    if (!server->scene) {
+        return false;
+    }
+    server->scene->display = server->display;
     server->scene_layout = ky_scene_attach_output_layout(server->scene, server->layout);
     if (server->linux_dmabuf_v1) {
         ky_scene_set_linux_dmabuf_v1(server->scene, server->linux_dmabuf_v1);
@@ -223,7 +275,7 @@ static bool wlroots_server_init(struct server *server)
     }
 
     struct wlr_presentation *presentation =
-        wlr_presentation_create(server->display, server->backend);
+        wlr_presentation_create(server->display, server->backend, 2);
     if (presentation) {
         ky_scene_set_presentation(server->scene, presentation);
     }
@@ -348,6 +400,13 @@ void server_finish(struct server *server)
     /* make sure all xwayland-shells are destroyed */
     xwayland_server_destroy();
 
+    /* Output removal can schedule delayed global destruction. Do it before
+     * display.destroy is emitted, not from event_loop.destroy after that signal,
+     * otherwise these newly registered cleanup listeners can never run. */
+    wlr_backend_destroy(server->backend);
+    server->backend = NULL;
+    server->headless_backend = NULL;
+
     wl_display_destroy(server->display);
 
     /* call all server_destroy listeners */
@@ -357,11 +416,12 @@ void server_finish(struct server *server)
     if (server->scene) {
         ky_scene_node_destroy(&server->scene->tree.node);
     }
-    wlr_output_layout_destroy(server->layout);
+    /* The display owns the output layout since wlroots 0.18. */
     wlr_allocator_destroy(server->allocator);
     wlr_renderer_destroy(server->renderer);
     /* free memory in fontconfig */
     pango_cairo_font_map_set_default(NULL);
+    FcFini();
 
     kywc_log(KYWC_SILENT, "gxde-wlcom finished...\n");
 }

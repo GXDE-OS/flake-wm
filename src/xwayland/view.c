@@ -26,7 +26,6 @@ struct xwayland_view {
     struct wlr_xwayland_surface *wlr_xwayland_surface;
     struct wl_listener surface_tree_destroy;
 
-    struct wl_listener precommit;
     struct wl_listener commit;
 
     struct wl_listener associate;
@@ -36,6 +35,8 @@ struct xwayland_view {
     struct wl_listener destroy;
 
     struct wl_listener request_configure;
+    struct wl_listener request_close;
+    struct wl_listener set_size_hints;
     struct wl_listener request_move;
     struct wl_listener request_resize;
     struct wl_listener request_minimize;
@@ -180,7 +181,6 @@ static void xwayland_restack_view(struct xwayland_view *xwayland_view)
         return;
     } else if (xwayland_view->view.base.kept_above) {
         wlr_xwayland_surface_restack(surface, NULL, XCB_STACK_MODE_ABOVE);
-        xwayland_restack_unmanaged(xwayland_view->xwayland);
         return;
     }
 
@@ -189,12 +189,11 @@ static void xwayland_restack_view(struct xwayland_view *xwayland_view)
     struct xwayland_view *view;
     wl_list_for_each(view, &xwayland_view->xwayland->surfaces, link) {
         surface = view->wlr_xwayland_surface;
-        if (xwayland_view->view.base.kept_above) {
+        if (view->view.base.kept_above) {
             wlr_xwayland_surface_restack(surface, NULL, XCB_STACK_MODE_ABOVE);
         }
     }
 
-    xwayland_restack_unmanaged(xwayland_view->xwayland);
 }
 
 static void xwayland_view_configure(struct view *view)
@@ -243,7 +242,8 @@ static void xwayland_view_configure(struct view *view)
     }
 
     if (view->pending.action & VIEW_ACTION_MAXIMIZE) {
-        wlr_xwayland_surface_set_maximized(wlr_xwayland_surface, kywc_view->maximized);
+        wlr_xwayland_surface_set_maximized(wlr_xwayland_surface, kywc_view->maximized,
+                                           kywc_view->maximized);
     }
 
     struct kywc_box *current = &view->base.geometry;
@@ -325,6 +325,30 @@ static void xwayland_view_update_geometry(struct xwayland_view *xwayland_view)
                          size_hints->min_height < 0 ? 0 : xwayland_unscale(size_hints->min_height),
                          size_hints->max_width < 0 ? 0 : xwayland_unscale(size_hints->max_width),
                          size_hints->max_height < 0 ? 0 : xwayland_unscale(size_hints->max_height));
+    }
+}
+
+static void xwayland_view_handle_size_hints(struct wl_listener *listener, void *data)
+{
+    struct xwayland_view *view = wl_container_of(listener, view, set_size_hints);
+    xwayland_view_update_geometry(view);
+}
+
+static void xwayland_view_handle_close(struct wl_listener *listener, void *data)
+{
+    struct xwayland_view *view = wl_container_of(listener, view, request_close);
+    kywc_view_close(&view->view.base);
+}
+
+void xwayland_view_reset_size_hints(struct xwayland_server *server, xcb_window_t window)
+{
+    struct xwayland_view *view;
+    wl_list_for_each(view, &server->surfaces, link) {
+        if (view->wlr_xwayland_surface->window_id == window && view->view.base.mapped) {
+            struct kywc_box *box = &view->view.base.geometry;
+            view_update_size(&view->view, box->width, box->height, 0, 0, 0, 0);
+            break;
+        }
     }
 }
 
@@ -419,6 +443,9 @@ static void xwayland_view_handle_request_activate(struct wl_listener *listener, 
 {
     struct xwayland_view *xwayland_view =
         wl_container_of(listener, xwayland_view, request_activate);
+    kywc_log(KYWC_DEBUG, "X11 activate request %#x mapped=%d activated=%d",
+             xwayland_view->wlr_xwayland_surface->window_id,
+             xwayland_view->view.base.mapped, xwayland_view->view.base.activated);
 
     /* notification bubbles (dde-osd) ask for activation by themselves, which
      * takes the keyboard focus away from the window being typed in. Windows
@@ -527,7 +554,7 @@ static void xwayland_view_handle_set_hints(struct wl_listener *listener, void *d
 {
     struct xwayland_view *xwayland_view = wl_container_of(listener, xwayland_view, set_hints);
     enum wlr_xwayland_icccm_input_model input_model =
-        wlr_xwayland_icccm_input_model(xwayland_view->wlr_xwayland_surface);
+        wlr_xwayland_surface_icccm_input_model(xwayland_view->wlr_xwayland_surface);
 
     if (input_model == WLR_ICCCM_INPUT_MODEL_NONE) {
         xwayland_view->view.base.focusable = false;
@@ -821,6 +848,7 @@ static void xwayland_view_fixup_parent(struct xwayland_view *xwayland_view)
 static void xwayland_view_handle_map(struct wl_listener *listener, void *data)
 {
     struct xwayland_view *xwayland_view = wl_container_of(listener, xwayland_view, map);
+    xwayland_schedule_xwm_wake(xwayland_view->xwayland);
     struct wlr_xwayland_surface *wlr_xwayland_surface = xwayland_view->wlr_xwayland_surface;
 
     xwayland_view_update_geometry(xwayland_view);
@@ -847,6 +875,10 @@ static void xwayland_view_handle_map(struct wl_listener *listener, void *data)
                   &xwayland_view->set_strut_partial);
 
     xwayland_view->request_move.notify = xwayland_view_handle_request_move;
+    xwayland_view->request_close.notify = xwayland_view_handle_close;
+    wl_signal_add(&wlr_xwayland_surface->events.request_close, &xwayland_view->request_close);
+    xwayland_view->set_size_hints.notify = xwayland_view_handle_size_hints;
+    wl_signal_add(&wlr_xwayland_surface->events.set_size_hints, &xwayland_view->set_size_hints);
     wl_signal_add(&wlr_xwayland_surface->events.request_move, &xwayland_view->request_move);
     xwayland_view->request_resize.notify = xwayland_view_handle_request_resize;
     wl_signal_add(&wlr_xwayland_surface->events.request_resize, &xwayland_view->request_resize);
@@ -919,12 +951,15 @@ static void xwayland_view_handle_map(struct wl_listener *listener, void *data)
 static void xwayland_view_handle_unmap(struct wl_listener *listener, void *data)
 {
     struct xwayland_view *xwayland_view = wl_container_of(listener, xwayland_view, unmap);
+    xwayland_schedule_xwm_wake(xwayland_view->xwayland);
 
     wl_list_remove(&xwayland_view->commit.link);
     wl_list_remove(&xwayland_view->set_strut_partial.link);
     wl_list_remove(&xwayland_view->request_move.link);
     wl_list_remove(&xwayland_view->request_resize.link);
     wl_list_remove(&xwayland_view->request_maximize.link);
+    wl_list_remove(&xwayland_view->request_close.link);
+    wl_list_remove(&xwayland_view->set_size_hints.link);
     wl_list_remove(&xwayland_view->request_fullscreen.link);
     wl_list_remove(&xwayland_view->request_activate.link);
     wl_list_remove(&xwayland_view->request_sticky.link);
@@ -956,33 +991,6 @@ static void xwayland_view_handle_surface_tree_destroy(struct wl_listener *listen
     xwayland_view->view.surface_tree = NULL;
 }
 
-static void xwayland_view_handle_precommit(struct wl_listener *listener, void *data)
-{
-    struct xwayland_view *xwayland_view = wl_container_of(listener, xwayland_view, precommit);
-    if (xwayland_view->xwayland->scale == 1.0) {
-        return;
-    }
-
-    struct wlr_surface_state *pending = data;
-    pending->width = xwayland_unscale(pending->width);
-    pending->height = xwayland_unscale(pending->height);
-
-    float scale = 1.0 / xwayland_view->xwayland->scale;
-    if (pending->committed & WLR_SURFACE_STATE_SURFACE_DAMAGE) {
-        wlr_region_scale(&pending->surface_damage, &pending->surface_damage, scale);
-    }
-    if (pending->committed & WLR_SURFACE_STATE_OPAQUE_REGION) {
-        wlr_region_scale(&pending->opaque, &pending->opaque, scale);
-    }
-    if (pending->committed & WLR_SURFACE_STATE_INPUT_REGION) {
-        wlr_region_scale(&pending->input, &pending->input, scale);
-    }
-    if (pending->committed & WLR_SURFACE_STATE_OFFSET) {
-        pending->dx = xwayland_unscale(pending->dx);
-        pending->dy = xwayland_unscale(pending->dy);
-    }
-}
-
 static void xwayland_view_handle_associate(struct wl_listener *listener, void *data)
 {
     struct xwayland_view *xwayland_view = wl_container_of(listener, xwayland_view, associate);
@@ -1009,14 +1017,26 @@ static void xwayland_view_handle_associate(struct wl_listener *listener, void *d
     xwayland_read_wm_icon(wlr_xwayland_surface->window_id);
     xwayland_read_wm_window_opacity(wlr_xwayland_surface->window_id);
     xwayland_read_application_menu(wlr_xwayland_surface->window_id);
+    xwayland_schedule_xwm_wake(xwayland_view->xwayland);
 
-    xwayland_view->precommit.notify = xwayland_view_handle_precommit;
-    wl_signal_add(&wlr_xwayland_surface->surface->events.precommit, &xwayland_view->precommit);
     xwayland_view->map.notify = xwayland_view_handle_map;
     wl_signal_add(&wlr_xwayland_surface->surface->events.map, &xwayland_view->map);
     xwayland_view->surface_tree_destroy.notify = xwayland_view_handle_surface_tree_destroy;
     wl_signal_add(&xwayland_view->view.surface_tree->node.events.destroy,
                   &xwayland_view->surface_tree_destroy);
+
+    /* X11 association and Wayland commits arrive on different connections.
+     * Since upstream 532f3d3c (role -> addon), XWM only maps on commits seen
+     * after association. A buffer may already have committed by this point.
+     * Catch it up through the public map API after all listeners are installed. */
+    if (wlr_xwayland_surface->surface->mapped) {
+        /* OR conversion adopts an already mapped surface without a new signal. */
+        xwayland_view_handle_map(&xwayland_view->map, NULL);
+    } else if (wlr_surface_has_buffer(wlr_xwayland_surface->surface)) {
+        kywc_log(KYWC_DEBUG, "X11 associate with committed buffer %#x",
+                 wlr_xwayland_surface->window_id);
+        wlr_surface_map(wlr_xwayland_surface->surface);
+    }
 }
 
 static void xwayland_view_handle_dissociate(struct wl_listener *listener, void *data)
@@ -1029,7 +1049,6 @@ static void xwayland_view_handle_dissociate(struct wl_listener *listener, void *
         ky_scene_node_destroy(&xwayland_view->view.surface_tree->node);
     }
 
-    wl_list_remove(&xwayland_view->precommit.link);
     wl_list_remove(&xwayland_view->map.link);
     wl_list_remove(&xwayland_view->unmap.link);
 }
@@ -1070,8 +1089,10 @@ static void xwayland_view_handle_set_override_redirect(struct wl_listener *liste
     struct wlr_xwayland_surface *wlr_xwayland_surface = xwayland_view->wlr_xwayland_surface;
     struct xwayland_server *xwayland = xwayland_view->xwayland;
 
-    if (wlr_xwayland_surface->surface && wlr_xwayland_surface->surface->mapped) {
-        xwayland_view_handle_unmap(&xwayland_view->unmap, NULL);
+    if (wlr_xwayland_surface->surface) {
+        if (wlr_xwayland_surface->surface->mapped) {
+            xwayland_view_handle_unmap(&xwayland_view->unmap, NULL);
+        }
         xwayland_view_handle_dissociate(&xwayland_view->dissociate, NULL);
     }
     xwayland_view_handle_destroy(&xwayland_view->destroy, NULL);
@@ -1143,14 +1164,12 @@ void xwayland_view_create(struct xwayland_server *xwayland,
     wl_signal_add(&wlr_xwayland_surface->events.set_override_redirect,
                   &xwayland_view->set_override_redirect);
 
-    wl_list_init(&xwayland_view->precommit.link);
     wl_list_init(&xwayland_view->map.link);
     wl_list_init(&xwayland_view->unmap.link);
     wl_list_init(&xwayland_view->net_wm_icons);
 
-    if (wlr_xwayland_surface->surface && wlr_xwayland_surface->surface->mapped) {
+    if (wlr_xwayland_surface->surface) {
         xwayland_view_handle_associate(&xwayland_view->associate, NULL);
-        xwayland_view_handle_map(&xwayland_view->map, NULL);
     }
 }
 

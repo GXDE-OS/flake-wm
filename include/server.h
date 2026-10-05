@@ -42,8 +42,11 @@ struct server {
 
     struct wlr_session *session;
     struct wl_listener session_active;
+    struct wl_listener session_destroy;
 
     struct wlr_renderer *renderer;
+    struct wl_listener renderer_lost;
+    struct wl_listener renderer_destroy;
     struct wlr_allocator *allocator;
     struct wlr_backend *backend;
     struct wlr_linux_dmabuf_v1 *linux_dmabuf_v1;

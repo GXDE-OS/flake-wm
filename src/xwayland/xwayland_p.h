@@ -124,7 +124,11 @@ struct xwayland_server {
     struct wl_list unmanaged_surfaces;
 
     struct wl_listener xwayland_ready;
+    struct wl_listener xwayland_start;
+    struct wl_listener xwayland_destroy;
+    struct wl_listener client_destroy;
     struct wl_listener new_xwayland_surface;
+    struct wl_listener new_wlr_surface;
     struct wl_listener server_destroy;
     struct wl_listener output_configured;
     struct wl_listener seat_destroy;
@@ -132,6 +136,7 @@ struct xwayland_server {
     xcb_atom_t atoms[ATOM_LAST];
 
     xcb_connection_t *xcb_conn;
+    struct wl_event_source *xwm_wake_idle;
     xcb_screen_t *screen;
     const xcb_query_extension_reply_t *shape;
     const xcb_query_extension_reply_t *xfixes;
@@ -157,13 +162,13 @@ struct xwayland_server {
     float scale;
 };
 
+void xwayland_schedule_xwm_wake(struct xwayland_server *xwayland);
+
 void xwayland_view_create(struct xwayland_server *xwayland,
                           struct wlr_xwayland_surface *wlr_xwayland_surface);
 
 void xwayland_unmanaged_create(struct xwayland_server *xwayland,
                                struct wlr_xwayland_surface *wlr_xwayland_surface);
-
-void xwayland_restack_unmanaged(struct xwayland_server *xwayland);
 
 bool xwayland_surface_has_type(struct wlr_xwayland_surface *wlr_xwayland_surface, int type);
 
@@ -202,6 +207,8 @@ struct wlr_xwayland_surface *xwayland_view_look_surface(struct xwayland_server *
 
 void xwayland_view_add_new_wm_icon(struct wlr_xwayland_surface *surface, uint32_t width,
                                    uint32_t height, uint32_t size, uint32_t *data);
+
+void xwayland_view_reset_size_hints(struct xwayland_server *server, xcb_window_t window);
 
 bool xwayland_view_set_opacity(struct xwayland_server *xwayland, xcb_window_t window_id,
                                float opacity);

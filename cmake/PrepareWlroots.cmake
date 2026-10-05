@@ -1,3 +1,5 @@
+# Historical 0.17 overlay helper. The active 0.20.2 build does not invoke this
+# script; retained only while auditing the old fork (see WLR_UPGRADE.md).
 if(NOT DEFINED WLCOM_WLROOTS_VENDOR_SOURCE_DIR)
   message(FATAL_ERROR "WLCOM_WLROOTS_VENDOR_SOURCE_DIR is required")
 endif()

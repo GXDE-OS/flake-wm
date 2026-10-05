@@ -105,7 +105,7 @@ static int is_tablet_tool(sd_bus *bus, const char *path, const char *interface,
                           sd_bus_error *ret_error)
 {
     struct kde_input *input = userdata;
-    uint32_t is_tablet_tool = input->input->prop.type == WLR_INPUT_DEVICE_TABLET_TOOL;
+    uint32_t is_tablet_tool = input->input->prop.type == WLR_INPUT_DEVICE_TABLET;
     return sd_bus_message_append_basic(reply, 'b', &is_tablet_tool);
 }
 
@@ -129,7 +129,7 @@ static int name(sd_bus *bus, const char *path, const char *interface, const char
                 sd_bus_message *reply, void *userdata, sd_bus_error *ret_error)
 {
     struct kde_input *input = userdata;
-    return sd_bus_message_append_basic(reply, 's', input->input->wlr_input->name);
+    return sd_bus_message_append_basic(reply, 's', (input->input->wlr_input->name ? input->input->wlr_input->name : "unnamed"));
 }
 
 static int sys_name(sd_bus *bus, const char *path, const char *interface, const char *property,

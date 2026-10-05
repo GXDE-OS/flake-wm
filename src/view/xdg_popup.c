@@ -48,7 +48,7 @@ static void popup_apply_effects(struct xdg_popup *popup)
     }
 
     struct wlr_box geometry;
-    wlr_xdg_surface_get_geometry(popup->wlr_xdg_popup->base, &geometry);
+    geometry = popup->wlr_xdg_popup->base->geometry;
     ky_scene_node_set_position(decoration_node, popup->wlr_xdg_popup->current.geometry.x,
                                popup->wlr_xdg_popup->current.geometry.y);
     ky_scene_decoration_set_surface_size(popup->decoration, geometry.width, geometry.height);
@@ -78,7 +78,7 @@ static void handle_xdg_popup_destroy(struct wl_listener *listener, void *data)
     ky_scene_node_destroy(ky_scene_node_from_decoration(popup->decoration));
 
     /* only need to destroy the topmost popup parent tree,
-     * popup tree will be destroyed by xdg_surface destroy in scene
+     * popup tree is already destroyed by the popup role listener in scene
      */
     if (popup->topmost_popup) {
         ky_scene_node_destroy(&popup->parent_tree->node);
@@ -199,7 +199,7 @@ static struct xdg_popup *_xdg_popup_create(struct wlr_xdg_popup *wlr_xdg_popup,
     ky_scene_node_set_enabled(&popup->popup_tree->node, wlr_xdg_popup->base->surface->mapped);
 
     popup->destroy.notify = handle_xdg_popup_destroy;
-    wl_signal_add(&wlr_xdg_popup->base->events.destroy, &popup->destroy);
+    wl_signal_add(&wlr_xdg_popup->events.destroy, &popup->destroy);
     popup->new_popup.notify = popup_handle_new_xdg_popup;
     wl_signal_add(&wlr_xdg_popup->base->events.new_popup, &popup->new_popup);
     popup->commit.notify = handle_xdg_popup_commit;

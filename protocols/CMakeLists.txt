@@ -1,5 +1,10 @@
 pkg_get_variable(WL_PROTOCOL_DIR wayland-protocols pkgdatadir)
-find_program(WAYLAND_SCANNER_EXECUTABLE NAMES wayland-scanner REQUIRED)
+if(WLROOTS_VENDOR_WAYLAND_PREFIX)
+  set(WAYLAND_SCANNER_EXECUTABLE "${WLROOTS_VENDOR_WAYLAND_PREFIX}/bin/wayland-scanner")
+  set(_wlcom_scanner_dependency wlroots_vendor_wayland)
+else()
+  pkg_get_variable(WAYLAND_SCANNER_EXECUTABLE wayland-scanner wayland_scanner)
+endif()
 
 # name -> XML. The name is what consumers use to pick a client protocol, see
 # wlcom-client-protocol-<name> below.
@@ -131,19 +136,19 @@ foreach(index RANGE 0 ${protocols_last} 2)
   add_custom_command(
     OUTPUT "${code}"
     COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${xml}" "${code}"
-    DEPENDS "${xml}"
+    DEPENDS "${xml}" ${_wlcom_scanner_dependency}
     VERBATIM
   )
   add_custom_command(
     OUTPUT "${server_header}"
     COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" server-header "${xml}" "${server_header}"
-    DEPENDS "${xml}"
+    DEPENDS "${xml}" ${_wlcom_scanner_dependency}
     VERBATIM
   )
   add_custom_command(
     OUTPUT "${client_header}"
     COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${xml}" "${client_header}"
-    DEPENDS "${xml}"
+    DEPENDS "${xml}" ${_wlcom_scanner_dependency}
     VERBATIM
   )
 

@@ -159,6 +159,7 @@ static void handle_destroy(struct wl_listener *listener, void *data)
 {
     struct idle_inhibit_manager *manager = wl_container_of(listener, manager, destroy);
     wl_list_remove(&manager->destroy.link);
+    wl_list_remove(&manager->new_idle_inhibitor.link);
     free(manager);
 }
 
