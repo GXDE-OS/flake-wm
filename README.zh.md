@@ -1,7 +1,7 @@
 # flakewm
 
 本项目使用独立的 `flakewm` / `flakewm-client` 包，可与 `gxde-wlcom` 同时安装。
-登录管理器选择 `flakewm`，启动脚本为 `/usr/bin/startflakewm`，ELF 为 `/usr/bin/flakewm`。
+安装 `gxde-flake-session` 后，在登录管理器选择 `gxde-flakewm`。启动脚本为 `/usr/bin/startflakewm`，ELF 为 `/usr/bin/flakewm`。
 配置使用 `/etc/flakewm` 和 `~/.config/flakewm`，不会读取或覆盖旧合成器配置。
 客户端库为 `libflakewm-client.so`，使用 `pkg-config flakewm-client`，头文件位于 `include/flakewm`。
 D-Bus 服务名、对象路径和接口名保留原来的 `com.kylin.Wlcom` 和 `top.gxde.Wlcom`，现有调用者无需修改。
@@ -67,7 +67,7 @@ GXDE Wayland 合成器（亦称 `flakewm`）是基于 `wlroots` 开发的 Waylan
 2. 移植DDE Shell/deepin-chameleon主题「云璃」的默认窗体外观。
 3. 移植`dde-shell`协议，并扩展`wlr-layer-shell`排布逻辑，为`deepin-menu`等沿用X11思路的菜单守护进程在Wayland下提供菜单定位支持。
 4. Cherry pick了上游Wlroots的一些更新。
-5. 自动安装`flakewm`会话与`startflakewm`启动脚本至系统。
+5. 自动安装 `gxde-flakewm` 会话与 `startflakewm` 启动脚本至系统；Debian 包由 `gxde-flake-session` 提供这两个文件。
 6. 修复了原版Wlcom（截至我们Fork时的版本）在GXDE OS上`layer-shell`表面无法吸附至屏幕顶端的问题。
 7. 提供了新接口允许设置GXDE主题。
 8. 提供了新接口允许控制GTK标题栏上最小化/最大化/关闭按钮的可见性。（默认为全部可见）

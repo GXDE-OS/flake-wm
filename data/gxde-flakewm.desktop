@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=flakewm
+Name=gxde-flakewm
 Comment=GXDE desktop on flakewm
 Exec=/usr/bin/startflakewm
 TryExec=/usr/bin/flakewm

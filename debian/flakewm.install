@@ -1,9 +1,7 @@
 usr/bin/flakewm
-usr/bin/startflakewm
 usr/share/locale/
 usr/share/flakewm/multitask/
 usr/lib/udev/rules.d/
-usr/share/wayland-sessions/
 etc/flakewm/
 usr/share/glib-2.0/schemas/
 data/configs/OMG.conf etc/flakewm/

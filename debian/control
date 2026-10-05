@@ -72,3 +72,12 @@ Depends:
  ${shlibs:Depends},
  ${misc:Depends},
 Description: Client library for flakewm
+
+Package: gxde-flake-session
+Architecture: all
+Depends:
+ flakewm (>= ${source:Version}),
+ ${misc:Depends},
+Breaks: flakewm (<< 3.0.0-gxde3~)
+Replaces: flakewm (<< 3.0.0-gxde3~)
+Description: GXDE desktop session for FlakeWM.

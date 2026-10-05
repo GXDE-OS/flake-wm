@@ -3,7 +3,7 @@ install(FILES udev-rules/90-framebuffer.rules
   RENAME 90-flakewm-framebuffer.rules
 )
 
-install(FILES flakewm.desktop
+install(FILES gxde-flakewm.desktop
   DESTINATION /usr/share/wayland-sessions
 )
 

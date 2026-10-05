@@ -1,7 +1,7 @@
 # flakewm
 
 Packages `flakewm` and `flakewm-client` can be installed alongside `gxde-wlcom`.
-The session starts `/usr/bin/flakewm` through `/usr/bin/startflakewm`.
+Install `gxde-flake-session` and select `gxde-flakewm` in the display manager. The session starts `/usr/bin/flakewm` through `/usr/bin/startflakewm`.
 Configuration, plugins, private libraries and logs use independent `flakewm` paths.
 Clients link with `pkg-config flakewm-client`. D-Bus service names, object paths
 and interfaces retain their original `com.kylin.Wlcom` and `top.gxde.Wlcom` names.
@@ -68,7 +68,7 @@ The project is released under the open-source license **GPL-3.0-or-later**. File
 2. Ported the default window appearance of the DDE Shell / deepin-chameleon "云璃" (Yunli) theme.
 3. Ported the `dde-shell` protocol and extended the `wlr-layer-shell` arrangement logic to provide menu positioning support under Wayland for menu daemons such as `deepin-menu` that follow the X11 approach.
 4. Cherry-picked some updates from upstream Wlroots.
-5. Automatically installs the `flakewm` session and the `startflakewm` startup script to the system.
+5. Automatically installs the `gxde-flakewm` session and the `startflakewm` startup script to the system; Debian packages provide these files in `gxde-flake-session`.
 6. Fixed the issue where `layer-shell` surfaces in the original Wlcom (the version as of our fork) could not dock to the top of the screen on GXDE OS.
 7. Provided a new interface to allow setting the GXDE theme.
 8. Provided a new interface to control the visibility of the minimize/maximize/close buttons on the GTK title bar. (All visible by default)
