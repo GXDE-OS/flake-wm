@@ -31,6 +31,7 @@ struct dde_shell {
 };
 
 struct dde_shell_surface {
+    struct wl_list link;
     struct wl_resource *resource;
 
     struct wlr_surface *wlr_surface;
@@ -53,6 +54,18 @@ struct dde_shell_surface {
     uint32_t startup_effect;
 };
 
+static struct wl_list dde_surfaces = { &dde_surfaces, &dde_surfaces };
+
+bool dde_shell_surface_has_no_titlebar(struct wlr_surface *surface)
+{
+    struct dde_shell_surface *surf;
+    wl_list_for_each(surf, &dde_surfaces, link) {
+        if (surface && surf->wlr_surface == surface && surf->no_titlebar) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static void dde_surface_apply_radius(struct dde_shell_surface *surf)
 {
@@ -116,10 +129,6 @@ static void dde_surface_apply_no_titlebar(struct dde_shell_surface *surf)
     }
 
     struct kywc_view *kywc_view = &surf->view->base;
-    if (!kywc_view->mapped) {
-        return;
-    }
-
     /* 仅在当前确有服务端标题栏时去除，保留 BORDER/RESIZE(及其阴影圆角) */
     if (kywc_view->ssd & KYWC_SSD_TITLE) {
         view_set_decoration(surf->view, kywc_view->ssd & ~KYWC_SSD_TITLE);
@@ -203,6 +212,7 @@ static void dde_surface_handle_surface_map(struct wl_listener *listener, void *d
         wl_signal_add(&surf->view->base.events.map, &surf->view_map);
         surf->view_destroy.notify = dde_surface_handle_view_destroy;
         wl_signal_add(&surf->view->base.events.destroy, &surf->view_destroy);
+        dde_surface_handle_view_map(&surf->view_map, NULL);
     } else {
         /* layer-shell 等无 view 的 surface：直接应用圆角和无标题栏 */
         dde_surface_apply_no_titlebar(surf);
@@ -321,12 +331,24 @@ static void dde_shell_surface_set_property(struct wl_client *client,
 
     /* 无标题栏: 1=应用程序自己绘制标题栏(CSD) */
     if (property & DDE_SHELL_PROPERTY_NOTITLEBAR) {
+        if (data->size < sizeof(int32_t)) {
+            return;
+        }
         int *value = (int *)data->data;
+        bool was_no_titlebar = surf->no_titlebar;
         surf->no_titlebar = (*value != 0);
+        dde_surface_apply_no_titlebar(surf);
+        if (was_no_titlebar && !surf->no_titlebar && surf->view) {
+            view_set_decoration(surf->view, surf->view->base.ssd | KYWC_SSD_TITLE);
+        }
+        dde_surface_apply_radius(surf);
     }
 
     /* 窗口圆角: 数据段为两个float，X和Y方向圆角半径 */
     if (property & DDE_SHELL_PROPERTY_WINDOWRADIUS) {
+        if (data->size < 2 * sizeof(float)) {
+            return;
+        }
         float *value = (float *)data->data;
         surf->window_radius_x = value[0];
         surf->window_radius_y = value[1];
@@ -388,6 +410,7 @@ static void dde_shell_surface_resource_destroy(struct wl_resource *resource)
     struct dde_shell_surface *surf = wl_resource_get_user_data(resource);
 
     /* 摘掉surface和view上的所有事件监听 */
+    wl_list_remove(&surf->link);
     wl_list_remove(&surf->surface_map.link);
     wl_list_remove(&surf->surface_destroy.link);
     if (surf->view) {
@@ -431,6 +454,7 @@ static void dde_shell_get_shell_surface(struct wl_client *client, struct wl_reso
     }
     wl_resource_set_implementation(surf->resource, &dde_shell_surface_impl, surf,
                                    dde_shell_surface_resource_destroy);
+    wl_list_insert(&dde_surfaces, &surf->link);
 
     /* 初始化事件监听链表 */
     wl_list_init(&surf->surface_map.link);

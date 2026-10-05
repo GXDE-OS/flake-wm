@@ -732,6 +732,9 @@ void view_set_application_menu(struct view* view, const char* service_name,
 
 void view_set_decoration(struct view *view, enum kywc_ssd ssd)
 {
+    if (dde_shell_surface_has_no_titlebar(view->surface)) {
+        ssd &= ~KYWC_SSD_TITLE;
+    }
     struct kywc_view *kywc_view = &view->base;
     if (kywc_view->ssd == ssd) {
         return;
