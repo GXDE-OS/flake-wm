@@ -7,6 +7,7 @@ Build-Depends:
  cmake (>= 3.21),
  meson (>= 1.3.0),
  ninja-build,
+ bison,
  pkg-config,
  libdrm-dev,
  libxkbcommon-dev,
