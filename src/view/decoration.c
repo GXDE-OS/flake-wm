@@ -134,7 +134,8 @@ static void handle_xdg_deco_request_mode(struct wl_listener *listener, void *dat
     enum wlr_xdg_toplevel_decoration_v1_mode mode = wlr_xdg_decoration->requested_mode;
 
     if (mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE) {
-        mode = ((deco->server_deco || deco->xdg_deco) && !deco->should_use_ssd)
+        mode = (deco->server_deco &&
+                deco->server_deco->mode != WLR_SERVER_DECORATION_MANAGER_MODE_SERVER)
                    ? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
                    : WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
     }
