@@ -122,6 +122,7 @@ struct input {
     struct wl_listener mapped_output_disable;
     struct wl_listener primary_output;
     struct wl_listener viewport;
+    struct wl_listener mapped_scene_destroy;
 
     /* input device prop and state per device */
     struct input_prop prop;

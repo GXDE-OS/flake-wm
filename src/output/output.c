@@ -799,8 +799,9 @@ static void output_destroy(struct output *output)
 
     if (!output_manager->server->terminate && output_manager->fallback_output &&
         !output_manager_has_enabled_outputs()) {
-        kywc_output_set_primary(output_manager->fallback_output);
         fallback_output_set_state(output_manager->fallback_output, true, kywc_output);
+        /* Input remapping needs the fallback's scene output to exist. */
+        kywc_output_set_primary(output_manager->fallback_output);
         output_manager_emit_configured(CONFIGURE_TYPE_UPDATE);
     }
 

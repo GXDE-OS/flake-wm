@@ -45,6 +45,7 @@
 #include "theme.h"
 #include "util/dbus.h"
 #include "util/sysfs.h"
+#include "util/time.h"
 #include "view/view.h"
 #include "xwayland.h"
 
@@ -387,32 +388,42 @@ void server_run(struct server *server)
 
 void server_finish(struct server *server)
 {
+    uint32_t start = current_time_msec();
     server->terminate = true;
+    kywc_log(KYWC_SILENT, "Shutdown: notifying subsystems");
 
     wl_event_source_remove(server->sources.sighup);
     wl_event_source_remove(server->sources.sigterm);
 
     wl_signal_emit_mutable(&server->events.terminate, NULL);
 
+    kywc_log(KYWC_SILENT, "Shutdown +%u ms: joining workers", current_time_msec() - start);
     queue_destroy(server->queue);
 
-    wl_display_destroy_clients(server->display);
-    /* make sure all xwayland-shells are destroyed */
+    /* Stop the Xwayland server before disconnecting clients. Otherwise its
+     * client-destroy handler interprets logout as a crash and can restart it. */
+    kywc_log(KYWC_SILENT, "Shutdown +%u ms: stopping Xwayland", current_time_msec() - start);
     xwayland_server_destroy();
+    kywc_log(KYWC_SILENT, "Shutdown +%u ms: disconnecting clients", current_time_msec() - start);
+    wl_display_destroy_clients(server->display);
 
     /* Output removal can schedule delayed global destruction. Do it before
      * display.destroy is emitted, not from event_loop.destroy after that signal,
      * otherwise these newly registered cleanup listeners can never run. */
+    kywc_log(KYWC_SILENT, "Shutdown +%u ms: destroying backends", current_time_msec() - start);
     wlr_backend_destroy(server->backend);
     server->backend = NULL;
     server->headless_backend = NULL;
 
+    kywc_log(KYWC_SILENT, "Shutdown +%u ms: destroying display/session", current_time_msec() - start);
     wl_display_destroy(server->display);
 
     /* call all server_destroy listeners */
+    kywc_log(KYWC_SILENT, "Shutdown +%u ms: destroying services", current_time_msec() - start);
     wl_signal_emit_mutable(&server->events.destroy, NULL);
 
     /* scene may be NULL when server_init failed */
+    kywc_log(KYWC_SILENT, "Shutdown +%u ms: destroying scene/renderer", current_time_msec() - start);
     if (server->scene) {
         ky_scene_node_destroy(&server->scene->tree.node);
     }
@@ -423,5 +434,5 @@ void server_finish(struct server *server)
     pango_cairo_font_map_set_default(NULL);
     FcFini();
 
-    kywc_log(KYWC_SILENT, "gxde-wlcom finished...\n");
+    kywc_log(KYWC_SILENT, "gxde-wlcom finished in %u ms...\n", current_time_msec() - start);
 }
