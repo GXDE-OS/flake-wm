@@ -21,8 +21,8 @@ static const char *check_config_file(void)
      * separate from the running desktop. Relative XDG paths are invalid. */
     const char *xdg_config = getenv("XDG_CONFIG_HOME");
     char *config_dir = xdg_config && xdg_config[0] == '/'
-        ? (char *)string_join_path(xdg_config, NULL, "gxde-wlcom")
-        : string_expand_path("~/.config/gxde-wlcom");
+        ? (char *)string_join_path(xdg_config, NULL, "flakewm")
+        : string_expand_path("~/.config/flakewm");
     if (!config_dir) {
         return NULL;
     }
@@ -96,7 +96,7 @@ struct config_manager *config_manager_create(struct server *server)
         config_manager->json = json_object_from_file(config_manager->file);
     }
     /* get system default config */
-    config_manager->sys_json = json_object_from_file("/etc/gxde-wlcom/config.json");
+    config_manager->sys_json = json_object_from_file("/etc/flakewm/config.json");
     kywc_log(KYWC_INFO, "get the sys default config from the etc directory");
     if (!config_manager->sys_json) {
         kywc_log(KYWC_WARN, "the default config does not exist");

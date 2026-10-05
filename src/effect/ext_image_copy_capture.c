@@ -790,7 +790,7 @@ static void manager_handle_new_mapped_view(struct wl_listener *listener, void *d
     toplevel->manager = manager;
     toplevel->view = view_from_kywc_view(data);
     wl_list_init(&toplevel->resources);
-    snprintf(toplevel->identifier, sizeof(toplevel->identifier), "gxde-wlcom-%u",
+    snprintf(toplevel->identifier, sizeof(toplevel->identifier), "flakewm-%u",
              ++manager->next_identifier);
     wl_list_insert(&manager->toplevels, &toplevel->link);
 

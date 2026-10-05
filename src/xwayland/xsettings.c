@@ -20,7 +20,7 @@
 
 #define XSETTINGS_ATOM_NAME "_XSETTINGS_SETTINGS"
 #define XSETTINGS_SELECTION_NAME "_XSETTINGS_S%d"
-#define XSETTINGS_MANAGER_NAME "gxde-wlcom-xsettings"
+#define XSETTINGS_MANAGER_NAME "flakewm-xsettings"
 #define XSETTINGS_FIXED_BASE_DPI (96 * 1024)
 
 enum xsettings_type {

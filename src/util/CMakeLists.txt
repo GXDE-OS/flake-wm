@@ -1,4 +1,4 @@
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   dbus.c
   debug.c
   file.c

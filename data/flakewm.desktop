@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=flakewm
+Comment=GXDE desktop on flakewm
+Exec=/usr/bin/startflakewm
+TryExec=/usr/bin/flakewm
+Type=Application
+DesktopNames=GXDE

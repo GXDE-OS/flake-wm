@@ -1,4 +1,4 @@
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   pass.c
   pixel_format.c
   renderer.c
@@ -7,7 +7,7 @@ target_sources(gxde-wlcom PRIVATE
 )
 
 if(WLCOM_TRACY)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     profile.c
     opengl/profile.c
   )

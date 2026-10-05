@@ -1,4 +1,4 @@
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   animator.c
   blur.c
   capture.c
@@ -29,28 +29,28 @@ target_sources(gxde-wlcom PRIVATE
   zoom.c
 )
 
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   ky_capture.c
 )
 
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   treeland_capture.c
 )
 
 if(WLCOM_UKUI_SCREENSHOT)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     screenshot.c
   )
 endif()
 
 if(WLCOM_UKUI_WATERMARK)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     watermark.c
   )
 endif()
 
 if(WLCOM_KDE_SLIDE)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     slide.c
   )
 endif()

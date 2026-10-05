@@ -7,7 +7,7 @@
 
   <interface name="gxde_identifier_v1" version="1">
     <description summary="GXDE WM identifier">
-      By broadcasting this interface, the compositor identified itself as GXDE-Wlcom
+      By broadcasting this interface, the compositor identified itself as flakewm
       (or a 100% compatible compositor).
     </description>
 

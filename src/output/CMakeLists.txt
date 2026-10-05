@@ -1,4 +1,4 @@
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   gamma.c
   config.c
   layout.c
@@ -9,19 +9,19 @@ target_sources(gxde-wlcom PRIVATE
 )
 
 if(WLCOM_KDE_OUTPUT)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     kde_output.c
   )
 endif()
 
 if(WLCOM_WLR_OUTPUT)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     wlr_output.c
   )
 endif()
 
 if(WLCOM_UKUI_OUTPUT)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     ukui_output.c
   )
 endif()

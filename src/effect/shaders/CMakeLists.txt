@@ -1,4 +1,4 @@
-wlcom_embed_files(gxde-wlcom FILES
+wlcom_embed_files(flakewm FILES
   blur_tex.vert
   blur_first_down.frag
   blur_first_down.vert

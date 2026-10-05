@@ -1,4 +1,4 @@
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   backend.c
 )
 

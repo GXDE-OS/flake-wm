@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist gettext-domain="@GETTEXT_PACKAGE@">
-  <enum id="org.ukui.peripherals-mouse.AccelProfile">
+  <enum id="org.flakewm.peripherals-mouse.AccelProfile">
     <value value="0" nick="default"/>
     <value value="1" nick="adaptive"/>
     <value value="2" nick="flat"/>
   </enum>
-  <schema path="/org/ukui/desktop/peripherals/mouse/" id="org.ukui.peripherals-mouse">
+  <schema path="/org/flakewm/peripherals/mouse/" id="org.flakewm.peripherals-mouse">
     <key type="b" name="left-handed">
       <default>false</default>
       <summary>Mouse button orientation</summary>
@@ -21,7 +21,7 @@
       <summary>Motion Threshold</summary>
       <description>Distance in pixels the pointer must move before accelerated mouse motion is activated.  A value of -1 is the system default.</description>
     </key>
-    <key name="accel-profile" enum="org.ukui.peripherals-mouse.AccelProfile">
+    <key name="accel-profile" enum="org.flakewm.peripherals-mouse.AccelProfile">
       <default>'default'</default>
       <summary>Acceleration profile</summary>
       <description>Acceleration profile used for connected mice. The acceleration profile can be set to either default ('default') which uses the default acceleration profile for each device, flat ('flat'), which accelerates by a device specific constant factor derived from the configured pointer speed, or adaptive ('adaptive') which adapts the acceleration depending on the mouse movement. If a mouse doesn't support the configured profile, 'default' will be used.</description>

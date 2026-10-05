@@ -1,6 +1,6 @@
-add_executable(gxde-wlcom)
+add_executable(flakewm)
 
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   main.c
   server.c
   gxde_identifier.c
@@ -37,13 +37,13 @@ endif()
 add_subdirectory(vendor/dkwin/multitask)
 add_subdirectory(vendor/dkwin/presentwindows)
 
-target_include_directories(gxde-wlcom PRIVATE
+target_include_directories(flakewm PRIVATE
   "${PROJECT_SOURCE_DIR}"
   "${PROJECT_BINARY_DIR}"
   "${PROJECT_SOURCE_DIR}/include"
 )
 
-target_link_libraries(gxde-wlcom PRIVATE
+target_link_libraries(flakewm PRIVATE
   wlcom-protocols
   Wlroots::wlroots
   PkgConfig::WAYLAND_SERVER
@@ -55,33 +55,33 @@ target_link_libraries(gxde-wlcom PRIVATE
 )
 
 if(HAVE_XWAYLAND)
-  target_link_libraries(gxde-wlcom PRIVATE PkgConfig::WLCOM_XWAYLAND_DEPS)
+  target_link_libraries(flakewm PRIVATE PkgConfig::WLCOM_XWAYLAND_DEPS)
 endif()
 
 if(HAVE_LIBUNWIND)
-  target_link_libraries(gxde-wlcom PRIVATE PkgConfig::LIBUNWIND)
+  target_link_libraries(flakewm PRIVATE PkgConfig::LIBUNWIND)
 endif()
 
 if(WLCOM_TRACY)
-  target_link_libraries(gxde-wlcom PRIVATE PkgConfig::TRACY)
+  target_link_libraries(flakewm PRIVATE PkgConfig::TRACY)
 endif()
 
 # Plugins resolve compositor symbols at load time, see wlcom.syms.
 set(wlcom_symbols_file "${PROJECT_SOURCE_DIR}/wlcom.syms")
-set_target_properties(gxde-wlcom PROPERTIES
-  # Keep ./build/gxde-wlcom working for nested test runs.
+set_target_properties(flakewm PROPERTIES
+  # Keep ./build/flakewm working for nested test runs.
   RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}"
   ENABLE_EXPORTS ON
   LINK_DEPENDS "${wlcom_symbols_file}"
 )
-target_link_options(gxde-wlcom PRIVATE
+target_link_options(flakewm PRIVATE
   "LINKER:--version-script,${wlcom_symbols_file}"
 )
 
-install(TARGETS gxde-wlcom RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS flakewm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(WLCOM_PRIVATE_LIBDIR)
   file(RELATIVE_PATH _wlcom_private_lib_rel
     "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}"
     "${CMAKE_INSTALL_PREFIX}/${WLCOM_PRIVATE_LIBDIR}")
-  set_property(TARGET gxde-wlcom PROPERTY INSTALL_RPATH "\$ORIGIN/${_wlcom_private_lib_rel}")
+  set_property(TARGET flakewm PROPERTY INSTALL_RPATH "\$ORIGIN/${_wlcom_private_lib_rel}")
 endif()

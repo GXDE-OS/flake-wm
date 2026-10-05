@@ -671,7 +671,7 @@ wlcom_pin_wlroots_dependencies(PkgConfig::WLCOM_WLROOTS)
 
 if(WLROOTS_RUNTIME_LIBRARY_DIRS)
   # Use an application-private directory, not the system's library namespace.
-  set(WLCOM_PRIVATE_LIBDIR "${CMAKE_INSTALL_LIBDIR}/gxde-wlcom")
+  set(WLCOM_PRIVATE_LIBDIR "${CMAKE_INSTALL_LIBDIR}/flakewm")
   foreach(_runtime_dir IN LISTS WLROOTS_RUNTIME_LIBRARY_DIRS)
     install(DIRECTORY "${_runtime_dir}/" DESTINATION "${WLCOM_PRIVATE_LIBDIR}"
       FILES_MATCHING

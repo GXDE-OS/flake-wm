@@ -1,3 +1,14 @@
+# flakewm
+
+本项目使用独立的 `flakewm` / `flakewm-client` 包，可与 `gxde-wlcom` 同时安装。
+登录管理器选择 `flakewm`，启动脚本为 `/usr/bin/startflakewm`，ELF 为 `/usr/bin/flakewm`。
+配置使用 `/etc/flakewm` 和 `~/.config/flakewm`，不会读取或覆盖旧合成器配置。
+客户端库为 `libflakewm-client.so`，使用 `pkg-config flakewm-client`，头文件位于 `include/flakewm`。
+D-Bus 服务名、对象路径和接口名保留原来的 `com.kylin.Wlcom` 和 `top.gxde.Wlcom`，现有调用者无需修改。
+Wayland 协议和通用桌面兼容接口保留；同一用户总线上的 `com.deepin.wm` 等桌面服务仍只能有一个拥有者。
+同时运行完整桌面时应使用独立的登录会话和 D-Bus 会话总线。
+构建参数 `WLCOM_*` 保持兼容，上游链接与历史发布记录保留原名。
+
 ![](./docs/img/readme-header.png)
 
 ![GitHub contributors](https://img.shields.io/github/contributors/GXDE-OS/gxde-wlcom) ![GitHub Release](https://img.shields.io/github/v/release/GXDE-OS/gxde-wlcom) ![Static Badge](https://img.shields.io/badge/license-GPL--3.0--or--later-orange) ![Static Badge](https://img.shields.io/badge/made_with-love-red)
@@ -26,13 +37,12 @@
 
 </div>
 
-> **注意**: 当前GXWM主要开发工作已经结束，现在GXWM处于长期维护阶段，我们仍然接受Issue和新的功能请求，但处理速度可能会较慢。在[FlakeWM](https://gitee.com/flake-wm/flake-wm)在GXDE OS上取代GXWM作为默认的合成器以后，GXWM将归档并停止支持。
 
 ## 关于本项目
 
 ![screenshot](./docs/pictures/screenshot.png)
 
-GXDE Wayland 合成器（亦称 `gxde-wlcom`）是基于 `wlroots` 开发的 Wayland 合成器，其原始代码派生自 `kylin-wayland-compositor`。（以下简称 `kywc`）
+GXDE Wayland 合成器（亦称 `flakewm`）是基于 `wlroots` 开发的 Wayland 合成器，其原始代码派生自 `kylin-wayland-compositor`。（以下简称 `kywc`）
 
 本仓库由 GXDE OS 团队fork，并在原项目基础上针对 GXDE OS 进行适配与优化，当前作为 GXDE OS Wayland 会话的默认合成器进行开发与维护。
 
@@ -57,7 +67,7 @@ GXDE Wayland 合成器（亦称 `gxde-wlcom`）是基于 `wlroots` 开发的 Way
 2. 移植DDE Shell/deepin-chameleon主题「云璃」的默认窗体外观。
 3. 移植`dde-shell`协议，并扩展`wlr-layer-shell`排布逻辑，为`deepin-menu`等沿用X11思路的菜单守护进程在Wayland下提供菜单定位支持。
 4. Cherry pick了上游Wlroots的一些更新。
-5. 自动安装`gxde-wlcom`会话与`startgxde_wlcom`启动脚本至系统。
+5. 自动安装`flakewm`会话与`startflakewm`启动脚本至系统。
 6. 修复了原版Wlcom（截至我们Fork时的版本）在GXDE OS上`layer-shell`表面无法吸附至屏幕顶端的问题。
 7. 提供了新接口允许设置GXDE主题。
 8. 提供了新接口允许控制GTK标题栏上最小化/最大化/关闭按钮的可见性。（默认为全部可见）
@@ -104,7 +114,7 @@ GXDE Wayland 合成器（亦称 `gxde-wlcom`）是基于 `wlroots` 开发的 Way
 
 ### treeland-protocols 0.5.9 与 personalization 协议
 
-> **理论上现在不用担心这个了，GXWM已经做到了对两个版本的自适应支持**
+> **理论上现在不用担心这个了，flakewm已经做到了对两个版本的自适应支持**
 
 **这一节关系到整个桌面能否启动，改动`protocols/treeland-personalization-manager-v1.xml`前请务必读完。**
 
@@ -152,19 +162,19 @@ strings -a /usr/lib/x86_64-linux-gnu/libdtk6gui.so.* | grep -c treeland_personal
 
 默认行为是**自动探测**：启动时扫描已安装的`libdtk*gui`（Qt5与Qt6两套都查，含multiarch路径），看它们是否还引用`treeland_personalization_wallpaper_context_v1`。这比看协议包版本准，因为XML只是编译期输入。探测不到DTK时（构建chroot、精简安装）退回去看`/usr/share/treeland-protocols`，再不行默认0.5.8。
 
-理论上不需要强制设定，但如果非得要，设环境变量即可，改`startgxde_wlcom`里一行然后重新登录：
+理论上不需要强制设定，但如果非得要，设环境变量即可，改`startflakewm`里一行然后重新登录：
 
 ```bash
-export GXDE_WLCOM_PERSONALIZATION=058   # 或 059；亦接受 0.5.8 / 0.5.9
+export FLAKEWM_PERSONALIZATION=058   # 或 059；亦接受 0.5.8 / 0.5.9
 ```
 
 确认当前选了哪个（该行是`INFO`级，默认`WARN`不显示，需`-V`或`KYWC_LOG_LEVEL=INFO`）：
 
 ```bash
 # 日志默认在 stdout；如需落盘，给 wlcom 传 -Dlogtofile 后再 grep：
-grep Personalization ~/.log/gxde-wlcom.log | tail -1
+grep Personalization ~/.log/flakewm.log | tail -1
 # (Treeland Shim) Personalization: probed 4 DTK libraries, wallpaper context referenced -> using the 0.5.8 layout
-# (Treeland Shim) Personalization: layout forced to 0.5.9 by GXDE_WLCOM_PERSONALIZATION
+# (Treeland Shim) Personalization: layout forced to 0.5.9 by FLAKEWM_PERSONALIZATION
 ```
 
 若探测发现DTK5与DTK6**不一致**（一个已按0.5.9重编、另一个还没有），会打一条`ERROR`并选择0.5.8。这种混合状态下没有任何一种选择能让两边都活，只能把落后的那个包补编译完，或用环境变量指定优先保谁。
@@ -174,18 +184,18 @@ grep Personalization ~/.log/gxde-wlcom.log | tail -1
 上面的开关是在两种布局之间二选一，而这个是直接不广播`treeland_personalization_manager_v1`这个global：
 
 ```bash
-export GXWM_DONOT_BROADCAST_TLPM=TRUE   # 亦接受 ON / YES / 1，大小写不敏感
+export FLAKEWM_DONOT_BROADCAST_TLPM=TRUE   # 亦接受 ON / YES / 1，大小写不敏感
 ```
 
-**默认关闭**（即默认正常广播）。取值不在上述列表内的一律视为关闭，包括导出了但为空的情况，所以`=FALSE`、`=0`或`export GXWM_DONOT_BROADCAST_TLPM=`都是照常广播，不会误伤。
+**默认关闭**（即默认正常广播）。取值不在上述列表内的一律视为关闭，包括导出了但为空的情况，所以`=FALSE`、`=0`或`export FLAKEWM_DONOT_BROADCAST_TLPM=`都是照常广播，不会误伤。
 
 万一哪天上游又来一次不bump版本号的破坏性改动，而上面的布局开关也救不了场，用它可以让桌面先能登录进去。客户端拿不到这个global就会回退到自己的默认外观——窗口模糊、自定义圆角、客户端指定的标题栏这些会失效，但比登进桌面panel不显示强。
 
 该开关的日志是`WARN`级（默认可见，无需`-V`）
 ```bash
 # 日志默认在 stdout；如需落盘，给 wlcom 传 -Dlogtofile 后再 grep：
-grep Personalization ~/.log/gxde-wlcom.log | tail -1
-# [WARN]: (Treeland Shim) Personalization: global not advertised, disabled by GXWM_DONOT_BROADCAST_TLPM
+grep Personalization ~/.log/flakewm.log | tail -1
+# [WARN]: (Treeland Shim) Personalization: global not advertised, disabled by FLAKEWM_DONOT_BROADCAST_TLPM
 ```
 
 #### 彻底移除兼容代码
@@ -245,7 +255,7 @@ EOF
 再嵌套跑一遍确认真机行为，这一步能在污染真实会话之前抓到问题：
 
 ```bash
-WAYLAND_DISPLAY=wayland-0 ./build/gxde-wlcom   # 对外暴露 wayland-1
+WAYLAND_DISPLAY=wayland-0 ./build/flakewm   # 对外暴露 wayland-1
 WAYLAND_DISPLAY=wayland-1 gxde-terminal        # 任一DTK程序，能起来即为正常
 ```
 
@@ -334,7 +344,7 @@ $ ./build-deb -c
 
 ### 使用
 
-> **注意**: 默认情况下，日志直接输出到 stdout，不再生成 `$HOME/.log/gxde-wlcom.log` 文件；如需落盘调试，可传 `-Dlogtofile`（写入 `$HOME/.log/gxde-wlcom.log`）。
+> **注意**: 默认情况下，日志直接输出到 stdout，不再生成 `$HOME/.log/flakewm.log` 文件；如需落盘调试，可传 `-Dlogtofile`（写入 `$HOME/.log/flakewm.log`）。
 
 
 
@@ -359,7 +369,7 @@ Usage: kylin-wlcom [options] [command]
 ```bash
 -Dnoxwayland    关闭xwayland支持
 -Dlogtostdout   将日志打印到stdout（默认行为，保留兼容）
--Dlogtofile     将日志写入$HOME/.log/gxde-wlcom.log
+-Dlogtofile     将日志写入$HOME/.log/flakewm.log
 -Dloginmtime    使用monotonic time输出日志
 ```
 
@@ -367,9 +377,9 @@ Usage: kylin-wlcom [options] [command]
 
 #### 在GXDE上建立kywc会话
 
-~~请参阅「[./docs/gxde/gxde-wlcom-session.md](./docs/gxde/depreciated/gxde-wlcom-session.md)」，了解如何在GXDE上建立kywc会话。~~
+~~请参阅「[./docs/gxde/flakewm-session.md](./docs/gxde/depreciated/flakewm-session.md)」，了解如何在GXDE上建立kywc会话。~~
 
-现在GXDE Wlcom会在安装`.deb`包时自动安装会话文件，不再需要手动安装，相关的`.desktop`文件与启动脚本可以在本repo的`data/`下找到。
+现在flakewm会在安装`.deb`包时自动安装会话文件，不再需要手动安装，相关的`.desktop`文件与启动脚本可以在本repo的`data/`下找到。
 
 
 
@@ -392,13 +402,13 @@ Deepin KWin的原始实现和资源保存在
 `src/vendor/dkwin/multitask/wlcom_multitask.c`。
 
 GXDE菜单中的「多任务视图」启动器也可直接使用，无需修改桌面文件。
-`gxde-wlcom`会在用户会话总线上提供`com.deepin.wm`，并将
+`flakewm`会在用户会话总线上提供`com.deepin.wm`，并将
 `/com/deepin/wm`上的`PerformAction(1)`直接连接到同一个原生多任务视图
 开关。接口契约与验证方法见
 [multitasking-launcher-interface.md](./docs/gxde/manual/multitasking-launcher-interface.md)。
 
 ##### 显示桌面
-Wayland会话中，`gxde-wlcom`直接持有`com.deepin.wm`，并兼容
+Wayland会话中，`flakewm`直接持有`com.deepin.wm`，并兼容
 `GetIsShowDesktop()`和`SetShowDesktop(bool)`。接口与`Meta+D`共用
 `view_manager_show_desktop()`状态机，因此只恢复由本次“显示桌面”操作
 最小化的窗口。X11会话仍由原来的`deepin-wm`处理；本包不安装或替换
@@ -493,7 +503,7 @@ busctl --user call \
 
 ##### 注意事项
 
-配置修改后立即生效，并写入`~/.config/gxde-wlcom/config.json`的`theme`对象，对应的key分别为`force_round_corner`和`force_round_corner_exclude_layer_shell`。
+配置修改后立即生效，并写入`~/.config/flakewm/config.json`的`theme`对象，对应的key分别为`force_round_corner`和`force_round_corner_exclude_layer_shell`。
 
 
 
@@ -504,7 +514,7 @@ busctl --user call \
 然后运行以下命令，更新`pot`文件:
 
 ```bash
-$ cmake --build build --target gxde-wlcom-pot
+$ cmake --build build --target flakewm-pot
 ```
 
 
@@ -523,7 +533,7 @@ $ cmake --build build --target gxde-wlcom-pot
 
 对于MR，请将代码PR至`gxde/testing`分支，测试稳定后将由管理员合并至`gxde/zhuangzhuang`分支并bump。
 
-### GXDE Wlcom的贡献者们
+### flakewm的贡献者们
 
 *(注：不知道为何很多原版KYWC的贡献者没有显示，您可以在[此处](https://gitee.com/openkylin/kylin-wayland-compositor/contributors?ref=debian%2Funstable)找到原版KYWC贡献者的信息）*
 

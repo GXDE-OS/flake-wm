@@ -1,4 +1,4 @@
-wlcom_embed_files(gxde-wlcom SUFFIX _str FILES
+wlcom_embed_files(flakewm SUFFIX _str FILES
   common.vert
   quad.frag
   tex_rgba.frag

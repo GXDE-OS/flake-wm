@@ -2,6 +2,6 @@
 # layout, animation and interaction parity.  It is deliberately not compiled:
 # wlcom_presentwindows.c is the compositor-native adapter and has no KWin
 # dependency.
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   wlcom_presentwindows.c
 )

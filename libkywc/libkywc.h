@@ -25,7 +25,7 @@ enum kywc_context_capability {
     KYWC_CONTEXT_CAPABILITY_THUMBNAIL = 1 << 3,
     /* with multi-plane support */
     KYWC_CONTEXT_CAPABILITY_THUMBNAIL_EXT = 1 << 4,
-    /* detect GXDE-Wlcom compositor by gxde-identifier-v1 */
+    /* detect flakewm compositor by gxde-identifier-v1 */
     KYWC_CONTEXT_CAPABILITY_IDENTIFIER = 1 << 5,
 };
 
@@ -73,11 +73,11 @@ void kywc_context_destroy(kywc_context *ctx);
  * GXDE WM identifier (gxde-identifier-v1)
  *
  * When the compositor advertises the gxde_identifier_v1 global, the client
- * can confirm it is running under GXDE-Wlcom (or a 100% compatible compositor)
+ * can confirm it is running under flakewm (or a 100% compatible compositor)
  */
 
 /**
- * Check whether the compositor is GXDE-Wlcom (or 100% compatible).
+ * Check whether the compositor is flakewm (or 100% compatible).
  */
 bool kywc_context_is_gxde_wlcom(kywc_context *ctx);
 

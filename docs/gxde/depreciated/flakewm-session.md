@@ -1,6 +1,6 @@
 # 在GXDE上引导kylin-wlcom会话
 
-> **注意**: 本文档已经废弃，对新版本的`gxde-wlcom`不会生效，新版`gxde-wlcom`会自行安装Session文件！！
+> **注意**: 本文档已经废弃，对新版本的`flakewm`不会生效，新版`flakewm`会自行安装Session文件！！
 
 ---
 
@@ -21,13 +21,13 @@
 
 ## 「GXDE on kywc」会话
 
-新建`/usr/bin/start-gxde-wlcom`: 
+新建`/usr/bin/start-flakewm`: 
 
 
 ```bash
 #!/bin/bash
 export XDG_SESSION_TYPE=wayland
-export XDG_SESSION_DESKTOP=gxde-wlcom
+export XDG_SESSION_DESKTOP=flakewm
 export DTK2_XWAYLAND=dxcb
 exec /usr/bin/kylin-wlcom -s /usr/bin/startdde "$@"
 ```
@@ -35,25 +35,25 @@ exec /usr/bin/kylin-wlcom -s /usr/bin/startdde "$@"
 修改权限: 
 
 ```bash
-$ sudo chmod +x /usr/bin/start-gxde-wlcom
+$ sudo chmod +x /usr/bin/start-flakewm
 ```
 
 
 
-新建`/usr/share/wayland-sessions/gxde-wlcom.desktop`：
+新建`/usr/share/wayland-sessions/flakewm.desktop`：
 
 ```ini
 [Desktop Entry]
-Name=gxde-wlcom
+Name=flakewm
 Comment=GXDE desktop on the Kylin Wayland Compositor
-Exec=/usr/bin/start-gxde-wlcom
+Exec=/usr/bin/start-flakewm
 Type=Application
 DesktopNames=GXDE
 ```
 
 
 
-下次便可在登录界面选择 `gxde-wlcom` 会话。
+下次便可在登录界面选择 `flakewm` 会话。
 
 
 

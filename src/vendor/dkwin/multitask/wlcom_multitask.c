@@ -15,7 +15,7 @@
  * with this program. If not, see <https://www.gnu.org/licenses/>.
  * ----------------------------------------------------------------------------
  * This is NOT a vendored file, but a shim to allow Deepin KWin's multitask to
- * run on GXDE Wlcom.
+ * run on flakewm.
  */
 
 #include <math.h>

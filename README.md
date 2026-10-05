@@ -1,3 +1,15 @@
+# flakewm
+
+Packages `flakewm` and `flakewm-client` can be installed alongside `gxde-wlcom`.
+The session starts `/usr/bin/flakewm` through `/usr/bin/startflakewm`.
+Configuration, plugins, private libraries and logs use independent `flakewm` paths.
+Clients link with `pkg-config flakewm-client`. D-Bus service names, object paths
+and interfaces retain their original `com.kylin.Wlcom` and `top.gxde.Wlcom` names.
+Existing callers, Wayland protocols and desktop compatibility APIs remain compatible. Concurrent full desktops need separate session buses because
+services such as `com.deepin.wm` still have a single owner per bus.
+Build options keep the `WLCOM_*` prefix. Upstream URLs and release history retain
+their original names.
+
 ![](./docs/img/readme-header.png)
 
 ![GitHub contributors](https://img.shields.io/github/contributors/GXDE-OS/gxde-wlcom) ![GitHub Release](https://img.shields.io/github/v/release/GXDE-OS/gxde-wlcom) ![Static Badge](https://img.shields.io/badge/license-GPL--3.0--or--later-orange) ![Static Badge](https://img.shields.io/badge/made_with-love-red)
@@ -9,7 +21,7 @@
   </a>
   -->
 
-  <h3 align="center">GXDE Wayland Compositor</h3>
+  <h3 align="center">flakewm</h3>
 
   <p align="center">
     Yet another Wlroots based Wayland compositor that is forked from Kylin Wayland Window Compositor.
@@ -26,13 +38,12 @@
 
 </div>
 
-> **NOTE**: The development stage of GXWM is over. Now GXWM is in maintenance stage. Currently issues & feature requests WILL BE STILL PROCESSED (but it might be slow). After [FlakeWM](https://gitee.com/flake-wm/flake-wm) replaced GXWM as default wayland compositor for GXDE OS, GXWM will be archived and its support will be ended eventually.
 
 ## About the Project
 
 ![screenshot](./docs/pictures/screenshot.png)
 
-The GXDE Wayland Compositor (also known as `gxde-wlcom`) is a Wayland compositor built on `wlroots`, whose original code was forked from `kylin-wayland-compositor` (hereafter referred to as `kywc`).
+flakewm is a Wayland compositor built on `wlroots`, whose original code was forked from `kylin-wayland-compositor` (hereafter referred to as `kywc`).
 
 This repository was forked by the GXDE OS team and adapted and optimized for GXDE OS on top of the original project. It is currently developed and maintained as the default compositor for GXDE OS Wayland sessions.
 
@@ -57,7 +68,7 @@ The project is released under the open-source license **GPL-3.0-or-later**. File
 2. Ported the default window appearance of the DDE Shell / deepin-chameleon "云璃" (Yunli) theme.
 3. Ported the `dde-shell` protocol and extended the `wlr-layer-shell` arrangement logic to provide menu positioning support under Wayland for menu daemons such as `deepin-menu` that follow the X11 approach.
 4. Cherry-picked some updates from upstream Wlroots.
-5. Automatically installs the `gxde-wlcom` session and the `startgxde_wlcom` startup script to the system.
+5. Automatically installs the `flakewm` session and the `startflakewm` startup script to the system.
 6. Fixed the issue where `layer-shell` surfaces in the original Wlcom (the version as of our fork) could not dock to the top of the screen on GXDE OS.
 7. Provided a new interface to allow setting the GXDE theme.
 8. Provided a new interface to control the visibility of the minimize/maximize/close buttons on the GTK title bar. (All visible by default)
@@ -107,7 +118,7 @@ to forbid fallbacks.
 
 ### treeland-protocols 0.5.9 and the personalization protocol
 
-> **In theory you no longer need to worry about this; GXWM already implements adaptive support for both versions**
+> **In theory you no longer need to worry about this; flakewm already implements adaptive support for both versions**
 
 **This section concerns whether the entire desktop can start. Be sure to read it before modifying `protocols/treeland-personalization-manager-v1.xml`.**
 
@@ -156,19 +167,19 @@ This prerequisite has a code guard: at startup it checks whether the first reque
 
 The default behavior is **automatic detection**: at startup it scans the installed `libdtk*gui` (checking both Qt5 and Qt6, including multiarch paths) to see whether they still reference `treeland_personalization_wallpaper_context_v1`. This is more accurate than checking the protocol package version, because XML is only a compile-time input. When no DTK can be detected (build chroot, minimal install), it falls back to checking `/usr/share/treeland-protocols`, and if that also fails, it defaults to 0.5.8.
 
-In theory no forced setting is needed, but if you really must, just set an environment variable — change one line in `startgxde_wlcom` and log in again:
+In theory no forced setting is needed, but if you really must, just set an environment variable — change one line in `startflakewm` and log in again:
 
 ```bash
-export GXDE_WLCOM_PERSONALIZATION=058   # or 059; also accepts 0.5.8 / 0.5.9
+export FLAKEWM_PERSONALIZATION=058   # or 059; also accepts 0.5.8 / 0.5.9
 ```
 
 To confirm which one was selected (this line is `INFO` level, hidden by the default `WARN`, so `-V` or `KYWC_LOG_LEVEL=INFO` is needed):
 
 ```bash
 # Logs go to stdout by default; to write to disk, pass -Dlogtofile to wlcom and then grep:
-grep Personalization ~/.log/gxde-wlcom.log | tail -1
+grep Personalization ~/.log/flakewm.log | tail -1
 # (Treeland Shim) Personalization: probed 4 DTK libraries, wallpaper context referenced -> using the 0.5.8 layout
-# (Treeland Shim) Personalization: layout forced to 0.5.9 by GXDE_WLCOM_PERSONALIZATION
+# (Treeland Shim) Personalization: layout forced to 0.5.9 by FLAKEWM_PERSONALIZATION
 ```
 
 If detection finds that DTK5 and DTK6 are **inconsistent** (one has been recompiled against 0.5.9 and the other hasn't), it logs an `ERROR` and selects 0.5.8. In such a mixed state, no single choice can keep both alive; you can only finish compiling the lagging package, or use the environment variable to specify which one to prioritize.
@@ -178,10 +189,10 @@ If detection finds that DTK5 and DTK6 are **inconsistent** (one has been recompi
 The switch above is a choice between two layouts, whereas this one simply does not broadcast the `treeland_personalization_manager_v1` global at all:
 
 ```bash
-export GXWM_DONOT_BROADCAST_TLPM=TRUE   # also accepts ON / YES / 1, case-insensitive
+export FLAKEWM_DONOT_BROADCAST_TLPM=TRUE   # also accepts ON / YES / 1, case-insensitive
 ```
 
-**Disabled by default** (i.e. broadcast normally by default). Any value not in the list above is treated as disabled, including the case where the variable is exported but empty, so `=FALSE`, `=0`, or `export GXWM_DONOT_BROADCAST_TLPM=` all broadcast as usual and won't cause harm.
+**Disabled by default** (i.e. broadcast normally by default). Any value not in the list above is treated as disabled, including the case where the variable is exported but empty, so `=FALSE`, `=0`, or `export FLAKEWM_DONOT_BROADCAST_TLPM=` all broadcast as usual and won't cause harm.
 
 If upstream someday makes another breaking change without bumping the version, and even the layout switch above can't save the day, this lets the desktop at least log in. Clients that can't get this global fall back to their own default appearance — window blur, custom rounded corners, and client-specified title bars will stop working, but that's better than logging into a desktop whose panel doesn't show.
 
@@ -189,8 +200,8 @@ The log for this switch is `WARN` level (visible by default, no `-V` needed)
 
 ```bash
 # Logs go to stdout by default; to write to disk, pass -Dlogtofile to wlcom and then grep:
-grep Personalization ~/.log/gxde-wlcom.log | tail -1
-# [WARN]: (Treeland Shim) Personalization: global not advertised, disabled by GXWM_DONOT_BROADCAST_TLPM
+grep Personalization ~/.log/flakewm.log | tail -1
+# [WARN]: (Treeland Shim) Personalization: global not advertised, disabled by FLAKEWM_DONOT_BROADCAST_TLPM
 ```
 
 #### Completely removing the compatibility code
@@ -250,7 +261,7 @@ EOF
 Then run it once nested to confirm real-machine behavior; this step catches problems before polluting a real session:
 
 ```bash
-WAYLAND_DISPLAY=wayland-0 ./build/gxde-wlcom   # exposes wayland-1 to the outside
+WAYLAND_DISPLAY=wayland-0 ./build/flakewm   # exposes wayland-1 to the outside
 WAYLAND_DISPLAY=wayland-1 gxde-terminal        # any DTK program; if it starts, it's normal
 ```
 
@@ -339,7 +350,7 @@ $ ./build-deb -c
 
 ### Usage
 
-> **Note**: By default, logs are output directly to stdout and the `$HOME/.log/gxde-wlcom.log` file is no longer generated; to write to disk for debugging, pass `-Dlogtofile` (writes to `$HOME/.log/gxde-wlcom.log`).
+> **Note**: By default, logs are output directly to stdout and the `$HOME/.log/flakewm.log` file is no longer generated; to write to disk for debugging, pass `-Dlogtofile` (writes to `$HOME/.log/flakewm.log`).
 
 
 
@@ -364,7 +375,7 @@ The `-D` argument allows convenient runtime debugging. The supported options are
 ```bash
 -Dnoxwayland    Disable xwayland support
 -Dlogtostdout   Print logs to stdout (default behavior, kept for compatibility)
--Dlogtofile     Write logs to $HOME/.log/gxde-wlcom.log
+-Dlogtofile     Write logs to $HOME/.log/flakewm.log
 -Dloginmtime    Output logs using monotonic time
 ```
 
@@ -372,9 +383,9 @@ The `-D` argument allows convenient runtime debugging. The supported options are
 
 #### Setting up a kywc session on GXDE
 
-~~See "[./docs/gxde/gxde-wlcom-session.md](./docs/gxde/depreciated/gxde-wlcom-session.md)" to learn how to set up a kywc session on GXDE.~~
+~~See "[./docs/gxde/flakewm-session.md](./docs/gxde/depreciated/flakewm-session.md)" to learn how to set up a kywc session on GXDE.~~
 
-GXDE Wlcom now automatically installs the session file when installing the `.deb` package, so manual installation is no longer needed. The related `.desktop` file and startup script can be found under `data/` in this repo.
+flakewm now automatically installs the session file when installing the `.deb` package, so manual installation is no longer needed. The related `.desktop` file and startup script can be found under `data/` in this repo.
 
 
 
@@ -397,14 +408,14 @@ The original implementation and resources from Deepin KWin are kept in
 `src/vendor/dkwin/multitask/wlcom_multitask.c`.
 
 The "Multitasking View" launcher in the GXDE menu can also be used directly without modifying any desktop file.
-`gxde-wlcom` provides `com.deepin.wm` on the user session bus and connects
+`flakewm` provides `com.deepin.wm` on the user session bus and connects
 `PerformAction(1)` on `/com/deepin/wm` directly to the same native multitasking
 view toggle. See
 [multitasking-launcher-interface.md](./docs/gxde/manual/multitasking-launcher-interface.md)
 for the interface contract and verification method.
 
 ##### Show desktop
-In a Wayland session, `gxde-wlcom` directly holds `com.deepin.wm` and is compatible
+In a Wayland session, `flakewm` directly holds `com.deepin.wm` and is compatible
 with `GetIsShowDesktop()` and `SetShowDesktop(bool)`. The interface shares the
 `view_manager_show_desktop()` state machine with `Meta+D`, so it only restores
 windows minimized by this "show desktop" operation. X11 sessions are still
@@ -499,7 +510,7 @@ busctl --user call \
 
 ##### Notes
 
-Configuration changes take effect immediately and are written to the `theme` object in `~/.config/gxde-wlcom/config.json`, with the corresponding keys being `force_round_corner` and `force_round_corner_exclude_layer_shell`.
+Configuration changes take effect immediately and are written to the `theme` object in `~/.config/flakewm/config.json`, with the corresponding keys being `force_round_corner` and `force_round_corner_exclude_layer_shell`.
 
 
 
@@ -510,7 +521,7 @@ In the `po` directory, add the supported language to the `LINGUAS` file, and add
 Then run the following command to update the `pot` file:
 
 ```bash
-$ cmake --build build --target gxde-wlcom-pot
+$ cmake --build build --target flakewm-pot
 ```
 
 
@@ -529,7 +540,7 @@ See the "[CONTRIBUTING](./docs/CONTRIBUTING.md)" file for information needed to 
 
 For merge requests, please PR your code to the `gxde/testing` branch; after testing stabilizes, it will be merged into the `gxde/zhuangzhuang` branch by an administrator and bumped.
 
-### Contributors of GXDE Wlcom
+### Contributors of flakewm
 
 *(Note: for some unknown reason many contributors of the original KYWC are not shown; you can find information about the original KYWC contributors [here](https://gitee.com/openkylin/kylin-wayland-compositor/contributors?ref=debian%2Funstable))*
 

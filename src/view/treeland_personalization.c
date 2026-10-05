@@ -1501,7 +1501,7 @@ static const char *const dtk_lib_patterns[] = {
 
 static bool layout_from_env(enum personalization_layout *layout)
 {
-    const char *value = getenv("GXDE_WLCOM_PERSONALIZATION");
+    const char *value = getenv("FLAKEWM_PERSONALIZATION");
     if (!value || !*value) {
         return false;
     }
@@ -1516,7 +1516,7 @@ static bool layout_from_env(enum personalization_layout *layout)
     }
 
     kywc_log(KYWC_WARN,
-             "(Treeland Shim) Personalization: ignoring GXDE_WLCOM_PERSONALIZATION='%s', expected "
+             "(Treeland Shim) Personalization: ignoring FLAKEWM_PERSONALIZATION='%s', expected "
              "058 or 059",
              value);
     return false;
@@ -1535,7 +1535,7 @@ static enum personalization_layout layout_detect(void)
     if (layout_from_env(&layout)) {
         kywc_log(KYWC_INFO,
                  "(Treeland Shim) Personalization: layout forced to %s by "
-                 "GXDE_WLCOM_PERSONALIZATION",
+                 "FLAKEWM_PERSONALIZATION",
                  layout == PERSONALIZATION_LAYOUT_058 ? "0.5.8" : "0.5.9");
         return layout;
     }
@@ -1579,7 +1579,7 @@ static enum personalization_layout layout_detect(void)
                  "(Treeland Shim) Personalization: DTK libraries disagree, %d of %d still reference "
                  "the wallpaper context. Serving 0.5.8, so the ones already rebuilt against 0.5.9 "
                  "will fail to start -- finish the rebuild, or force the other layout with "
-                 "GXDE_WLCOM_PERSONALIZATION=059",
+                 "FLAKEWM_PERSONALIZATION=059",
                  with_wallpaper, probed);
     } else {
         kywc_log(KYWC_INFO,
@@ -1693,7 +1693,7 @@ static void handle_server_destroy(struct wl_listener *listener, void *data)
  * @brief Create the @c treeland_personalization_manager_v1 global and manage
  *        its lifetime
  *
- * Setting @c GXWM_DONOT_BROADCAST_TLPM turns the protocol off entirely: no
+ * Setting @c FLAKEWM_DONOT_BROADCAST_TLPM turns the protocol off entirely: no
  * global is advertised, so clients fall back to their own defaults instead of
  * failing. That is the escape hatch for the day a treeland-protocols change
  * breaks this implementation again -- a desktop without blur and custom corner
@@ -1707,9 +1707,9 @@ bool treeland_personalization_manager_create(struct server *server)
     /* Logged above the default level: with the global gone the symptom is
      * silent -- windows simply stop honouring client-side personalization --
      * so whoever is debugging that needs to find the reason without -V. */
-    if (env_is_on("GXWM_DONOT_BROADCAST_TLPM")) {
+    if (env_is_on("FLAKEWM_DONOT_BROADCAST_TLPM")) {
         kywc_log(KYWC_WARN, "(Treeland Shim) Personalization: global not advertised, disabled by "
-                            "GXWM_DONOT_BROADCAST_TLPM");
+                            "FLAKEWM_DONOT_BROADCAST_TLPM");
         return true;
     }
 
@@ -1730,7 +1730,7 @@ bool treeland_personalization_manager_create(struct server *server)
                  "(Treeland Shim) Personalization: request 1 of the vendored XML is '%s' rather "
                  "than get_wallpaper_context, so the layout switch is inoperative and the vendored "
                  "table is served as-is. If clients fail to start, set "
-                 "GXWM_DONOT_BROADCAST_TLPM=TRUE for a degraded but usable session",
+                 "FLAKEWM_DONOT_BROADCAST_TLPM=TRUE for a degraded but usable session",
                  treeland_personalization_manager_v1_interface.method_count > 1
                      ? treeland_personalization_manager_v1_interface.methods[1].name
                      : "(none)");

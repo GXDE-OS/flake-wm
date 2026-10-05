@@ -33,12 +33,12 @@ struct ukui_settings {
 #define UKUI_THEME_LIGHT "ukui-light"
 #define UKUI_THEME_DARK "ukui-dark"
 
-static const char *cursor_path = "/org/ukui/desktop/peripherals/mouse/";
-#define CURSOR_PATH_LEN (36)
+static const char *cursor_path = "/org/flakewm/peripherals/mouse/";
+#define CURSOR_PATH_LEN (sizeof("/org/flakewm/peripherals/mouse/") - 1)
 static const char *style_path = "/org/ukui/style/";
 #define STYLE_PATH_LEN (16)
 
-static const char *cursor_schema = "org.ukui.peripherals-mouse";
+static const char *cursor_schema = "org.flakewm.peripherals-mouse";
 static const char *cursor_theme_key = "cursor-theme";
 static const char *cursor_size_key = "cursor-size";
 static const char *locate_pointer_key = "locate-pointer";

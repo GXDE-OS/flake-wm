@@ -813,8 +813,8 @@ $RECYCLE.BIN/
 /debian/files
 /debian/*.debhelper.log
 /debian/*.substvars
-/debian/gxde-wlcom/
-/debian/gxde-wlcom-client/
+/debian/flakewm/
+/debian/flakewm-client/
 /debian/tmp/
 
 # ---> Agents
@@ -831,3 +831,7 @@ build/*
 
 # Vendored third party sources
 !/libs/**
+
+# Build artifacts from the previous package name.
+/debian/gxde-wlcom/
+/debian/gxde-wlcom-client/

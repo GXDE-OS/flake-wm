@@ -163,7 +163,7 @@ endforeach()
 # generation through one target so parallel builds never run a rule twice.
 add_custom_target(wlcom-protocol-sources DEPENDS ${protocol_outputs})
 
-# Server side: linked into gxde-wlcom.
+# Server side: linked into flakewm.
 add_library(wlcom-protocols OBJECT ${protocol_code} ${protocol_server_headers})
 add_dependencies(wlcom-protocols wlcom-protocol-sources)
 target_include_directories(wlcom-protocols PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")

@@ -1,20 +1,20 @@
 /*
  * Copyright (C) 2026 CharOfString <root@charofstring.cc>
  *
- * This file is part of gxde-wlcom.
+ * This file is part of flakewm.
  *
- * gxde-wlcom is free software: you can redistribute it and/or modify
+ * flakewm is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * gxde-wlcom is distributed in the hope that it will be useful,
+ * flakewm is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with gxde-wlcom.  If not, see <https://www.gnu.org/licenses/>.
+ * along with flakewm.  If not, see <https://www.gnu.org/licenses/>.
  * ----------------------------------------------------------------------------
  * The ported implementation for Treeland's treeland-app-id-resolver-v1.
  * Thanks to treeland. This implementation is based on their solution.

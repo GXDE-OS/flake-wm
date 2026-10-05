@@ -46,7 +46,7 @@ static const struct option long_options[] = {
 };
 
 static const char usage[] =
-    "Usage: gxde-wlcom [options] [command]\n"
+    "Usage: flakewm [options] [command]\n"
     "\n"
     "  -h, --help               Show help message and quit.\n"
     "  -d, --debug              Enables full logging, including debug information.\n"
@@ -178,7 +178,7 @@ static int handle_child_ready(int fd, uint32_t mask, void *data)
     server.session_pid = -1;
 
     if (server.options.binding_session) {
-        kywc_log(KYWC_FATAL, "gxde-wlcom abort...");
+        kywc_log(KYWC_FATAL, "flakewm abort...");
         terminate(EXIT_SUCCESS);
     }
     return 0;
@@ -296,7 +296,7 @@ int main(int argc, char *argv[])
             server.session_process = optarg;
             break;
         case 'v': // version
-            printf("gxde-wlcom version " KYWC_VERSION "\n");
+            printf("flakewm version " KYWC_VERSION "\n");
             exit(EXIT_SUCCESS);
             break;
         case 'V': // verbose
@@ -320,7 +320,7 @@ int main(int argc, char *argv[])
         level = KYWC_INFO;
     }
     logger_init(level, server.options.log_to_file, server.options.log_in_realtime);
-    kywc_log(KYWC_SILENT, "gxde-wlcom %s starting...", KYWC_VERSION);
+    kywc_log(KYWC_SILENT, "flakewm %s starting...", KYWC_VERSION);
 
     /* set Number of open files to max */
     limit_set_nofile();

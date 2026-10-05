@@ -1,4 +1,4 @@
-# GXDE Wlcom D-Bus接口 (Alias)
+# flakewm D-Bus接口 (Alias)
 ## 屏幕设置
 
 | 项目 | 值 |
@@ -187,7 +187,7 @@ busctl --user call top.gxde.Wlcom.Screen /top/gxde/Wlcom/Screen top.gxde.Wlcom.S
 - 屏幕或后端不支持请求的配置。
 
 缩放、分辨率、旋转、显示模式和屏幕布局设置保存在当前用户的
-`~/.config/gxde-wlcom/config.json` 中。
+`~/.config/flakewm/config.json` 中。
 
 ## KDE Blur
 
@@ -250,9 +250,9 @@ busctl --user call top.gxde.Wlcom.Screenshot /top/gxde/Wlcom/Screenshot top.gxde
 
 如果上一次截图还没完成，调用会返回 `top.gxde.Wlcom.Screenshot.Error.AlreadyTaking` 错误。
 
-默认配置把该方法绑定到了 `PrintScreen` 键（见 `/etc/gxde-wlcom/config.json` 中
+默认配置把该方法绑定到了 `PrintScreen` 键（见 `/etc/flakewm/config.json` 中
 `InputAction.keyboard` 的 `Print:no`），按下即把全屏复制到剪贴板。若要改键或禁用，
-按照该文件里其他快捷键的写法修改用户配置 `~/.config/gxde-wlcom/config.json` 即可。
+按照该文件里其他快捷键的写法修改用户配置 `~/.config/flakewm/config.json` 即可。
 
 ## 摇晃鼠标放大指针
 

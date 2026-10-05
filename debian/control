@@ -1,4 +1,4 @@
-Source: gxde-wlcom
+Source: flakewm
 Section: x11
 Priority: optional
 Maintainer: Morose <chenlinxiang@kylinos.cn>
@@ -57,23 +57,17 @@ Build-Depends:
  qml6-module-qtquick-window,
 Standards-Version: 4.6.2
 
-Package: gxde-wlcom
+Package: flakewm
 Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
-Breaks: kylin-wayland-compositor-effects
-Replaces: kylin-wayland-compositor
-Conflicts: kylin-wayland-compositor
-Provides: kylin-wayland-compositor
-Description: GXDE wayland compositor
+Description: flakewm
 
-Package: gxde-wlcom-client
+Package: flakewm-client
 Architecture: any
 Depends:
- gxde-wlcom,
+ flakewm,
  ${shlibs:Depends},
  ${misc:Depends},
-Replaces: kylin-wayland-compositor-client
-Conflicts: kylin-wayland-compositor-client
-Description: Client library for GXDE wayland compositor
+Description: Client library for flakewm

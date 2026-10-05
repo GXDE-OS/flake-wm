@@ -16,7 +16,7 @@ Exec=dbus-send --session --dest=com.deepin.wm --print-reply \
 ```
 
 在 X11/KWin 会话中，`com.deepin.wm` 由兼容服务处理；当前
-`gxde-wlcom` Wayland 会话没有接入这条调用链，所以点击菜单项不会打开
+`flakewm` Wayland 会话没有接入这条调用链，所以点击菜单项不会打开
 wlcom 的原生多任务视图。
 
 要保持现有桌面文件不变，重写实现需要接管下述 D-Bus 契约，并将其连接到
@@ -252,7 +252,7 @@ D-Bus 方法或其他专用 IPC。兼容层再调用它。
 - X11 和 Wayland 可以在同一个 shim 中按会话类型选择后端；
 - 桌面文件不需要修改。
 
-### 方式 B：由 `gxde-wlcom` 直接拥有 `com.deepin.wm`
+### 方式 B：由 `flakewm` 直接拥有 `com.deepin.wm`
 
 这是调用链最短的做法。wlcom 在连接用户会话总线后：
 
@@ -322,7 +322,7 @@ Exec=/usr/bin/deepin-wm-dbus
 busctl --user status com.deepin.wm
 ```
 
-Wayland 直接接管方案中，进程应为 `gxde-wlcom`。兼容层方案中，应为新的或
+Wayland 直接接管方案中，进程应为 `flakewm`。兼容层方案中，应为新的或
 修改后的 WM shim。
 
 ### 2. 确认方法签名

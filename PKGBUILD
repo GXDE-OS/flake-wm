@@ -1,6 +1,6 @@
 # Maintainer: CharOfString <root@charofstring.cc>
 
-pkgname=gxde-wlcom
+pkgname=flakewm
 pkgver=2.1.1.gxde8
 pkgrel=1
 pkgdesc='GXDE Wayland compositor'
@@ -52,9 +52,6 @@ makedepends=(
   'vulkan-headers'
   'wayland-protocols'
 )
-provides=('kylin-wayland-compositor' 'kylin-wayland-compositor-client')
-conflicts=('kylin-wayland-compositor' 'kylin-wayland-compositor-client')
-replaces=('kylin-wayland-compositor' 'kylin-wayland-compositor-client')
 
 source=("$pkgname::git+$url.git")
 sha256sums=('SKIP')

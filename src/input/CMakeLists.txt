@@ -1,4 +1,4 @@
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   action.c
   binding.c
   config.c
@@ -25,13 +25,13 @@ target_sources(gxde-wlcom PRIVATE
 )
 
 if(WLCOM_KDE_KEYSTATE)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     kde_keystate.c
   )
 endif()
 
 if(WLCOM_CLIPBOARD_PERSIST)
-  target_sources(gxde-wlcom PRIVATE
+  target_sources(flakewm PRIVATE
     selection_persist.c
   )
 endif()

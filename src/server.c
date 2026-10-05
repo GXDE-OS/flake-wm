@@ -362,10 +362,10 @@ bool server_start(struct server *server)
         kywc_log(KYWC_DEBUG, "WAYLAND_DISPLAY=%s", socket);
     }
 
-    if (setenv("DDE_CURRENT_COMPOSITOR", "GXWM", true) < 0) {
+    if (setenv("DDE_CURRENT_COMPOSITOR", "flakewm", true) < 0) {
         kywc_log_errno(KYWC_ERROR, "unable to set DDE_CURRENT_COMPOSITOR");
     } else {
-        kywc_log(KYWC_DEBUG, "DDE_CURRENT_COMPOSITOR=GXWM");
+        kywc_log(KYWC_DEBUG, "DDE_CURRENT_COMPOSITOR=flakewm");
     }
 
     if (!wlr_backend_start(server->backend)) {
@@ -434,5 +434,5 @@ void server_finish(struct server *server)
     pango_cairo_font_map_set_default(NULL);
     FcFini();
 
-    kywc_log(KYWC_SILENT, "gxde-wlcom finished in %u ms...\n", current_time_msec() - start);
+    kywc_log(KYWC_SILENT, "flakewm finished in %u ms...\n", current_time_msec() - start);
 }

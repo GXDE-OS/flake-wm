@@ -23,7 +23,7 @@ $ sudo systemctl stop lightdm gxdm.service
 
 执行以下命令手动启动合成器
 ```bash
-$ gxde-wlcom -s startgxde
+$ flakewm -s startgxde
 ```
 
 此时将启动GXDE桌面。
@@ -35,7 +35,7 @@ $ gxde-wlcom -s startgxde
 
 ## 嵌套运行
 
-在已有的图形服务器上，终端启动gxde-wlcom，
+在已有的图形服务器上，终端启动flakewm，
 此时为嵌入式运行状态，要在此合成器上运行客户端，需加上参数:
 
 ```
@@ -56,7 +56,7 @@ $ cmake --build build
 
 如果合成器多次崩溃且崩溃场景存在随机性，可使用valgrind工具进行测试
 ```bash
-$ valgrind /path/gxde-wlcom ...
+$ valgrind /path/flakewm ...
 ```
 
 ## Debug日志
@@ -68,31 +68,31 @@ WAYLAND_DEBUG=1
 
 服务端日志默认输出到 stdout，不再写入 `$HOME/.log`；如需落盘调试，可通过入参`-Dlogtofile`写入
 ```
-$HOME/.log/gxde-wlcom.log
+$HOME/.log/flakewm.log
 ```
 
 `-Dlogtostdout` 保留兼容（显式指定 stdout，与默认行为一致）
 ```bash
-Usage: gxde-wlcom [options] [command]
+Usage: flakewm [options] [command]
   -d, --debug              Enables full logging, including debug information.\n
   -D, --debug <options>    noxwayland, logtostdout, logtofile or loginmtime.\n
 ```
 
 设置debug信息输出到屏幕（默认行为）:
 ```bash
-$ ./gxde-wlcom -d
+$ ./flakewm -d
 ```
 
 如需写入日志文件:
 ```bash
-$ ./gxde-wlcom -d -Dlogtofile
+$ ./flakewm -d -Dlogtofile
 ```
 
 ## xwayland
 
 不开启xwayland: 
 ```bash
-$ ./gxde-wlcom -Dnoxwayland
+$ ./flakewm -Dnoxwayland
 ```
 
 ## ukui程序

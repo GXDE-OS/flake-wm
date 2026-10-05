@@ -3,7 +3,7 @@
 # wlcom_multitask.c is the compositor-native adapter and has no KWin dependency.
 set(MULTITASK_SOURCE_ASSET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/upstream/buttons")
 set(MULTITASK_INSTALL_ASSET_DIR
-  "${CMAKE_INSTALL_FULL_DATADIR}/gxde-wlcom/multitask/buttons"
+  "${CMAKE_INSTALL_FULL_DATADIR}/flakewm/multitask/buttons"
 )
 file(CONFIGURE
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/multitask_assets.h"
@@ -18,10 +18,10 @@ file(CONFIGURE
 )
 
 install(DIRECTORY upstream/buttons upstream/shaders
-  DESTINATION ${CMAKE_INSTALL_DATADIR}/gxde-wlcom/multitask
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/flakewm/multitask
 )
 
-target_sources(gxde-wlcom PRIVATE
+target_sources(flakewm PRIVATE
   wlcom_multitask.c
   wlcom_multitask_dbus.c
 )
