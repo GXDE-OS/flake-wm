@@ -1,4 +1,4 @@
-flamewm (3.0.0-gxde1) lizhi; urgency=high
+flakewm (3.0.0-gxde2) lizhi; urgency=high
 
   * 迁移至CMake构建系统
   * Wlroots版本更新至0.20.2
