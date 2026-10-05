@@ -1,3 +1,9 @@
+gxde-wlcom (3.0.0-gxde1) lizhi; urgency=high
+
+  * Wlroots版本更新至0.20.2
+
+ -- CharOfString <root@charofstring.cc>  Sun, 04 Oct 2026 23:22:21 -0500
+
 gxde-wlcom (2.3.7-gxde4) lizhi; urgency=high
 
   * 迁移至CMake构建系统
