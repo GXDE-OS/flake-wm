@@ -2,6 +2,7 @@
 
 本项目使用独立的 `flakewm` / `flakewm-client` 包，可与 `gxde-wlcom` 同时安装。
 安装 `gxde-flake-session` 后，在登录管理器选择 `gxde-flakewm`。启动脚本为 `/usr/bin/startflakewm`，ELF 为 `/usr/bin/flakewm`。
+非 Debian 系系统可在源码目录运行 `sudo ./install-gxde-session` 安装会话（`--help` 查看选项，`-u` 卸载）。
 配置使用 `/etc/flakewm` 和 `~/.config/flakewm`，不会读取或覆盖旧合成器配置。
 客户端库为 `libflakewm-client.so`，使用 `pkg-config flakewm-client`，头文件位于 `include/flakewm`。
 D-Bus 服务名、对象路径和接口名保留原来的 `com.kylin.Wlcom` 和 `top.gxde.Wlcom`，现有调用者无需修改。

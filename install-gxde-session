@@ -1,0 +1,159 @@
+#!/bin/bash
+# Install the GXDE FlakeWM session on systems without the gxde-flake-session
+# Debian package. Installs the same files as debian/gxde-flake-session.install.
+# -----------------------------------------------------------------------------
+# 在无法使用 gxde-flake-session Debian 包的系统上安装 GXDE FlakeWM 会话。
+# 安装的文件与 debian/gxde-flake-session.install 相同。
+set -euo pipefail
+
+source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/data
+
+prefix=/usr
+sessions_dir=/usr/share/wayland-sessions
+destdir=${DESTDIR:-}
+action=install
+force=0
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [options]
+
+Install the gxde-flakewm Wayland session (startflakewm and
+gxde-flakewm.desktop) on non-Debian systems.
+
+Options:
+  -p, --prefix DIR        Prefix where flakewm is installed (default: /usr)
+  -s, --sessions-dir DIR  Wayland session directory read by the display
+                          manager (default: /usr/share/wayland-sessions)
+  -d, --destdir DIR       Stage files under DIR, for packaging (default: \$DESTDIR)
+  -u, --uninstall         Remove the installed session files
+  -f, --force             Proceed on Debian-based systems
+  -h, --help              Show this help
+EOF
+}
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+warn() {
+    printf 'warning: %s\n' "$*" >&2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -p | --prefix)
+        [ $# -ge 2 ] || die "$1 requires an argument"
+        prefix=$2
+        shift 2
+        ;;
+    -s | --sessions-dir)
+        [ $# -ge 2 ] || die "$1 requires an argument"
+        sessions_dir=$2
+        shift 2
+        ;;
+    -d | --destdir)
+        [ $# -ge 2 ] || die "$1 requires an argument"
+        destdir=$2
+        shift 2
+        ;;
+    -u | --uninstall)
+        action=uninstall
+        shift
+        ;;
+    -f | --force)
+        force=1
+        shift
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+    esac
+done
+
+prefix=${prefix%/}
+sessions_dir=${sessions_dir%/}
+bin_dir=$prefix/bin
+startflakewm=$bin_dir/startflakewm
+session_file=$sessions_dir/gxde-flakewm.desktop
+
+is_debian_based() {
+    local id="" id_like=""
+    if [ -r /etc/os-release ]; then
+        # shellcheck source=/dev/null
+        id=$(. /etc/os-release && printf '%s' "${ID:-}")
+        # shellcheck source=/dev/null
+        id_like=$(. /etc/os-release && printf '%s' "${ID_LIKE:-}")
+    fi
+    case " $id $id_like " in
+    *" debian "* | *" ubuntu "*)
+        return 0
+        ;;
+    esac
+    [ -e /etc/debian_version ]
+}
+
+check_writable() {
+    local dir=$1
+    while [ ! -e "$dir" ]; do
+        dir=$(dirname "$dir")
+    done
+    [ -w "$dir" ] || die "no write permission for $dir, run as root (e.g. with sudo)"
+}
+
+if [ -z "$destdir" ] && [ "$force" -eq 0 ] && is_debian_based; then
+    die "Debian-based system detected, install the gxde-flake-session package instead (or pass --force)"
+fi
+
+if [ "$action" = uninstall ]; then
+    for file in "$destdir$startflakewm" "$destdir$session_file"; do
+        if [ -e "$file" ] || [ -L "$file" ]; then
+            check_writable "$(dirname "$file")"
+            rm -f "$file"
+            printf 'removed %s\n' "$file"
+        fi
+    done
+    exit 0
+fi
+
+[ -r "$source_dir/startflakewm" ] && [ -r "$source_dir/gxde-flakewm.desktop" ] ||
+    die "session files not found in $source_dir"
+
+if [ -z "$destdir" ]; then
+    [ -x "$bin_dir/flakewm" ] ||
+        warn "$bin_dir/flakewm not found, install flakewm first (cmake --install) or set --prefix"
+    command -v startdde >/dev/null 2>&1 || [ -x /usr/bin/startdde ] ||
+        warn "startdde not found, the session needs the GXDE desktop (dde-session) to start"
+fi
+
+check_writable "$destdir$bin_dir"
+check_writable "$destdir$sessions_dir"
+
+# The source files hardcode /usr/bin. Point them at the chosen prefix while
+# leaving paths to other packages (startdde, VBoxClient, ...) untouched.
+# -----------------------------------------------------------------------------
+# 源文件写死了 /usr/bin，此处替换为指定的前缀，其他包的路径（startdde、
+# VBoxClient 等）保持不变。
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+
+sed "s|/usr/bin/flakewm\\b|$bin_dir/flakewm|g" \
+    "$source_dir/startflakewm" >"$tmp_dir/startflakewm"
+sed -e "s|^Exec=/usr/bin/startflakewm\$|Exec=$startflakewm|" \
+    -e "s|^TryExec=/usr/bin/flakewm\$|TryExec=$bin_dir/flakewm|" \
+    "$source_dir/gxde-flakewm.desktop" >"$tmp_dir/gxde-flakewm.desktop"
+
+install -Dm755 "$tmp_dir/startflakewm" "$destdir$startflakewm"
+printf 'installed %s\n' "$destdir$startflakewm"
+install -Dm644 "$tmp_dir/gxde-flakewm.desktop" "$destdir$session_file"
+printf 'installed %s\n' "$destdir$session_file"
+
+if [ -z "$destdir" ]; then
+    printf 'Select "gxde-flakewm" in the display manager to start the session.\n'
+fi
