@@ -43,7 +43,10 @@ jobs:
           fi
 
       - name: Build Arch Linux package
-        run: sudo -u builder makepkg --syncdeps --noconfirm --cleanbuild
+        run: |
+          sudo -u builder env \
+            FLAKEWM_SOURCE="git+file://${GITHUB_WORKSPACE}#commit=${GITHUB_SHA}" \
+            makepkg --syncdeps --noconfirm --cleanbuild
 
       - name: Upload package
         uses: actions/upload-artifact@v4
