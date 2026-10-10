@@ -39,9 +39,12 @@ static void text_input_enable(struct wl_client *client, struct wl_resource *reso
         return;
     }
 
-    assert(text_input->surface == NULL);
-    text_input->surface = wlr_surface_from_resource(surface);
-    wl_signal_add(&text_input->surface->events.destroy, &text_input->surface_destroy);
+    struct wlr_surface *wlr_surface = wlr_surface_from_resource(surface);
+    if (text_input->surface != wlr_surface) {
+        wl_list_remove(&text_input->surface_destroy.link);
+        text_input->surface = wlr_surface;
+        wl_signal_add(&text_input->surface->events.destroy, &text_input->surface_destroy);
+    }
 
     text_input->enabled = true;
     wl_signal_emit_mutable(&text_input->events.enable, NULL);
@@ -52,6 +55,11 @@ static void text_input_disable(struct wl_client *client, struct wl_resource *res
 {
     struct text_input_v2 *text_input = wl_resource_get_user_data(resource);
     if (!text_input) {
+        return;
+    }
+
+    /* stale disable for a surface that was already replaced by a later enable */
+    if (text_input->surface && text_input->surface != wlr_surface_from_resource(surface)) {
         return;
     }
 
