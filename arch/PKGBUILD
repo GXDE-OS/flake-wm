@@ -1,0 +1,83 @@
+# Maintainer: CharOfString <root@charofstring.cc>
+pkgbase=flakewm-git
+pkgname=('flakewm-git' 'flakewm-client-git' 'gxde-flake-session-git')
+pkgver=3.0.1
+pkgrel=1
+pkgdesc='GXDE Wayland compositor'
+arch=('x86_64' 'aarch64')
+url="https://github.com/flake-wm/flake-wm"
+license=('GPL-1.0-or-later' 'GPL-2.0-or-later' 'GPL-3.0-or-later' 'LGPL-2.1-or-later' 'MIT' 'MIT-CMU'
+         'MulanPSL-2.0')
+makedepends=('git' 'cmake' 'ninja' 'meson' 'pkgconf' 'gettext' 'glslang' 'hwdata' 'systemd' 'vulkan-headers'
+             'wayland-protocols' 'qt6-base' 'qt6-declarative' 'qt6-5compat' 'cairo' 'glib2' 'json-c'
+             'libdisplay-info' 'libdrm' 'libepoxy' 'libglvnd' 'libinput' 'libjpeg-turbo' 'libliftoff' 'libpng'
+             'librsvg' 'libunwind' 'libxcb' 'libxkbcommon' 'mesa' 'openssl' 'pango' 'pixman' 'seatd'
+             'vulkan-icd-loader' 'wayland' 'xcb-util-errors' 'xcb-util-renderutil' 'xcb-util-wm')
+source=()
+sha512sums=()
+
+# 直接使用 PKGBUILD 所在的 git 仓库作为源码 ・ Build from the git checkout this PKGBUILD lives in.
+_srcroot() {
+  git -C "$startdir" rev-parse --show-toplevel
+}
+
+build() {
+  # 与 debian/rules 相同 ・ Same as debian/rules.
+  cmake -B build -S "$(_srcroot)" -GNinja \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DWLCOM_EXAMPLES=OFF \
+    -DWLCOM_UKUI_THEME=ON \
+    -DWLCOM_WLROOTS_RENDERERS=gles2,vulkan
+  ninja -C build
+  DESTDIR="$srcdir/root" ninja -C build install
+}
+
+# 按 debian/*.install 拆分 ・ Split as in debian/*.install.
+_pick() {
+  local _f
+  cd "$srcdir/root"
+  for _f in "$@"; do
+    [[ -e $_f || -L $_f ]] || { echo "missing: $_f" >&2; return 1; }
+    install -d "$pkgdir/$(dirname "$_f")"
+    mv "$_f" "$pkgdir/$_f"
+  done
+}
+
+package_flakewm-git() {
+  depends=('cairo' 'glib2' 'json-c' 'libdisplay-info' 'libdrm' 'libepoxy' 'libglvnd' 'libinput'
+           'libjpeg-turbo' 'libliftoff' 'libpng' 'librsvg' 'libunwind' 'libxcb' 'libxkbcommon' 'mesa'
+           'openssl' 'pango' 'pixman' 'seatd' 'systemd-libs' 'vulkan-icd-loader' 'wayland' 'xcb-util-errors'
+           'xcb-util-renderutil' 'xcb-util-wm' 'xorg-xwayland' 'libgcc' 'libstdc++' 'glibc')
+  provides=('flakewm')
+  conflicts=('flakewm')
+
+  # 系统库版本过旧时 CMake 才会构建私有副本，放在 /usr/lib/flakewm ・ CMake only builds private copies into /usr/lib/flakewm when the system ones are too old.
+  _pick usr/bin/flakewm usr/share/locale usr/share/flakewm usr/lib/udev/rules.d etc/flakewm \
+        usr/share/glib-2.0/schemas
+  [[ ! -d usr/lib/flakewm ]] || _pick usr/lib/flakewm
+  # 与 debian/flakewm.install 相同 ・ Same as debian/flakewm.install.
+  install -Dm644 "$(_srcroot)/data/configs/OMG.conf" "$pkgdir/etc/flakewm/OMG.conf"
+  install -Dm644 "$(_srcroot)"/LICENSES/{MIT-CMU,MulanPSL-2.0}.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
+}
+
+package_flakewm-client-git() {
+  pkgdesc='Client library of the GXDE Wayland compositor'
+  # Debian 把开发文件放在同一个包里，这里一样 ・ As on Debian, the development files stay in this package.
+  depends=('wayland' 'libgcc' 'libstdc++' 'glibc')
+  provides=('flakewm-client')
+  conflicts=('flakewm-client')
+
+  cd "$srcdir/root"
+  _pick usr/lib/libflakewm-client.so* usr/include usr/lib/pkgconfig
+}
+
+package_gxde-flake-session-git() {
+  pkgdesc='GXDE session on the Flake Wayland compositor'
+  depends=("flakewm-git=$pkgver-$pkgrel" 'bash')
+  provides=('gxde-flake-session')
+  conflicts=('gxde-flake-session')
+
+  _pick usr/bin/startflakewm usr/share/wayland-sessions/gxde-flakewm.desktop
+}

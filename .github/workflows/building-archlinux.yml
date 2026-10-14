@@ -43,18 +43,17 @@ jobs:
           fi
 
       - name: Build Arch Linux package
+        working-directory: arch
         run: |
-          sudo -u builder env \
-            FLAKEWM_SOURCE="git+file://${GITHUB_WORKSPACE}#commit=${GITHUB_SHA}" \
-            makepkg --syncdeps --noconfirm --cleanbuild
+          sudo -u builder makepkg --syncdeps --noconfirm --cleanbuild
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: archlinux-${{ matrix.arch }}
           path: |
-            *.pkg.tar.zst
-            *.pkg.tar.xz
+            arch/*.pkg.tar.zst
+            arch/*.pkg.tar.xz
           if-no-files-found: error
 
       - name: Create Release
@@ -64,6 +63,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOCKEN_GITHUB }}
         with:
           files: |
-            *.pkg.tar.zst
-            *.pkg.tar.xz
+            arch/*.pkg.tar.zst
+            arch/*.pkg.tar.xz
           generate_release_notes: true
