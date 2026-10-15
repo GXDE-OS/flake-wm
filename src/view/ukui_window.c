@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-1.0-or-later
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,6 +15,7 @@
 
 #include "input/seat.h"
 #include "theme.h"
+#include "util/wayland.h"
 #include "ukui-window-management-protocol.h"
 #include "view/workspace.h"
 #include "view_p.h"
@@ -255,35 +257,52 @@ static void handle_get_icon(struct wl_client *client, struct wl_resource *resour
 {
     struct ukui_window *window = wl_resource_get_user_data(resource);
     if (!window) {
+        close(fd);
         return;
     }
 
     struct view *view = view_from_kywc_view(window->kywc_view);
-    if (!view->impl->get_icon_buffer) {
+    if (!view->impl->get_icon_buffer || !view->output) {
+        close(fd);
         return;
     }
 
     struct theme *theme = theme_manager_get_theme();
     float scale = view->output->state.scale;
-    struct wlr_buffer *wlr_buffer = view->impl->get_icon_buffer(view, theme->icon_size, scale);
-    if (!wlr_buffer) {
+    struct wlr_buffer *buffer = view->impl->get_icon_buffer(view, theme->icon_size, scale);
+    if (!buffer) {
+        close(fd);
         return;
     }
 
     void *data;
     uint32_t format;
     size_t stride;
-    if (wlr_buffer->impl->begin_data_ptr_access &&
-        wlr_buffer->impl->begin_data_ptr_access(wlr_buffer, WLR_BUFFER_DATA_PTR_ACCESS_WRITE, &data,
-                                                &format, &stride)) {
-        int32_t size[2];
-        size[0] = wlr_buffer->width;
-        size[1] = wlr_buffer->height;
-        write(fd, size, sizeof(size));
-        write(fd, data, stride * wlr_buffer->height);
+    if (!wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format,
+                                          &stride)) {
         close(fd);
-        wlr_buffer->impl->end_data_ptr_access(wlr_buffer);
+        return;
     }
+
+    /* Keep the existing wire format, but never block the compositor on a reader.
+     * The icon can change or disappear while the client drains its pipe. */
+    int32_t dimensions[2] = { buffer->width, buffer->height };
+    void *payload = NULL;
+    size_t size = 0;
+    if (buffer->height > 0 && stride <= (SIZE_MAX - sizeof(dimensions)) / buffer->height) {
+        size = sizeof(dimensions) + stride * buffer->height;
+        payload = malloc(size);
+        if (payload) {
+            memcpy(payload, dimensions, sizeof(dimensions));
+            memcpy((char *)payload + sizeof(dimensions), data, size - sizeof(dimensions));
+        }
+    }
+    wlr_buffer_end_data_ptr_access(buffer);
+    if (!payload) {
+        close(fd);
+        return;
+    }
+    wl_resource_write_owned_data(resource, fd, payload, size);
 }
 
 static void handle_request_enter_virtual_desktop(struct wl_client *client,

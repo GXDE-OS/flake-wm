@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <kywc/identifier.h>
 
@@ -203,7 +204,8 @@ static void handle_destroy(struct wl_client *client, struct wl_resource *resourc
 
 static void handle_get_icon(struct wl_client *client, struct wl_resource *resource, int32_t fd)
 {
-    // Not implemented yet
+    /* No serialized icon is available. Close the owned FD so the reader gets EOF. */
+    close(fd);
 }
 
 static void handle_request_enter_virtual_desktop(struct wl_client *client,

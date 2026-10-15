@@ -21,4 +21,12 @@ void wl_global_destroy_safe(struct wl_global *global);
  */
 void wl_signal_emit_oneshot(struct wl_signal *signal, void *data);
 
+/**
+ * Write an owned malloc buffer without blocking the event loop. Always consumes
+ * fd and data. Requires SIGPIPE to be ignored (as in main.c). At most one write
+ * is pending per resource; a new write cancels the old one. Pending writes expire
+ * after five seconds and are cancelled when the resource is destroyed.
+ */
+void wl_resource_write_owned_data(struct wl_resource *resource, int fd, void *data, size_t size);
+
 #endif /* _UTIL_WAYLAND_H_ */
