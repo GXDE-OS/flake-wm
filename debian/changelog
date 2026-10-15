@@ -1,3 +1,9 @@
+flakewm (3.0.1-gxde2) lizhi; urgency=medium
+
+  * 修复XCursor下会使用不存在光标图形的问题
+
+ -- CharOfString <root@charofstring.cc>  Tue, 15 Oct 2026 09:01:20 -0500
+
 flakewm (3.0.1-gxde1) lizhi; urgency=medium
 
   * 修复Archlinux上的崩溃
