@@ -70,10 +70,13 @@ static void scale_calc_minimize_start_and_end_geometry(struct view *view, struct
         return;
     }
 
+    struct ky_scene_buffer *buffer = NULL;
     if (view->minimized_geometry.panel_surface) {
+        buffer = ky_scene_buffer_try_from_surface(view->minimized_geometry.panel_surface);
+    }
+
+    if (buffer) {
         int lx, ly;
-        struct ky_scene_buffer *buffer =
-            ky_scene_buffer_try_from_surface(view->minimized_geometry.panel_surface);
         ky_scene_node_coords(&buffer->node, &lx, &ly);
 
         end->x = view->minimized_geometry.x + lx;
