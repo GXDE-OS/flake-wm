@@ -1,3 +1,9 @@
+flakewm (3.0.2-gxde2) lizhi; urgency=medium
+
+  * 修复内存安全问题
+
+ -- CharOfString <root@charofstring.cc>  Sat, 17 Oct 2026 03:19:00 -0500
+
 flakewm (3.0.2-gxde1) lizhi; urgency=medium
 
   * 修复KDE Blur效果劣质的问题
