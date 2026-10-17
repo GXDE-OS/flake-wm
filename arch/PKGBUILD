@@ -1,8 +1,8 @@
 # Maintainer: CharOfString <root@charofstring.cc>
 pkgbase=flakewm-git
 pkgname=('flakewm-git' 'flakewm-client-git' 'gxde-flake-session-git')
-pkgver=3.0.1
-pkgrel=2
+pkgver=3.0.2
+pkgrel=1
 pkgdesc='GXDE Wayland compositor'
 arch=('x86_64' 'aarch64')
 url="https://github.com/flake-wm/flake-wm"
