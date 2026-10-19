@@ -557,6 +557,10 @@ static void selector_commit(struct tcap_selector *selector, uint32_t source_type
 
 static void selector_finish_pick(struct tcap_selector *selector)
 {
+    /* the hovered view/output are not tracked and may be gone since the last
+     * motion, resolve them again from what is under the cursor now */
+    selector_update_hover(selector, selector->seat->cursor->lx, selector->seat->cursor->ly);
+
     if (selector->mode == TCAP_SEL_MODE_OUTPUT) {
         if (selector->hover_output) {
             struct kywc_box box;
@@ -937,6 +941,7 @@ static void frame_handle_copy(struct wl_client *client, struct wl_resource *reso
     size_t stride = 0;
     if (!wlr_buffer_begin_data_ptr_access(dst, WLR_BUFFER_DATA_PTR_ACCESS_WRITE, &data, &format,
                                           &stride)) {
+        wlr_buffer_unlock(dst);
         treeland_capture_frame_v1_send_failed(resource);
         return;
     }
@@ -950,6 +955,8 @@ static void frame_handle_copy(struct wl_client *client, struct wl_resource *reso
     }
     capture_read_buffer(frame->buffer, format, (uint32_t)stride, &box, data);
     wlr_buffer_end_data_ptr_access(dst);
+    /* wlr_buffer_try_from_resource() returned a locked buffer */
+    wlr_buffer_unlock(dst);
 
     treeland_capture_frame_v1_send_ready(resource);
 }

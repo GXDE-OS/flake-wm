@@ -1306,8 +1306,9 @@ struct kywc_output_mode *kywc_output_preferred_mode(struct kywc_output *kywc_out
 
 struct output *output_from_resource(struct wl_resource *resource)
 {
+    /* wl_output resources are made inert (NULL user data) when the output is gone */
     struct wlr_output *wlr_output = wl_resource_get_user_data(resource);
-    return output_from_wlr_output(wlr_output);
+    return wlr_output ? output_from_wlr_output(wlr_output) : NULL;
 }
 
 static void output_find_best_mode(struct wlr_output *wlr_output, int32_t width, int32_t height,

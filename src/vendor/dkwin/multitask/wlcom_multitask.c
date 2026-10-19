@@ -152,6 +152,7 @@ struct multitask_view {
     struct wlr_buffer *wallpaper_buffer;
 
     struct output *output;
+    struct wl_listener output_destroy;
     struct seat_pointer_grab pointer_grab;
     struct seat_keyboard_grab keyboard_grab;
     struct seat_touch_grab touch_grab;
@@ -702,6 +703,23 @@ static void destroy_contents(void)
     }
 }
 
+static void overview_set_output(struct output *output)
+{
+    wl_list_remove(&overview->output_destroy.link);
+    wl_list_init(&overview->output_destroy.link);
+    overview->output = output;
+    if (output) {
+        wl_signal_add(&output->base.events.destroy, &overview->output_destroy);
+    }
+}
+
+static void handle_output_destroy(struct wl_listener *listener, void *data)
+{
+    /* the output showing the overview is unplugged, there is nothing left to show it on */
+    overview_set_output(NULL);
+    teardown_overview();
+}
+
 static void teardown_overview(void)
 {
     if (!overview) {
@@ -727,7 +745,7 @@ static void teardown_overview(void)
     if (overview->output) {
         output_schedule_frame(overview->output->wlr_output);
     }
-    overview->output = NULL;
+    overview_set_output(NULL);
     overview->enabled = false;
     overview->closing = false;
     overview->animating = false;
@@ -1154,7 +1172,7 @@ static bool create_window_items(const struct kywc_box *area, int workspace_bar_h
 
 static bool show_overview(void)
 {
-    overview->output = input_current_output(input_manager_get_default_seat());
+    overview_set_output(input_current_output(input_manager_get_default_seat()));
     if (!overview->output) {
         return false;
     }
@@ -1507,6 +1525,8 @@ bool multitask_view_create(struct view_manager *view_manager)
         return false;
     }
     overview->view_manager = view_manager;
+    wl_list_init(&overview->output_destroy.link);
+    overview->output_destroy.notify = handle_output_destroy;
     overview->hovered_item = overview->hovered_workspace = overview->pressed_item =
         overview->pressed_workspace = -1;
     struct view_layer *layer = view_manager_get_layer(LAYER_ON_SCREEN_DISPLAY, false);

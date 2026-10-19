@@ -687,8 +687,13 @@ void touch_handle_motion(struct wlr_touch_motion_event *event, bool handle)
     /* if motion out of point->surface */
     if (surface != point->surface) {
         if (!selection_is_dragging(seat)) {
-            int lx, ly;
+            /* the surface may outlive its scene node, e.g. a layer surface
+             * destroyed with its output while the finger is still down */
             struct ky_scene_buffer *scene_buffer = ky_scene_buffer_try_from_surface(point->surface);
+            if (!scene_buffer) {
+                return;
+            }
+            int lx, ly;
             ky_scene_node_coords(&scene_buffer->node, &lx, &ly);
             sx = seat->cursor->lx - lx;
             sy = seat->cursor->ly - ly;

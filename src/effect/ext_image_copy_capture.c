@@ -85,6 +85,8 @@ struct ext_capture_source {
 
     struct wl_listener backend_update;
     struct wl_listener backend_destroy;
+    /* the backend is created lazily, so the target can go away before it exists */
+    struct wl_listener target_destroy;
 };
 
 struct ext_toplevel {
@@ -93,7 +95,6 @@ struct ext_toplevel {
     struct view *view;
     struct wl_list resources;
     char identifier[40];
-    bool closed;
 
     struct wl_listener unmap;
     struct wl_listener title;
@@ -243,6 +244,7 @@ static void source_maybe_destroy(struct ext_capture_source *source)
         return;
     }
 
+    wl_list_remove(&source->target_destroy.link);
     if (source->backend.ptr) {
         wl_list_remove(&source->backend_update.link);
         wl_list_remove(&source->backend_destroy.link);
@@ -262,6 +264,15 @@ static void source_handle_backend_destroy(struct wl_listener *listener, void *da
     source->backend.ptr = NULL;
     wl_list_remove(&source->backend_update.link);
     wl_list_remove(&source->backend_destroy.link);
+    source_stop(source);
+}
+
+static void source_handle_target_destroy(struct wl_listener *listener, void *data)
+{
+    struct ext_capture_source *source = wl_container_of(listener, source, target_destroy);
+    wl_list_remove(&source->target_destroy.link);
+    wl_list_init(&source->target_destroy.link);
+    source->target.output = NULL;
     source_stop(source);
 }
 
@@ -286,6 +297,9 @@ static void source_handle_backend_update(struct wl_listener *listener, void *dat
         source->buffer = wlr_buffer_lock(buffer);
     }
 
+    /* frame_copy() can finish the last session and with it the source, keep the
+     * source alive until the loop is done */
+    source->stopping = true;
     struct ext_capture_session *session, *tmp;
     wl_list_for_each_safe(session, tmp, &source->sessions, link) {
         if (session->stopped) {
@@ -300,6 +314,8 @@ static void source_handle_backend_update(struct wl_listener *listener, void *dat
             frame_copy(session->frame);
         }
     }
+    source->stopping = false;
+    source_maybe_destroy(source);
 }
 
 static bool source_create_backend(struct ext_capture_source *source, uint32_t options)
@@ -376,6 +392,8 @@ static struct ext_capture_source *source_create(struct ext_capture_manager *mana
     source->kind = kind;
     source->target.output = target;
     wl_list_init(&source->sessions);
+    wl_list_init(&source->target_destroy.link);
+    source->target_destroy.notify = source_handle_target_destroy;
     wl_resource_set_implementation(resource, &source_impl, source,
         source_handle_resource_destroy);
 
@@ -385,10 +403,12 @@ static struct ext_capture_source *source_create(struct ext_capture_manager *mana
         struct output *output = target;
         source->width = output->geometry.width;
         source->height = output->geometry.height;
+        wl_signal_add(&output->base.events.destroy, &source->target_destroy);
     } else {
         struct view *view = target;
         source->width = view->base.geometry.width;
         source->height = view->base.geometry.height;
+        wl_signal_add(&view->base.events.destroy, &source->target_destroy);
     }
     return source;
 }
@@ -747,14 +767,20 @@ static void toplevel_create_resource(struct ext_toplevel *toplevel,
 static void toplevel_handle_unmap(struct wl_listener *listener, void *data)
 {
     struct ext_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
-    toplevel->closed = true;
     wl_list_remove(&toplevel->unmap.link);
     wl_list_remove(&toplevel->title.link);
     wl_list_remove(&toplevel->app_id.link);
-    struct wl_resource *resource;
-    wl_resource_for_each(resource, &toplevel->resources) {
+
+    /* a later map creates a new toplevel, so make the handles inert and free this one */
+    struct wl_resource *resource, *tmp;
+    wl_resource_for_each_safe(resource, tmp, &toplevel->resources) {
         ext_foreign_toplevel_handle_v1_send_closed(resource);
+        wl_resource_set_user_data(resource, NULL);
+        wl_list_remove(wl_resource_get_link(resource));
+        wl_list_init(wl_resource_get_link(resource));
     }
+    wl_list_remove(&toplevel->link);
+    free(toplevel);
 }
 
 static void toplevel_handle_title(struct wl_listener *listener, void *data)
@@ -840,9 +866,7 @@ static void toplevel_list_bind(struct wl_client *client, void *data, uint32_t ve
     wl_list_insert(&manager->toplevel_list_resources, wl_resource_get_link(resource));
     struct ext_toplevel *toplevel;
     wl_list_for_each(toplevel, &manager->toplevels, link) {
-        if (!toplevel->closed) {
-            toplevel_create_resource(toplevel, resource);
-        }
+        toplevel_create_resource(toplevel, resource);
     }
 }
 
@@ -857,7 +881,7 @@ static void toplevel_source_handle_create(struct wl_client *client, struct wl_re
         toplevel = wl_resource_get_user_data(handle_resource);
     }
     source_create(manager, client, id, EXT_SOURCE_TOPLEVEL,
-                  toplevel && !toplevel->closed ? toplevel->view : NULL);
+                  toplevel ? toplevel->view : NULL);
 }
 
 static const struct ext_foreign_toplevel_image_capture_source_manager_v1_interface
@@ -899,11 +923,9 @@ static void manager_handle_display_destroy(struct wl_listener *listener, void *d
             wl_resource_set_user_data(resource, NULL);
             wl_list_remove(wl_resource_get_link(resource));
         }
-        if (!toplevel->closed) {
-            wl_list_remove(&toplevel->unmap.link);
-            wl_list_remove(&toplevel->title.link);
-            wl_list_remove(&toplevel->app_id.link);
-        }
+        wl_list_remove(&toplevel->unmap.link);
+        wl_list_remove(&toplevel->title.link);
+        wl_list_remove(&toplevel->app_id.link);
         wl_list_remove(&toplevel->link);
         free(toplevel);
     }

@@ -165,9 +165,14 @@ static void handle_new_token(struct wl_listener *listener, void *data)
     token->seat_destroy.notify = token_handle_seat_destroy;
     wl_signal_add(&seat->events.destroy, &token->seat_destroy);
 
+    /* no output is under the cursor when none is enabled, e.g. lid closed and unplugged */
     token->output = input_current_output(seat) ? &input_current_output(seat)->base : NULL;
     token->output_destroy.notify = token_handle_output_destroy;
-    wl_signal_add(&token->output->events.destroy, &token->output_destroy);
+    if (token->output) {
+        wl_signal_add(&token->output->events.destroy, &token->output_destroy);
+    } else {
+        wl_list_init(&token->output_destroy.link);
+    }
 
     token->workspace = workspace_manager_get_current();
     if (token_v1->surface) {
