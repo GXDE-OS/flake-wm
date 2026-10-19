@@ -1,3 +1,9 @@
+flakewm (3.0.2-gxde3) lizhi; urgency=medium
+
+  * 修复崩溃问题
+
+ -- CharOfString <root@charofstring.cc>  Mon, 19 Oct 2026 10:48:02 -0500
+
 flakewm (3.0.2-gxde2) lizhi; urgency=medium
 
   * 修复内存安全问题
