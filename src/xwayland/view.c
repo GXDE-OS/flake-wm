@@ -43,6 +43,7 @@ struct xwayland_view {
     struct wl_listener request_maximize;
     struct wl_listener request_fullscreen;
     struct wl_listener request_activate;
+    struct wl_listener focus_in;
     struct wl_listener request_sticky;
     struct wl_listener request_skip_taskbar;
     struct wl_listener request_skip_pager;
@@ -67,6 +68,9 @@ struct xwayland_view {
     struct wl_listener output_update_usable_area;
 
     struct wl_list net_wm_icons; // from net_wm_icon
+
+    /* focus was offered instead of activating, see xwayland_view_offer_focus */
+    bool focus_offered;
 };
 
 struct net_wm_icon {
@@ -147,6 +151,28 @@ static struct xwayland_view *xwayland_view_from_view(struct view *view)
 {
     struct xwayland_view *xwayland_view = wl_container_of(view, xwayland_view, view);
     return xwayland_view;
+}
+
+/* ICCCM Globally Active clients (input hint False with WM_TAKE_FOCUS) set the
+ * input focus themselves when they want it. Some never do, like the always
+ * mapped, fully transparent window of xwaylandvideobridge. */
+static bool xwayland_view_is_globally_active(struct xwayland_view *xwayland_view)
+{
+    return wlr_xwayland_surface_icccm_input_model(xwayland_view->wlr_xwayland_surface) ==
+           WLR_ICCCM_INPUT_MODEL_GLOBAL;
+}
+
+static bool xwayland_view_offer_focus(struct view *view)
+{
+    struct xwayland_view *xwayland_view = xwayland_view_from_view(view);
+    if (!xwayland_view_is_globally_active(xwayland_view)) {
+        return false;
+    }
+
+    /* activated in focus_in if the client takes it */
+    xwayland_view->focus_offered = true;
+    wlr_xwayland_surface_offer_focus(xwayland_view->wlr_xwayland_surface);
+    return true;
 }
 
 static void xwayland_view_close(struct view *view)
@@ -309,6 +335,7 @@ static const struct view_impl xwl_surface_impl = {
     .close = xwayland_view_close,
     .destroy = xwayland_view_destroy,
     .get_icon_buffer = xwayland_view_get_wm_icon_buffer,
+    .offer_focus = xwayland_view_offer_focus,
 };
 
 static void xwayland_view_update_geometry(struct xwayland_view *xwayland_view)
@@ -467,6 +494,26 @@ static void xwayland_view_handle_request_activate(struct wl_listener *listener, 
     view_set_focus(&xwayland_view->view, seat);
 }
 
+static void xwayland_view_handle_focus_in(struct wl_listener *listener, void *data)
+{
+    struct xwayland_view *xwayland_view = wl_container_of(listener, xwayland_view, focus_in);
+    /* only take over focus changes the client made after our offer */
+    if (!xwayland_view->focus_offered) {
+        return;
+    }
+
+    xwayland_view->focus_offered = false;
+    if (xwayland_view->view.base.activated) {
+        return;
+    }
+
+    kywc_view_activate(&xwayland_view->view.base);
+
+    struct wlr_seat *wlr_seat = xwayland_view->xwayland->wlr_xwayland->seat;
+    struct seat *seat = wlr_seat ? seat_from_wlr_seat(wlr_seat) : input_manager_get_default_seat();
+    view_set_focus(&xwayland_view->view, seat);
+}
+
 static void xwayland_view_handle_request_sticky(struct wl_listener *listener, void *data)
 {
     struct xwayland_view *xwayland_view = wl_container_of(listener, xwayland_view, request_sticky);
@@ -574,11 +621,11 @@ static void xwayland_view_handle_set_decorations(struct wl_listener *listener, v
         return;
     }
 
-    /* disable ssd if the window has clip region */
+    /* disable ssd if the window has clip region or is fully transparent */
     if (xwayland_view->view.surface) {
         struct ky_scene_buffer *buffer =
             ky_scene_buffer_try_from_surface(xwayland_view->view.surface);
-        if (pixman_region32_not_empty(&buffer->node.clip_region)) {
+        if (pixman_region32_not_empty(&buffer->node.clip_region) || buffer->opacity == 0) {
             view_set_decoration(&xwayland_view->view, KYWC_SSD_NONE);
             return;
         }
@@ -890,6 +937,8 @@ static void xwayland_view_handle_map(struct wl_listener *listener, void *data)
                   &xwayland_view->request_fullscreen);
     xwayland_view->request_activate.notify = xwayland_view_handle_request_activate;
     wl_signal_add(&wlr_xwayland_surface->events.request_activate, &xwayland_view->request_activate);
+    xwayland_view->focus_in.notify = xwayland_view_handle_focus_in;
+    wl_signal_add(&wlr_xwayland_surface->events.focus_in, &xwayland_view->focus_in);
     xwayland_view->request_sticky.notify = xwayland_view_handle_request_sticky;
     wl_signal_add(&wlr_xwayland_surface->events.request_sticky, &xwayland_view->request_sticky);
     xwayland_view->request_skip_taskbar.notify = xwayland_view_handle_request_skip_taskbar;
@@ -926,7 +975,8 @@ static void xwayland_view_handle_map(struct wl_listener *listener, void *data)
         !xwayland_surface_wants_focus_on_map(wlr_xwayland_surface);
 
     /* we should stack above the new window always */
-    if (!view_is_activatable(&xwayland_view->view) || xwayland_view->view.no_focus_on_map) {
+    if (!view_is_activatable(&xwayland_view->view) || xwayland_view->view.no_focus_on_map ||
+        xwayland_view_is_globally_active(xwayland_view)) {
         xwayland_restack_view(xwayland_view);
     }
 
@@ -962,6 +1012,8 @@ static void xwayland_view_handle_unmap(struct wl_listener *listener, void *data)
     wl_list_remove(&xwayland_view->set_size_hints.link);
     wl_list_remove(&xwayland_view->request_fullscreen.link);
     wl_list_remove(&xwayland_view->request_activate.link);
+    wl_list_remove(&xwayland_view->focus_in.link);
+    xwayland_view->focus_offered = false;
     wl_list_remove(&xwayland_view->request_sticky.link);
     wl_list_remove(&xwayland_view->request_skip_taskbar.link);
     wl_list_remove(&xwayland_view->request_skip_pager.link);
@@ -1223,7 +1275,12 @@ bool xwayland_view_set_opacity(struct xwayland_server *xwayland, xcb_window_t wi
     if (xwayland_view->view.surface) {
         struct ky_scene_buffer *buffer =
             ky_scene_buffer_try_from_surface(xwayland_view->view.surface);
+        bool was_transparent = buffer->opacity == 0;
         ky_scene_buffer_set_opacity(buffer, opacity);
+        /* ssd is disabled for fully transparent windows */
+        if (xwayland_view->view.base.mapped && was_transparent != (opacity == 0)) {
+            xwayland_view_handle_set_decorations(&xwayland_view->set_decorations, NULL);
+        }
     }
 
     return true;

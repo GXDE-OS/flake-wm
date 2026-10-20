@@ -441,7 +441,7 @@ void view_map(struct view *view)
     }
 
     kywc_view->has_initial_position = false;
-    if (view->no_focus_on_map) {
+    if (view->no_focus_on_map || (view->impl->offer_focus && view->impl->offer_focus(view))) {
         view_raise_to_top(view, false);
     } else {
         kywc_view_activate(kywc_view);
@@ -1252,6 +1252,10 @@ void view_activate_topmost(void)
         view = view_proxy->view;
         if (!view->base.mapped || view->base.minimized || !view_is_activatable(view)) {
             continue;
+        }
+        
+        if (view->impl->offer_focus && view->impl->offer_focus(view)) {
+            break;
         }
         view_do_activate(view);
         view_set_focus(view, input_manager_get_default_seat());

@@ -179,6 +179,7 @@ struct view_impl {
     void (*destroy)(struct view *view);
 
     struct wlr_buffer *(*get_icon_buffer)(struct view *view, int size, float scale);
+    bool (*offer_focus)(struct view *view);
 };
 
 void view_click(struct seat *seat, struct view *view, uint32_t button, bool pressed,
