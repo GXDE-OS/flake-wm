@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-1.0-or-later
 
 #include <stdlib.h>
+#include <string.h>
 
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_seat.h>
@@ -345,6 +346,34 @@ static void layer_shell_handle_commit(struct wl_listener *listener, void *data)
     }
 }
 
+static bool layer_shell_has_namespace(struct layer_shell *layer_shell, const char *name)
+{
+    const char *ns = layer_shell->layer_surface->namespace;
+    return ns && strcmp(ns, name) == 0;
+}
+
+/*
+ * gxde-launcher 全屏时铺满整个输出, 盖住顶栏, 但任务栏应始终显示在它上面。
+ * 它和任务栏同在 top 层, 同一层里后映射的表面在上, 而启动器每次显示都会重新
+ * 创建表面, 所以映射时把它放到同一输出上任务栏的正下方。
+ */
+static void layer_shell_place_launcher(struct layer_shell *layer_shell)
+{
+    struct wlr_layer_surface_v1 *layer_surface = layer_shell->layer_surface;
+    if (!layer_surface->output || !layer_shell_has_namespace(layer_shell, "gxde-launcher")) {
+        return;
+    }
+
+    struct layer_output *layer_output = layer_output_from_wlr_output(layer_surface->output);
+    struct layer_shell *dock;
+    wl_list_for_each(dock, &layer_output->shells[layer_surface->current.layer], link) {
+        if (dock != layer_shell && layer_shell_has_namespace(dock, "dde-shell/dock")) {
+            ky_scene_node_place_below(&layer_shell->tree->node, &dock->tree->node);
+            return;
+        }
+    }
+}
+
 static void layer_shell_handle_map(struct wl_listener *listener, void *data)
 {
     struct layer_shell *layer_shell = wl_container_of(listener, layer_shell, map);
@@ -353,6 +382,7 @@ static void layer_shell_handle_map(struct wl_listener *listener, void *data)
     /* map may precede the public commit signal for the first buffer. */
     if (layer_surface->output) {
         layer_shell_update_layer(layer_shell);
+        layer_shell_place_launcher(layer_shell);
     }
 
     /* layer-shell first configure is done in commit */
