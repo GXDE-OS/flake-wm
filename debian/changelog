@@ -1,3 +1,9 @@
+flakewm (3.0.3-gxde2) lizhi; urgency=medium
+
+  * 修复截图时因为帧同步卡死的问题
+
+ -- CharOfString <root@charofstring.cc>  Wed, 21 Oct 2026 21:51:20 -0500
+
 flakewm (3.0.3-gxde1) lizhi; urgency=medium
 
   * 修改SSD装饰风格，隐藏KDE XWayland Video Bridge的空窗口
