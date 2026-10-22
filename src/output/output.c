@@ -676,9 +676,12 @@ static void handle_output_frame(struct wl_listener *listener, void *data)
 
     output->scene_commit = ky_scene_output_commit(output->scene_output, NULL);
 
-    struct timespec now = { 0 };
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    ky_scene_output_send_frame_done(output->scene_output, &now);
+    /* nothing reached the screen; the retry timer paces frame_done until it recovers */
+    if (!output->scene_output->commit_failed) {
+        struct timespec now = { 0 };
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        ky_scene_output_send_frame_done(output->scene_output, &now);
+    }
     KY_PROFILE_ZONE_END(zone);
 }
 

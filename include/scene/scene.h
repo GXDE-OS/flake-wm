@@ -298,6 +298,11 @@ struct ky_scene_output {
     struct wlr_buffer *buffer;
     bool commit_failed;
 
+    /* after a failed commit, retry from this timer with backoff, never from idle */
+    struct wl_event_source *commit_retry;
+    int commit_retry_ms;
+    bool commit_retry_pending;
+
     struct ky_damage_ring damage_ring;
     pixman_region32_t collected_damage;
 

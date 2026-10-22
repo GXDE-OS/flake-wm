@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include <wlr/backend.h>
 #include <wlr/render/drm_syncobj.h>
@@ -241,6 +242,63 @@ static void scene_output_handle_needs_frame(struct wl_listener *listener, void *
     output_schedule_frame(scene_output->output);
 }
 
+#define COMMIT_RETRY_MIN_MS 16
+#define COMMIT_RETRY_MAX_MS 1000
+
+static int scene_output_handle_commit_retry(void *data)
+{
+    struct ky_scene_output *scene_output = data;
+    scene_output->commit_retry_pending = false;
+
+    /* clients get no frame_done while the output fails; pace them by the retry instead */
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    ky_scene_output_send_frame_done(scene_output, &now);
+
+    output_schedule_frame(scene_output->output);
+    return 0;
+}
+
+/**
+ * A failed commit produces no page flip, so scheduling a frame right away comes
+ * straight back from the idle source: the compositor spins, starves input, and
+ * every pass creates new syncobj timelines and eventfd waiters. Back off instead.
+ */
+static void scene_output_commit_failed(struct ky_scene_output *scene_output)
+{
+    ky_damage_ring_add_whole(&scene_output->damage_ring);
+    scene_output->commit_failed = true;
+
+    if (scene_output->commit_retry_ms == 0) {
+        scene_output->commit_retry_ms = COMMIT_RETRY_MIN_MS;
+        kywc_log(KYWC_WARN, "%s: output commit failed, retrying with backoff",
+                 scene_output->output->name);
+    } else if (scene_output->commit_retry_ms < COMMIT_RETRY_MAX_MS) {
+        scene_output->commit_retry_ms *= 2;
+        if (scene_output->commit_retry_ms > COMMIT_RETRY_MAX_MS) {
+            scene_output->commit_retry_ms = COMMIT_RETRY_MAX_MS;
+        }
+    }
+
+    if (!scene_output->commit_retry) {
+        scene_output->commit_retry = wl_event_loop_add_timer(
+            scene_output->output->event_loop, scene_output_handle_commit_retry, scene_output);
+    }
+    if (scene_output->commit_retry) {
+        scene_output->commit_retry_pending = true;
+        wl_event_source_timer_update(scene_output->commit_retry, scene_output->commit_retry_ms);
+    }
+}
+
+static void scene_output_commit_succeeded(struct ky_scene_output *scene_output)
+{
+    if (scene_output->commit_retry_ms) {
+        kywc_log(KYWC_INFO, "%s: output commit recovered", scene_output->output->name);
+    }
+    scene_output->commit_failed = false;
+    scene_output->commit_retry_ms = 0;
+}
+
 struct ky_scene_output *ky_scene_output_create(struct ky_scene *scene, struct wlr_output *output)
 {
     struct ky_scene_output *scene_output = calloc(1, sizeof(*scene_output));
@@ -307,6 +365,9 @@ void ky_scene_output_destroy(struct ky_scene_output *scene_output)
     ky_damage_ring_finish(&scene_output->damage_ring);
     pixman_region32_fini(&scene_output->collected_damage);
     wlr_buffer_unlock(scene_output->buffer);
+    if (scene_output->commit_retry) {
+        wl_event_source_remove(scene_output->commit_retry);
+    }
 
     wl_list_remove(&scene_output->link);
     wl_list_remove(&scene_output->output_commit.link);
@@ -648,6 +709,11 @@ static bool is_tearing_allowed(struct ky_scene *scene, struct ky_scene_buffer *b
 bool ky_scene_output_commit(struct ky_scene_output *scene_output,
                             const struct ky_scene_output_state_options *options)
 {
+    /* a failed commit is retried from the backoff timer, not from this frame */
+    if (scene_output->commit_retry_pending) {
+        return false;
+    }
+
     /* make sure something is done before commit */
     wl_signal_emit_mutable(&scene_output->events.frame, NULL);
 
@@ -734,8 +800,9 @@ bool ky_scene_output_commit(struct ky_scene_output *scene_output,
             };
             wl_signal_emit_mutable(&fullscreen->events.output_sample, &sample_event);
             ky_damage_ring_rotate_buffer(&scene_output->damage_ring, NULL);
+            scene_output_commit_succeeded(scene_output);
         } else {
-            ky_damage_ring_add_whole(&scene_output->damage_ring);
+            scene_output_commit_failed(scene_output);
         }
         wlr_output_state_finish(&state);
         return ok;
@@ -756,11 +823,10 @@ bool ky_scene_output_commit(struct ky_scene_output *scene_output,
             }
             wlr_buffer_unlock(scene_output->buffer);
             scene_output->buffer = wlr_buffer_lock(target.buffer);
+            scene_output_commit_succeeded(scene_output);
         } else {
-            /* damage whole if output commit failed */
-            ky_scene_output_damage_whole(scene_output);
+            scene_output_commit_failed(scene_output);
         }
-        scene_output->commit_failed = !ok;
     }
 
     wlr_output_state_finish(&state);
