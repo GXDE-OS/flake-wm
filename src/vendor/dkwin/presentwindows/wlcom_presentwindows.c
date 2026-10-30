@@ -145,6 +145,10 @@ struct present_view {
     double backdrop_alpha;
     double panel_alpha;
     char *filter;
+    /* optional window group: when set, only the views with these uuids are
+     * laid out (used by the dock to present one application's windows) */
+    char **group_uuids;
+    size_t group_count;
     uint32_t last_key;
     bool key_released;
     bool enabled;
@@ -163,6 +167,93 @@ static void destroy_contents(bool restore);
 static void rebuild(struct view *exclude);
 static void present_set_enabled(bool enabled);
 static void update_filter_frame(void);
+
+/* ------------------------------------------------------------------------- */
+/* Window group                                                             */
+
+/* An empty group means "every window", like the global Win+A shortcut. */
+static void clear_group(void)
+{
+    if (!pv || !pv->group_uuids) {
+        return;
+    }
+    for (size_t i = 0; i < pv->group_count; i++) {
+        g_free(pv->group_uuids[i]);
+    }
+    g_free(pv->group_uuids);
+    pv->group_uuids = NULL;
+    pv->group_count = 0;
+}
+
+static bool set_group(const char *const *uuids, size_t count)
+{
+    clear_group();
+    if (!uuids || !count) {
+        return false;
+    }
+    char **group = g_new0(char *, count);
+    if (!group) {
+        return false;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!uuids[i] || !*uuids[i]) {
+            continue;
+        }
+        group[n] = g_strdup(uuids[i]);
+        if (!group[n]) {
+            for (size_t k = 0; k < n; k++) {
+                g_free(group[k]);
+            }
+            g_free(group);
+            return false;
+        }
+        n++;
+    }
+    if (!n) {
+        g_free(group);
+        return false;
+    }
+    pv->group_uuids = group;
+    pv->group_count = n;
+    return true;
+}
+
+static bool group_equals(const char *const *uuids, size_t count)
+{
+    if (!pv->group_uuids || pv->group_count != count) {
+        return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (!uuids[i]) {
+            return false;
+        }
+        bool found = false;
+        for (size_t k = 0; k < pv->group_count; k++) {
+            if (strcmp(uuids[i], pv->group_uuids[k]) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool view_in_group(const struct view *view)
+{
+    if (!pv->group_uuids) {
+        return true;
+    }
+    for (size_t i = 0; i < pv->group_count; i++) {
+        if (g_strcmp0(pv->group_uuids[i], view->base.uuid) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static double clamp01(double v)
 {
@@ -386,7 +477,8 @@ static int collect_views(struct view_entry **entries_out, struct view *exclude)
                 view->base.role != KYWC_VIEW_ROLE_NORMAL || view->base.skip_switcher ||
                 !view_is_activatable(view) ||
                 !view_intersects_area(view, &pv->output->geometry) ||
-                is_pending(view) || !view_matches_filter(view, pv->filter)) {
+                is_pending(view) || !view_in_group(view) ||
+                !view_matches_filter(view, pv->filter)) {
                 continue;
             }
             bool seen = false;
@@ -1160,6 +1252,7 @@ static void teardown(void)
     /* like upstream: the filter does not survive deactivation */
     free(pv->filter);
     pv->filter = NULL;
+    clear_group();
     if (pv->output_listening) {
         wl_list_remove(&pv->output_destroy.link);
         pv->output_listening = false;
@@ -1217,8 +1310,51 @@ bool present_windows_toggle(void)
     if (!pv) {
         return false;
     }
+    if (!pv->enabled) {
+        /* the global shortcut presents every window, not a dock group */
+        if (pv->closing) {
+            teardown();
+        }
+        clear_group();
+    }
     present_set_enabled(!pv->enabled);
     return true;
+}
+
+/*
+ * Present only the views with the given uuids, used by the dock when the
+ * user scrolls on an application icon.  Repeating the same request keeps the
+ * current grid (a wheel event must not restart the animation); a different
+ * group replaces the grid in place.
+ */
+bool present_windows_show_uuids(const char *const *uuids, size_t count)
+{
+    if (!pv || !uuids || count == 0) {
+        return false;
+    }
+
+    if (pv->closing) {
+        /* the old grid would animate out while the new group is laid out:
+         * tear it down immediately so the request starts from a clean state */
+        teardown();
+    }
+
+    if (pv->enabled) {
+        if (group_equals(uuids, count)) {
+            return true;
+        }
+        if (!set_group(uuids, count)) {
+            return false;
+        }
+        rebuild(NULL);
+        return pv->enabled;
+    }
+
+    if (!set_group(uuids, count)) {
+        return false;
+    }
+    present_set_enabled(true);
+    return pv->enabled;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1702,6 +1838,7 @@ static void handle_server_destroy(struct wl_listener *listener, void *data)
     wl_event_source_remove(pv->timer);
     ky_scene_node_destroy(&pv->tree->node);
     free(pv->filter);
+    clear_group();
     free(pv);
     pv = NULL;
 }
