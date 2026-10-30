@@ -5,6 +5,8 @@
 #ifndef _VIEW_P_H_
 #define _VIEW_P_H_
 
+#include <stddef.h>
+
 #include <kywc/log.h>
 
 #include "server.h"
@@ -151,6 +153,10 @@ bool multitask_view_toggle(void);
 bool present_windows_create(struct view_manager *view_manager);
 
 bool present_windows_toggle(void);
+
+/* Present only the given views (by uuid).  An empty list is invalid; use
+ * present_windows_toggle() for the every-window overview. */
+bool present_windows_show_uuids(const char *const *uuids, size_t count);
 
 bool multitask_launcher_interface_create(void);
 
