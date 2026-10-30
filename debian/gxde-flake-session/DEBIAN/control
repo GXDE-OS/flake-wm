@@ -1,0 +1,12 @@
+Package: gxde-flake-session
+Source: flakewm
+Version: 3.0.3-gxde2
+Architecture: all
+Maintainer: Morose <chenlinxiang@kylinos.cn>
+Installed-Size: 27
+Depends: flakewm (>= 3.0.3-gxde2)
+Breaks: flakewm (<< 3.0.0-gxde3~)
+Replaces: flakewm (<< 3.0.0-gxde3~)
+Section: x11
+Priority: optional
+Description: GXDE desktop session for FlakeWM.

@@ -1,0 +1,4 @@
+90b3bbeea8f3504d66d823ddf528c09f  usr/bin/startflakewm
+b9bc10e8a64553c0ae0621bef7c998ba  usr/share/doc/gxde-flake-session/changelog.Debian.gz
+f5151f1f21abadcf7fddb94d246b466f  usr/share/doc/gxde-flake-session/copyright
+efc7fbf9edd92ac9d43885881b9c91eb  usr/share/wayland-sessions/gxde-flakewm.desktop
