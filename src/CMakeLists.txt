@@ -36,6 +36,7 @@ endif()
 
 add_subdirectory(vendor/dkwin/multitask)
 add_subdirectory(vendor/dkwin/presentwindows)
+add_subdirectory(vendor/gxde/portal)
 
 target_include_directories(flakewm PRIVATE
   "${PROJECT_SOURCE_DIR}"
