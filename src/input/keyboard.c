@@ -554,7 +554,13 @@ void keyboard_destroy(struct keyboard *keyboard)
     struct wlr_keyboard *wlr_keyboard = keyboard->wlr_keyboard;
 
     if (wlr_seat_get_keyboard(wlr_seat) == wlr_keyboard) {
-        wlr_seat_set_keyboard(wlr_seat, NULL);
+        /* Fall back to seat's main keyboard group instead of leaving the seat without a keyboard.
+         * Otherwise apps like Chromium will crash.
+         */
+        struct keyboard *fallback = keyboard->seat->keyboard;
+        wlr_seat_set_keyboard(wlr_seat, fallback && fallback != keyboard
+                                            ? fallback->wlr_keyboard
+                                            : NULL);
     }
 
     wl_list_remove(&keyboard->link);
