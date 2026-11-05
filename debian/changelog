@@ -1,3 +1,9 @@
+flakewm (3.0.3-gxde5) lizhi; urgency=medium
+
+  * 在不可用时回退到seat的键盘组，而不是让seat没有键盘，否则像是Chromium这样的程序会闪退
+
+ -- CharOfString <root@charofstring.cc>  Thu, 05 Nov 2026 16:16:31 -0600
+
 flakewm (3.0.3-gxde4) lizhi; urgency=medium
 
   * 传送门新增 FullscreenChanged 信号，供面板实现全屏时隐藏
