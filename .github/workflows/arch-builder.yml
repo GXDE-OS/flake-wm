@@ -1,6 +1,5 @@
 name: Building Arch Package
 run-name: Building ${{ GITHUB.REPOSITORY }} for Arch Linux
-runs-on: self-hosted
 
 on:
   workflow_dispatch:
@@ -8,4 +7,6 @@ on:
 jobs:
   call:
     uses: GXDE-OS/GXDE/.github/workflows/building-pkg.yml@master
+    with:
+      runs-on: self-hosted
     secrets: inherit
