@@ -1,5 +1,6 @@
 name: Building Arch Package
 run-name: Building ${{ GITHUB.REPOSITORY }} for Arch Linux
+runs-on: self-hosted
 
 on:
   workflow_dispatch:

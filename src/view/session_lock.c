@@ -50,6 +50,9 @@ struct session_lock {
     struct wlr_surface *focused;
     bool abandoned;
     bool locked_sent;
+    /* Took over from an abandoned lock: the session was already secured
+     * before this client connected, whether or not it gets to send locked. */
+    bool replaces_abandoned;
     bool destroying;
 
     struct wl_listener new_surface;
@@ -495,7 +498,11 @@ static void handle_unlock(struct wl_listener *listener, void *data)
 static void handle_lock_abandoned(struct wl_listener *listener, void *data)
 {
     struct session_lock *lock = wl_container_of(listener, lock, destroy);
-    if (!lock->locked_sent) {
+    /* Only a lock that never secured anything may be dropped. A replacement
+     * locker that crashes before its first locked event must not undo the
+     * lock it took over: that is exactly how a crash-looping locker would
+     * hand the session out. */
+    if (!lock->locked_sent && !lock->replaces_abandoned) {
         kywc_log(KYWC_WARN, "session lock client disappeared before locking completed");
         session_lock_destroy(lock, true);
         return;
@@ -549,6 +556,7 @@ static void handle_new_lock(struct wl_listener *listener, void *data)
     }
 
     lock->protocol_lock = protocol_lock;
+    lock->replaces_abandoned = manager->lock != NULL;
     wl_list_init(&lock->outputs);
     listener_init(&lock->new_surface);
     listener_init(&lock->unlock);
