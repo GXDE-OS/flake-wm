@@ -218,6 +218,52 @@ busctl --user call top.gxde.Wlcom /top/gxde/Wlcom/Effect top.gxde.Wlcom.Effect S
 busctl --user call top.gxde.Wlcom /top/gxde/Wlcom/Effect top.gxde.Wlcom.Effect SetEffectOption ssv blur noise_strength i 4
 ```
 
+## 模糊与透明
+
+关闭后不再有任何模糊和半透明的窗管界面：
+
+客户端自己不请求模糊的半透明（例如终端的透明背景）以及移动窗口特效中的半透明
+不受影响。该功能默认开启（即保留模糊与透明）。
+
+| 项目 | 值 |
+| --- | --- |
+| 总线 | Session Bus |
+| 服务名 | `top.gxde.Wlcom.Transparency` |
+| 对象路径 | `/top/gxde/Wlcom/Transparency` |
+| 接口名 | `top.gxde.Wlcom.Transparency` |
+
+### SetEnabled
+
+开启或关闭模糊与透明，调用成功后立即生效并写入当前用户配置
+（`theme` 段的 `disable_transparency`）。
+
+```text
+SetEnabled(bool enabled) -> bool
+```
+
+- `enabled`：`true` 开启模糊与透明，`false` 关闭。
+- 返回值：设置成功时返回 `true`。
+
+```bash
+# 关闭模糊与透明
+busctl --user call top.gxde.Wlcom.Transparency /top/gxde/Wlcom/Transparency top.gxde.Wlcom.Transparency SetEnabled b false
+
+# 开启
+busctl --user call top.gxde.Wlcom.Transparency /top/gxde/Wlcom/Transparency top.gxde.Wlcom.Transparency SetEnabled b true
+```
+
+### GetEnabled
+
+查询模糊与透明当前是否开启。
+
+```text
+GetEnabled() -> bool
+```
+
+```bash
+busctl --user call top.gxde.Wlcom.Transparency /top/gxde/Wlcom/Transparency top.gxde.Wlcom.Transparency GetEnabled
+```
+
 ## 截图
 
 | 项目 | 值 |

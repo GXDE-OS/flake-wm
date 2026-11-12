@@ -21,6 +21,9 @@ static const char *window_btn_interface = "top.gxde.Wlcom.WindowBtn";
 static const char *window_corner_service = "top.gxde.Wlcom.WindowCorner";
 static const char *window_corner_path = "/top/gxde/Wlcom/WindowCorner";
 static const char *window_corner_interface = "top.gxde.Wlcom.WindowCorner";
+static const char *transparency_service = "top.gxde.Wlcom.Transparency";
+static const char *transparency_path = "/top/gxde/Wlcom/Transparency";
+static const char *transparency_interface = "top.gxde.Wlcom.Transparency";
 
 static int print_theme_config(sd_bus_message *msg, void *userdata, sd_bus_error *ret_error)
 {
@@ -147,6 +150,21 @@ static int set_opacity(sd_bus_message *msg, void *userdata, sd_bus_error *ret_er
     return sd_bus_reply_method_return(msg, "b", ret);
 }
 
+static int set_transparency_enabled(sd_bus_message *msg, void *userdata,
+                                    sd_bus_error *ret_error)
+{
+    int enabled;
+    CK(sd_bus_message_read(msg, "b", &enabled));
+    bool ret = theme_manager_set_disable_transparency(!enabled);
+    return sd_bus_reply_method_return(msg, "b", ret);
+}
+
+static int get_transparency_enabled(sd_bus_message *msg, void *userdata,
+                                    sd_bus_error *ret_error)
+{
+    return sd_bus_reply_method_return(msg, "b", !theme_manager_get_disable_transparency());
+}
+
 static const sd_bus_vtable service_vtable[] = {
     SD_BUS_VTABLE_START(0),
     SD_BUS_METHOD("PrintThemeConfig", "", "s", print_theme_config, 0),
@@ -184,6 +202,13 @@ static const sd_bus_vtable window_corner_vtable[] = {
     SD_BUS_VTABLE_END,
 };
 
+static const sd_bus_vtable transparency_vtable[] = {
+    SD_BUS_VTABLE_START(0),
+    SD_BUS_METHOD("SetEnabled", "b", "b", set_transparency_enabled, 0),
+    SD_BUS_METHOD("GetEnabled", "", "b", get_transparency_enabled, 0),
+    SD_BUS_VTABLE_END,
+};
+
 bool theme_manager_config_init(struct theme_manager *manager)
 {
     manager->config = config_manager_add_config("theme");
@@ -201,8 +226,12 @@ bool theme_manager_config_init(struct theme_manager *manager)
                               window_btn_vtable, manager)) {
         return false;
     }
-    return dbus_register_object(window_corner_service, window_corner_path,
-                                window_corner_interface, window_corner_vtable, manager);
+    if (!dbus_register_object(window_corner_service, window_corner_path,
+                              window_corner_interface, window_corner_vtable, manager)) {
+        return false;
+    }
+    return dbus_register_object(transparency_service, transparency_path, transparency_interface,
+                                transparency_vtable, manager);
 }
 
 enum theme_type theme_manager_read_config(struct theme_manager *manager)
@@ -244,6 +273,11 @@ enum theme_type theme_manager_read_config(struct theme_manager *manager)
         manager->global.opacity = json_object_get_int(data);
     } else {
         manager->global.opacity = 100;
+    }
+
+    manager->global.disable_transparency = false;
+    if (json_object_object_get_ex(manager->config->json, "disable_transparency", &data)) {
+        manager->global.disable_transparency = json_object_get_boolean(data);
     }
 
     if (json_object_object_get_ex(manager->config->json, "force_round_corner", &data)) {
@@ -355,6 +389,13 @@ void theme_manager_write_config(struct theme_manager *manager, enum theme_type t
                                json_object_new_int(manager->global.opacity));
     } else {
         json_object_object_del(manager->config->json, "opacity");
+    }
+
+    if (manager->global.disable_transparency) {
+        json_object_object_add(manager->config->json, "disable_transparency",
+                               json_object_new_boolean(true));
+    } else {
+        json_object_object_del(manager->config->json, "disable_transparency");
     }
 
     if (manager->global.force_round_corner) {

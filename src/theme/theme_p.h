@@ -57,6 +57,8 @@ struct global_theme {
     int32_t accent_color;
     int32_t corner_radius;
     int32_t opacity;
+    /* false by default, so a zeroed global keeps transparency on */
+    bool disable_transparency;
     bool force_round_corner;
     bool force_round_corner_exclude_layer_shell;
     bool gtk_decoration_minimize;

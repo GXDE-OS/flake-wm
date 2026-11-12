@@ -55,6 +55,8 @@ enum theme_update_mask {
     THEME_UPDATE_MASK_MODAL_MASK_COLOR = 1 << 7,
     /* shadow_color changed */
     THEME_UPDATE_MASK_SHADOW_COLOR = 1 << 8,
+    /* disable_transparency changed */
+    THEME_UPDATE_MASK_TRANSPARENCY = 1 << 9,
 };
 
 struct server;
@@ -97,7 +99,10 @@ struct theme {
 
     float accent_color[4];
     int corner_radius;
-    int opacity; // 0 - 100
+    int opacity; // 0 - 100, always 100 when disable_transparency is set
+    
+    /* Providing "blur+transparency off" mode upon user request. */
+    bool disable_transparency;
 
     enum justification text_justify;
     bool layout_is_right_to_left;
@@ -150,6 +155,10 @@ bool theme_manager_get_force_round_corner(void);
 bool theme_manager_get_force_round_corner_exclude_layer_shell(void);
 
 bool theme_manager_set_opacity(int32_t opacity);
+
+bool theme_manager_set_disable_transparency(bool disabled);
+
+bool theme_manager_get_disable_transparency(void);
 
 struct wlr_buffer *theme_buffer_load(struct theme *theme, float scale, enum theme_buffer_type type,
                                      struct wlr_fbox *src);

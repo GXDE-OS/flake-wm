@@ -195,7 +195,8 @@ static uint32_t theme_init(struct widget_theme *widget)
     }
 
     theme->corner_radius = global->corner_radius;
-    theme->opacity = global->opacity;
+    theme->disable_transparency = global->disable_transparency;
+    theme->opacity = global->disable_transparency ? 100 : global->opacity;
 
     theme->layout_is_right_to_left = nls_layout_is_right_to_left();
     theme->text_is_right_align = nls_text_is_right_align();
@@ -378,6 +379,11 @@ bool theme_manager_set_widget_theme(const char *name, enum theme_type type)
     };
     wl_signal_emit_mutable(&manager->events.update, &update_event);
 
+    if (current->disable_transparency &&
+        (mask & (THEME_UPDATE_MASK_TYPE | THEME_UPDATE_MASK_BACKGROUND_COLOR))) {
+        ky_scene_damage_whole(manager->server->scene);
+    }
+
     return true;
 }
 
@@ -513,15 +519,55 @@ bool theme_manager_set_opacity(int32_t opacity)
     }
 
     global->opacity = opacity;
+    theme_manager_write_config(manager, THEME_TYPE_UNDEFINED);
+    /* stored for when transparency is enabled again, nothing changes on screen */
+    if (global->disable_transparency) {
+        return true;
+    }
+
     theme->opacity = global->opacity;
 
     struct theme_update_event update_event = {
         .update_mask = THEME_UPDATE_MASK_OPACITY,
     };
     wl_signal_emit_mutable(&manager->events.update, &update_event);
+    return true;
+}
+
+bool theme_manager_set_disable_transparency(bool disabled)
+{
+    struct global_theme *global = &manager->global;
+    struct theme *theme = &manager->theme;
+
+    if (global->disable_transparency == disabled) {
+        return true;
+    }
+
+    global->disable_transparency = disabled;
+    theme->disable_transparency = disabled;
+
+    uint32_t mask = THEME_UPDATE_MASK_TRANSPARENCY;
+    int32_t opacity = disabled ? 100 : global->opacity;
+    if (theme->opacity != opacity) {
+        theme->opacity = opacity;
+        mask |= THEME_UPDATE_MASK_OPACITY;
+    }
+
+    struct theme_update_event update_event = {
+        .update_mask = mask,
+    };
+    wl_signal_emit_mutable(&manager->events.update, &update_event);
+    /* every blur region switches between blurred content and the opaque backdrop */
+    ky_scene_damage_whole(manager->server->scene);
 
     theme_manager_write_config(manager, THEME_TYPE_UNDEFINED);
+    config_manager_sync();
     return true;
+}
+
+bool theme_manager_get_disable_transparency(void)
+{
+    return manager && manager->global.disable_transparency;
 }
 
 bool theme_manager_set_icon_theme(const char *icon_theme_name)

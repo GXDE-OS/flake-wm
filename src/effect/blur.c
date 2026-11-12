@@ -27,6 +27,7 @@
 #include "render/opengl.h"
 #include "render/profile.h"
 #include "scene/scene.h"
+#include "theme.h"
 #include "util/time.h"
 
 #define BLUR_STRENGTH_KEY "blur_strength"
@@ -859,9 +860,70 @@ static void get_copy_box(const pixman_region32_t *blur_region, const struct blur
                            : blur_box->y2 - copy_box->y;
 }
 
+static bool transparency_disabled(void)
+{
+    const struct theme *theme = theme_manager_get_theme();
+    return theme && theme->disable_transparency;
+}
+
+/* blur region in render coordinates, or the whole dst_box for an empty region */
+static void get_render_blur_region(struct ky_scene_render_target *target,
+                                   const struct blur_render_options *options,
+                                   pixman_region32_t *blur_region)
+{
+    if (pixman_region32_not_empty(&options->blur->region)) {
+        pixman_region32_init(blur_region);
+        pixman_region32_copy(blur_region, &options->blur->region);
+        pixman_region32_translate(blur_region, options->lx - target->logical.x,
+                                  options->ly - target->logical.y);
+        ky_scene_render_region(blur_region, target);
+    } else {
+        pixman_region32_init_rect(blur_region, options->dst_box->x, options->dst_box->y,
+                                  options->dst_box->width, options->dst_box->height);
+    }
+}
+
+/* When the backdrop is disabled... */
+static void opaque_backdrop_render(struct ky_scene_render_target *target,
+                                   const struct blur_render_options *options)
+{
+    const float *bg = theme_manager_get_theme()->active_bg_color;
+    /* theme colors are premultiplied, the backdrop must stay fully opaque */
+    float r = bg[3] > 0 ? bg[0] / bg[3] : bg[0];
+    float g = bg[3] > 0 ? bg[1] / bg[3] : bg[1];
+    float b = bg[3] > 0 ? bg[2] / bg[3] : bg[2];
+    float alpha = options->alpha ? *options->alpha : 1.0f;
+
+    pixman_region32_t blur_region;
+    get_render_blur_region(target, options, &blur_region);
+    pixman_region32_intersect(&blur_region, &blur_region, options->clip);
+    if (pixman_region32_not_empty(&blur_region)) {
+        struct ky_render_rect_options rect = {
+            .base = {
+                .box = *options->dst_box,
+                .color = { .r = r * alpha, .g = g * alpha, .b = b * alpha, .a = alpha },
+                .clip = &blur_region,
+                /* premultiplied for the anti-aliased round corners */
+                .blend_mode = WLR_RENDER_BLEND_MODE_PREMULTIPLIED,
+            },
+        };
+        if (options->radius) {
+            rect.radius = *options->radius;
+        }
+        ky_render_pass_add_rect(target->render_pass, &rect);
+    }
+    pixman_region32_fini(&blur_region);
+}
+
 void blur_render_with_target(struct ky_scene_render_target *target,
                              const struct blur_render_options *options)
 {
+    if (options->blur && transparency_disabled() &&
+        !(options->alpha && *options->alpha <= 0.0f)) {
+        opaque_backdrop_render(target, options);
+        return;
+    }
+
     if (options->blur == NULL || !blur_config.renderer ||
         !effect_blur_data.effect->effect->enabled || !get_or_generate_blur_text_program() ||
         !get_or_generate_blur_program() || (options->alpha && *options->alpha <= 0.0f)) {
@@ -869,16 +931,7 @@ void blur_render_with_target(struct ky_scene_render_target *target,
     }
 
     pixman_region32_t blur_region;
-    if (pixman_region32_not_empty(&options->blur->region)) {
-        pixman_region32_init(&blur_region);
-        pixman_region32_copy(&blur_region, &options->blur->region);
-        pixman_region32_translate(&blur_region, options->lx - target->logical.x,
-                                  options->ly - target->logical.y);
-        ky_scene_render_region(&blur_region, target);
-    } else {
-        pixman_region32_init_rect(&blur_region, options->dst_box->x, options->dst_box->y,
-                                  options->dst_box->width, options->dst_box->height);
-    }
+    get_render_blur_region(target, options, &blur_region);
 
     pixman_region32_t damaged_blur_region;
     pixman_region32_init(&damaged_blur_region);
@@ -979,6 +1032,12 @@ static bool blur_frame_render_begin(struct effect_entity *entity,
                                     struct ky_scene_render_target *target)
 {
     struct blur_data *data = entity->user_data;
+
+    if (transparency_disabled()) {
+        data->current_output_texture = NULL;
+        data->current_output_data = NULL;
+        return true;
+    }
 
     struct ky_opengl_render_pass *gl_pass =
         ky_opengl_render_pass_from_wlr_render_pass(target->render_pass);
