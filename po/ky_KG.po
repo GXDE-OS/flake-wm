@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kylin-wayland-compositor\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2024-05-20 13:39+0800\n"
+"POT-Creation-Date: 2026-11-11 21:57-0600\n"
 "PO-Revision-Date: 2024-08-16 09:56+0800\n"
 "Last-Translator: yangcanfen <yangcanfen@kylinos.cn>\n"
 "Language-Team: Kirghiz <(nothing)>\n"
@@ -17,98 +17,54 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: src/view/action.c:108
+#: src/view/action.c:125
 msgid "Screenshot"
-msgstr "скриншот алуу"
+msgstr "Скриншот"
 
-#: src/view/action.c:108
+#: src/view/action.c:125
 msgid "Capture saved to"
-msgstr "кармалуу сакталды"
+msgstr "Скриншот сакталган жер"
 
-#: src/view/ssd.c:248
+#: src/view/ssd.c:283 src/view/window_menu.c:184
 msgid "Minimize"
-msgstr "минималдуу"
+msgstr "Кичирейтүү"
 
-#: src/view/ssd.c:249
+#: src/view/ssd.c:284 src/view/window_menu.c:114 src/view/window_menu.c:186
 msgid "Maximize"
-msgstr "максималдуу"
+msgstr "Чоңойтуу"
 
-#: src/view/ssd.c:250
+#: src/view/ssd.c:285 src/view/window_menu.c:114
 msgid "Restore"
-msgstr "калыбына келтирүү"
+msgstr "Калыбына келтирүү"
 
-#: src/view/ssd.c:251
+#: src/view/ssd.c:286 src/view/window_menu.c:200
 msgid "Close"
-msgstr "жакын"
+msgstr "Жабуу"
 
-#: src/view/window_menu.c:184
+#: src/view/window_menu.c:188
+msgid "Move"
+msgstr "Жылдыруу"
+
+#: src/view/window_menu.c:190
+msgid "Resize"
+msgstr "Өлчөмүн өзгөртүү"
+
+#: src/view/window_menu.c:192
+msgid "Always on Top"
+msgstr "Дайыма үстүндө"
+
+#: src/view/window_menu.c:193
+msgid "Always on Visible Workspace"
+msgstr "Дайыма көрүнүүчү иш столунда"
+
+#: src/view/window_menu.c:195
+msgid "Move to Workspace Left"
+msgstr "Сол жактагы иш столуна жылдыруу"
+
+#: src/view/window_menu.c:197
+msgid "Move to Workspace Right"
+msgstr "Оң жактагы иш столуна жылдыруу"
+
+#: src/view/workspace.c:384
 msgid "Desktop"
-msgstr "иш столу"
-
-#: src/view/window_menu.c:214
-msgid "Move To Desktop"
-msgstr "иш столуна өтүү"
-
-#: src/view/window_menu.c:248
-msgid "Screen"
-msgstr "экран"
-
-#: src/view/window_menu.c:342
-msgid "_Take Screenshot"
-msgstr "(_T)скриншот алуу"
-
-#: src/view/window_menu.c:346
-msgid "_Desktop"
-msgstr "(_D)иш столу"
-
-#: src/view/window_menu.c:348
-msgid "_All Desktop"
-msgstr "(_A)бардык иш столу"
-
-#: src/view/window_menu.c:350
-msgid "Add To _New Desktop"
-msgstr "(_N)жаңы иш столуна кошуу"
-
-#: src/view/window_menu.c:353
-msgid "_Move To New Desktop"
-msgstr "(_M)жаңы иш столуна өтүү"
-
-#: src/view/window_menu.c:356
-msgid "Ma_ximize"
-msgstr "(_X)максималдуу"
-
-#: src/view/window_menu.c:360
-msgid "Move To _Screen"
-msgstr "(_S)экранга өтүү"
-
-#: src/view/window_menu.c:363
-msgid "Mi_nimize"
-msgstr "(_N)минималдуу"
-
-#: src/view/window_menu.c:367
-msgid "_More"
-msgstr "(_M)кененирээк"
-
-#: src/view/window_menu.c:369
-msgid "_Move"
-msgstr "(_M)жылдыруу"
-
-#: src/view/window_menu.c:370
-msgid "_Resize"
-msgstr "(_R)дизайн"
-
-#: src/view/window_menu.c:371
-msgid "Keep-_Above"
-msgstr "(_A)жогоруда сактоо"
-
-#: src/view/window_menu.c:373
-msgid "Keep-_Below"
-msgstr "(_B)төмөндө сактоо"
-
-#: src/view/window_menu.c:375
-msgid "_Fullscreen"
-msgstr "(_F)Толук экран"
-
-#: src/view/window_menu.c:378
-msgid "_Close"
-msgstr "(_C)жакын"
+msgstr "Иш столу"

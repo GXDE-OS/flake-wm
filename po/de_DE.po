@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kylin-wayland-compositor\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2024-05-20 13:39+0800\n"
+"POT-Creation-Date: 2026-11-11 21:57-0600\n"
 "PO-Revision-Date: 2024-08-16 09:56+0800\n"
 "Last-Translator: yangcanfen <yangcanfen@kylinos.cn>\n"
 "Language-Team: German <translation-team-de@lists.sourceforge.net>\n"
@@ -18,98 +18,54 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-#: src/view/action.c:108
+#: src/view/action.c:125
 msgid "Screenshot"
 msgstr "Bildschirmfoto"
 
-#: src/view/action.c:108
+#: src/view/action.c:125
 msgid "Capture saved to"
 msgstr "Bildschirmfoto wurde gespeichert unter"
 
-#: src/view/ssd.c:248
+#: src/view/ssd.c:283 src/view/window_menu.c:184
 msgid "Minimize"
 msgstr "Minimieren"
 
-#: src/view/ssd.c:249
+#: src/view/ssd.c:284 src/view/window_menu.c:114 src/view/window_menu.c:186
 msgid "Maximize"
 msgstr "Maximieren"
 
-#: src/view/ssd.c:250
+#: src/view/ssd.c:285 src/view/window_menu.c:114
 msgid "Restore"
 msgstr "Wiederherstellen"
 
-#: src/view/ssd.c:251
+#: src/view/ssd.c:286 src/view/window_menu.c:200
 msgid "Close"
 msgstr "Schließen"
 
-#: src/view/window_menu.c:184
+#: src/view/window_menu.c:188
+msgid "Move"
+msgstr "Verschieben"
+
+#: src/view/window_menu.c:190
+msgid "Resize"
+msgstr "Größe ändern"
+
+#: src/view/window_menu.c:192
+msgid "Always on Top"
+msgstr "Immer im Vordergrund"
+
+#: src/view/window_menu.c:193
+msgid "Always on Visible Workspace"
+msgstr "Immer auf sichtbarer Arbeitsfläche"
+
+#: src/view/window_menu.c:195
+msgid "Move to Workspace Left"
+msgstr "Auf linke Arbeitsfläche verschieben"
+
+#: src/view/window_menu.c:197
+msgid "Move to Workspace Right"
+msgstr "Auf rechte Arbeitsfläche verschieben"
+
+#: src/view/workspace.c:384
 msgid "Desktop"
 msgstr "Arbeitsfläche"
-
-#: src/view/window_menu.c:214
-msgid "Move To Desktop"
-msgstr "Auf Arbeitsfläche verschieben"
-
-#: src/view/window_menu.c:248
-msgid "Screen"
-msgstr "Bildschirm"
-
-#: src/view/window_menu.c:342
-msgid "_Take Screenshot"
-msgstr "Bildschirmfo_to"
-
-#: src/view/window_menu.c:346
-msgid "_Desktop"
-msgstr "Arbeitsfläche(_D)"
-
-#: src/view/window_menu.c:348
-msgid "_All Desktop"
-msgstr "_Alle Arbeitsflächen"
-
-#: src/view/window_menu.c:350
-msgid "Add To _New Desktop"
-msgstr "Zur _neuen Arbeitsfläche hinzufügen"
-
-#: src/view/window_menu.c:353
-msgid "_Move To New Desktop"
-msgstr "Auf neue Arbeitsfläche verschieben(_M)"
-
-#: src/view/window_menu.c:356
-msgid "Ma_ximize"
-msgstr "Ma_ximieren"
-
-#: src/view/window_menu.c:360
-msgid "Move To _Screen"
-msgstr "Auf Bild_schirm verschieben"
-
-#: src/view/window_menu.c:363
-msgid "Mi_nimize"
-msgstr "Mi_nimieren"
-
-#: src/view/window_menu.c:367
-msgid "_More"
-msgstr "Weitere Aktionen(_M)"
-
-#: src/view/window_menu.c:369
-msgid "_Move"
-msgstr "Verschieben(_M)"
-
-#: src/view/window_menu.c:370
-msgid "_Resize"
-msgstr "Fenste_rgröße ändern"
-
-#: src/view/window_menu.c:371
-msgid "Keep-_Above"
-msgstr "Im Vordergrund h_alten"
-
-#: src/view/window_menu.c:373
-msgid "Keep-_Below"
-msgstr "Im Hintergrund halten(_B)"
-
-#: src/view/window_menu.c:375
-msgid "_Fullscreen"
-msgstr "Vollbild(_F)"
-
-#: src/view/window_menu.c:378
-msgid "_Close"
-msgstr "S_chließen"

@@ -1,0 +1,70 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the flakewm package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: flakewm\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-11 21:57-0600\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=CHARSET\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: src/view/action.c:125
+msgid "Screenshot"
+msgstr ""
+
+#: src/view/action.c:125
+msgid "Capture saved to"
+msgstr ""
+
+#: src/view/ssd.c:283 src/view/window_menu.c:184
+msgid "Minimize"
+msgstr ""
+
+#: src/view/ssd.c:284 src/view/window_menu.c:114 src/view/window_menu.c:186
+msgid "Maximize"
+msgstr ""
+
+#: src/view/ssd.c:285 src/view/window_menu.c:114
+msgid "Restore"
+msgstr ""
+
+#: src/view/ssd.c:286 src/view/window_menu.c:200
+msgid "Close"
+msgstr ""
+
+#: src/view/window_menu.c:188
+msgid "Move"
+msgstr ""
+
+#: src/view/window_menu.c:190
+msgid "Resize"
+msgstr ""
+
+#: src/view/window_menu.c:192
+msgid "Always on Top"
+msgstr ""
+
+#: src/view/window_menu.c:193
+msgid "Always on Visible Workspace"
+msgstr ""
+
+#: src/view/window_menu.c:195
+msgid "Move to Workspace Left"
+msgstr ""
+
+#: src/view/window_menu.c:197
+msgid "Move to Workspace Right"
+msgstr ""
+
+#: src/view/workspace.c:384
+msgid "Desktop"
+msgstr ""
