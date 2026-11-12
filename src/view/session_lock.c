@@ -97,8 +97,9 @@ static int handle_lock_recovery_timer(void *data)
     ++lock_manager->recovery_attempts;
     kywc_log(KYWC_WARN, "requesting a replacement session locker (attempt %u/%u)",
              lock_manager->recovery_attempts, LOCK_RECOVERY_MAX_ATTEMPTS);
-    if (!dbus_call_method("top.gxde.DisplayManager", "/top/gxde/DisplayManager",
-                          "top.gxde.DisplayManager", "Show", NULL, NULL)) {
+    /* gxde-lock, D-Bus activated through its guard if it is not running. */
+    if (!dbus_call_method("top.gxde.Lock", "/top/gxde/Lock", "top.gxde.Lock", "Show", NULL,
+                          NULL)) {
         kywc_log(KYWC_ERROR, "failed to request a replacement session locker over D-Bus");
     }
 
